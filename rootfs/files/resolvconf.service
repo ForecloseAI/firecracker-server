@@ -15,7 +15,9 @@ Before=network.target xvfb.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions single-request-reopen\n" > /etc/resolv.conf'
-ExecStart=/bin/sh -c 'printf "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n" "$(hostname)" > /etc/hosts'
+# No printf %s here: systemd expands % specifiers in ExecStart before sh sees
+# them, and %s is the user shell -- it produced "127.0.1.1 /usr/bin/bash".
+ExecStart=/bin/sh -c 'printf "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t$(hostname)\n" > /etc/hosts'
 
 [Install]
 WantedBy=multi-user.target
