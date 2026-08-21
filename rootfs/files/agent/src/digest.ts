@@ -14,12 +14,15 @@ const KEEP_FILES = 20;
 
 let seq = 0;
 
-/** Flatten an MCP tool response into the text the model would have seen. */
+/** Flatten an MCP tool response into the text the model would have seen.
+ *  Observed shape from chrome-devtools-mcp is a bare content-block ARRAY, not
+ *  {content:[...]}; getting this wrong silently JSON-stringifies the whole
+ *  envelope and the digest ends up full of escape sequences. */
 function asText(response: unknown): string {
   if (typeof response === "string") return response;
-  const content = (response as { content?: unknown })?.content;
-  if (Array.isArray(content)) {
-    return content.map((b) => (b as { text?: string })?.text ?? JSON.stringify(b)).join("\n");
+  const blocks = Array.isArray(response) ? response : (response as { content?: unknown })?.content;
+  if (Array.isArray(blocks)) {
+    return blocks.map((b) => (b as { text?: string })?.text ?? JSON.stringify(b)).join("\n");
   }
   return JSON.stringify(response ?? "");
 }
@@ -72,15 +75,28 @@ export async function snapshotToFile(input: unknown): Promise<Record<string, unk
   try {
     const path = writeSnapshot(text);
     rotate();
-    return hookOutput(buildDigest(text, path));
+    const original = (input as { tool_response?: unknown })?.tool_response;
+    return hookOutput(reshape(original, buildDigest(text, path)));
   } catch (err) {
     logFailure(err);
     return {}; // leave the original result alone rather than lose the snapshot
   }
 }
 
-/** Wrap replacement text in the shape the SDK expects. */
-function hookOutput(updatedToolOutput: string): Record<string, unknown> {
+/** Rebuild the replacement in the SAME shape as the original response.
+ *  Returning a bare string where the tool returned content blocks is silently
+ *  ignored: the file gets written but history keeps the full snapshot. */
+function reshape(original: unknown, text: string): unknown {
+  if (typeof original === "string") return text;
+  if (Array.isArray(original)) return [{ type: "text", text }];
+  if (Array.isArray((original as { content?: unknown })?.content)) {
+    return { ...(original as object), content: [{ type: "text", text }] };
+  }
+  return text;
+}
+
+/** Wrap the replacement in the shape the SDK expects. */
+function hookOutput(updatedToolOutput: unknown): Record<string, unknown> {
   return { hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput } };
 }
 
