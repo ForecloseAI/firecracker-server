@@ -79,6 +79,7 @@ const BROWSER_TOOLS = [
 // entirely, so Bash, Write and Edit are deliberately absent: they must reach the
 // gate, which then allows all but the destructive ones.
 const AUTO_ALLOWED = ["Read", "Glob", "Grep"];
+const GATED = ["Bash", "Write", "Edit"];
 
 let queue: MessageQueue | null = null;
 let running: { interrupt: () => Promise<unknown> } | null = null;
@@ -128,9 +129,15 @@ function saveSessionId(id: string): void {
 /** Build the SDK options, including the browser MCP server and the gate. */
 function buildOptions(resume: string | undefined): Record<string, unknown> {
   return {
-    model: process.env.CRACKED_MODEL ?? "claude-opus-5",
+    model: process.env.CRACKED_MODEL ?? "claude-sonnet-5",
     cwd: "/home/agent/workspace",
     systemPrompt: SYSTEM_PROMPT,
+    // `tools` restricts what EXISTS; `allowedTools` only decides what runs
+    // without prompting. Without this the SDK loads ~25 built-ins we never use
+    // (Task, TodoWrite, NotebookEdit, ToolSearch...), which measured as two
+    // thirds of the fixed per-turn prefix: 54 tools and 18,843 tokens, against
+    // 28 tools and 10,054 tokens with it.
+    tools: [...AUTO_ALLOWED, ...GATED, "mcp__chrome"],
     allowedTools: [...AUTO_ALLOWED, ...BROWSER_TOOLS.map((t) => `mcp__chrome__${t}`)],
     disallowedTools: ["WebFetch", "WebSearch"],
     mcpServers: { chrome: chromeServerConfig() },
@@ -145,8 +152,12 @@ function chromeServerConfig(): Record<string, unknown> {
   return {
     type: "stdio",
     command: "node",
-    args: [process.env.CRACKED_CDP_MCP ?? "/opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
-           "--browserUrl", CDP_URL],
+    args: [
+      process.env.CRACKED_CDP_MCP ?? "/opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
+      "--browserUrl", CDP_URL,
+      // Dead weight for this agent, and their schemas are charged every turn.
+      "--no-category-performance", "--no-category-network", "--no-category-emulation",
+    ],
   };
 }
 
