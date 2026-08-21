@@ -38,6 +38,10 @@ COPY files/resolvconf.service files/xvfb.service files/x11vnc.service \
      files/agent.service /etc/systemd/system/
 RUN chmod 0755 /sbin/overlay-init
 
+# The Agent SDK ships one native binary per platform as optionalDependencies.
+# npm installs BOTH linux-x64 and linux-x64-musl because both match this
+# platform, and the musl one is 318MB of dead weight on glibc Ubuntu.
+#
 # chrome-devtools-mcp runs on puppeteer-core, which downloads no browser, so the
 # image keeps exactly one Chrome (the .deb above). This env var is the guard: if
 # a future version switches to full puppeteer it fails here instead of silently
@@ -50,6 +54,7 @@ RUN cd /opt/agent \
  && npm install --no-save --no-audit --no-fund typescript @types/node \
  && ./node_modules/.bin/tsc -p tsconfig.json \
  && rm -rf /opt/agent/node_modules/typescript /opt/agent/node_modules/@types \
+ && rm -rf /opt/agent/node_modules/@anthropic-ai/*-musl \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
 
