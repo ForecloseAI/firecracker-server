@@ -15,8 +15,10 @@ vet:
 fmt:
 	gofmt -l -w .
 
+# Only the copy needs root. Keeping `go build` unprivileged matters: sudo resets
+# PATH, so a fully-elevated build would not find /usr/local/go/bin/go.
 install: build
-	install -m 0755 bin/$(BIN) /usr/local/bin/$(BIN)
+	sudo install -m 0755 bin/$(BIN) /usr/local/bin/$(BIN)
 
 clean:
 	rm -rf bin
