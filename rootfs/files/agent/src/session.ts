@@ -14,6 +14,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import * as events from "./events.js";
 import * as gate from "./gate.js";
+import * as digest from "./digest.js";
 
 const STATE = process.env.CRACKED_SESSION_FILE ?? "/home/agent/agent-state/session.json";
 const CDP_URL = "http://127.0.0.1:9222";
@@ -142,8 +143,16 @@ function buildOptions(resume: string | undefined): Record<string, unknown> {
     disallowedTools: ["WebFetch", "WebSearch"],
     mcpServers: { chrome: chromeServerConfig() },
     canUseTool: (tool: string, input: Record<string, unknown>) => gate.canUseTool(tool, input),
+    hooks: buildHooks(),
     resume,
     includePartialMessages: false,
+  };
+}
+
+/** Redirect fat snapshots to disk before they enter history. See digest.ts. */
+function buildHooks(): Record<string, unknown> {
+  return {
+    PostToolUse: [{ matcher: "mcp__chrome__take_snapshot", hooks: [digest.snapshotToFile] }],
   };
 }
 
@@ -167,9 +176,21 @@ export async function start(): Promise<void> {
   const resume = loadSessionId();
   const q = query({ prompt: queue.stream() as never, options: buildOptions(resume) as never });
   running = q as never;
+  await enableCompaction(q as never);
   state = "idle";
   events.append("ready", { resumed: Boolean(resume) });
   void pump(q as AsyncGenerator<Record<string, unknown>>);
+}
+
+/** Bound history growth. The explicit window is the point: Sonnet 5 has a 1M
+ *  context, so the default threshold would not fire until a session had already
+ *  cost a fortune to re-read. This is a ceiling, not a target. */
+async function enableCompaction(q: { applyFlagSettings?: (s: Record<string, unknown>) => Promise<void> }): Promise<void> {
+  try {
+    await q.applyFlagSettings?.({ autoCompactEnabled: true, autoCompactWindow: 300_000 });
+  } catch (err) {
+    events.append("error", { message: `could not enable autocompaction: ${String(err)}` });
+  }
 }
 
 /** Translate SDK messages into SSE events. Never throws into the caller. */
