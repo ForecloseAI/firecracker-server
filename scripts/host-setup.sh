@@ -7,7 +7,6 @@ USER_NAME="${CRACKED_USER:-cracked}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"
 KERNEL_VERSION="${KERNEL_VERSION:-6.18}"
 GUEST_CIDR="172.16.0.0/16"
-VPC_CIDR="${VPC_CIDR:-10.0.0.0/8}"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root"; exit 1; }
 
@@ -146,8 +145,13 @@ setup_firewall() {
   # CRITICAL: firecracker does zero traffic filtering. A compromised guest must
   # not reach IMDS and steal the instance role credentials.
   iptables-nft -A CRACKED_FWD -d 169.254.0.0/16 -j DROP   # link-local, incl. IMDS
-  iptables-nft -A CRACKED_FWD -d "$GUEST_CIDR"  -j DROP   # VM-to-VM isolation
-  iptables-nft -A CRACKED_FWD -d "$VPC_CIDR"    -j DROP   # VPC internals
+  # Deny every private range rather than guessing one VPC CIDR. This covers
+  # VM-to-VM (172.16/16), the VPC itself (commonly 172.31/16 on default VPCs,
+  # NOT 10/8), and docker0 (172.17/16). Guests only ever need public internet,
+  # so allow-by-exception is both simpler and safer than enumerating.
+  iptables-nft -A CRACKED_FWD -d 10.0.0.0/8     -j DROP
+  iptables-nft -A CRACKED_FWD -d 172.16.0.0/12  -j DROP
+  iptables-nft -A CRACKED_FWD -d 192.168.0.0/16 -j DROP
   iptables-nft -A CRACKED_FWD -j ACCEPT
 
   # FORWARD does not cover traffic addressed to the host itself: without this a
