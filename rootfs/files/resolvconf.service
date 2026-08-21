@@ -1,8 +1,12 @@
 [Unit]
-Description=Write static resolv.conf
-# systemd-resolved is masked and both Amazon resolvers sit inside firewalled
-# ranges, so DNS is written here at boot rather than baked into the image
-# (Docker bind-mounts /etc/resolv.conf during build, discarding any RUN echo).
+Description=Write static resolv.conf and hosts
+# Docker bind-mounts BOTH /etc/resolv.conf and /etc/hosts during build, so
+# anything written to them in a RUN layer is discarded -- the image ships them
+# as 0-byte files. They must therefore be written at boot.
+#
+# /etc/hosts is not optional: without it "localhost" does not resolve at all
+# (nsswitch is "files dns", and no DNS server answers for localhost), so every
+# service targeting localhost fails. That is what breaks websockify -> x11vnc.
 DefaultDependencies=no
 After=systemd-remount-fs.service
 Before=network.target xvfb.service
@@ -11,6 +15,7 @@ Before=network.target xvfb.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions single-request-reopen\n" > /etc/resolv.conf'
+ExecStart=/bin/sh -c 'printf "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n" "$(hostname)" > /etc/hosts'
 
 [Install]
 WantedBy=multi-user.target

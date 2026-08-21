@@ -6,7 +6,8 @@ Requires=x11vnc.service
 [Service]
 # Serves both the static noVNC assets and /websockify on one port, so a single
 # host proxy route covers the whole VNC surface.
-ExecStart=/usr/bin/websockify --web /usr/share/novnc 6080 localhost:5900
+# Literal IP, not "localhost": do not depend on name resolution for a loopback hop.
+ExecStart=/usr/bin/websockify --web /usr/share/novnc 6080 127.0.0.1:5900
 Restart=always
 RestartSec=1
 
