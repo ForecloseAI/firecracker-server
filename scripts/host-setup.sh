@@ -11,6 +11,18 @@ VPC_CIDR="${VPC_CIDR:-10.0.0.0/8}"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root"; exit 1; }
 
+# --- 0. Dependencies ----------------------------------------------------------
+# jq and netfilter-persistent are NOT on the stock Ubuntu server AMI, and this
+# script needs both. iptables-persistent prompts interactively unless preseeded.
+install_deps() {
+  export DEBIAN_FRONTEND=noninteractive
+  echo iptables-persistent iptables-persistent/autosave_v4 boolean false | debconf-set-selections
+  echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
+  apt-get update -qq
+  apt-get install -y -qq jq curl iptables iptables-persistent e2fsprogs iproute2
+  echo "dependencies installed"
+}
+
 # --- 1. Nested virtualisation gate --------------------------------------------
 # m7i supports KVM as of the June 2026 nested-virt launch, but it is OPT-IN.
 check_kvm() {
@@ -157,6 +169,7 @@ LIMITS
   echo "nofile limit raised"
 }
 
+install_deps
 check_kvm
 setup_user
 setup_dirs
