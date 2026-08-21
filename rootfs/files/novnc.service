@@ -1,0 +1,14 @@
+[Unit]
+Description=noVNC websocket bridge
+After=x11vnc.service
+Requires=x11vnc.service
+
+[Service]
+# Serves both the static noVNC assets and /websockify on one port, so a single
+# host proxy route covers the whole VNC surface.
+ExecStart=/usr/bin/websockify --web /usr/share/novnc 6080 localhost:5900
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

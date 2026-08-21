@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent runtime
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=agent
+Environment=DISPLAY=:0
+Environment=HOME=/home/agent
+ExecStart=/usr/bin/python3 /usr/local/bin/agent.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

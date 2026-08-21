@@ -1,0 +1,14 @@
+[Unit]
+Description=Export display :0 over VNC
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+# -localhost binds 5900 to loopback: the only route in is websockify on 6080,
+# which is itself only reachable through the host proxy's bearer gate.
+ExecStart=/usr/bin/x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -localhost
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

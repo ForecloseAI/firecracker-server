@@ -1,0 +1,32 @@
+[Unit]
+Description=Firecracker microVM control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cracked
+SupplementaryGroups=kvm
+# CAP_NET_ADMIN is for tap creation only; all firewall rules are installed once
+# by host-setup.sh, so the server never touches iptables and never needs root.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# firecracker opens 20+ file descriptors per VM.
+LimitNOFILE=65536
+TasksMax=4096
+
+Environment=CRACKED_BASE=/var/lib/cracked
+Environment=CRACKED_USER=cracked
+# Set the token via `systemctl edit cracked`, not here.
+# Environment=CRACKED_TOKEN=
+
+ExecStart=/usr/local/bin/cracked -addr :8080
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NO MemoryMax: firecracker children share this unit's cgroup, so
+# a limit here would cap the VMs' combined RAM and trigger cgroup OOM kills.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Write static resolv.conf
+# systemd-resolved is masked and both Amazon resolvers sit inside firewalled
+# ranges, so DNS is written here at boot rather than baked into the image
+# (Docker bind-mounts /etc/resolv.conf during build, discarding any RUN echo).
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=network.target xvfb.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions single-request-reopen\n" > /etc/resolv.conf'
+
+[Install]
+WantedBy=multi-user.target

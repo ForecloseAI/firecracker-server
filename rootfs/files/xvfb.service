@@ -1,0 +1,14 @@
+[Unit]
+Description=Xvfb virtual framebuffer on :0
+After=resolvconf.service
+
+[Service]
+# -ac disables X access control so the agent user can connect to a display
+# started by root. Safe here: the microVM is the security boundary and
+# x11vnc binds -localhost, so :0 is not reachable from off the VM.
+ExecStart=/usr/bin/Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp -ac
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
