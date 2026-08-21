@@ -13,7 +13,16 @@ trap 'sudo rm -rf "$WORK"' EXIT
 
 sudo mkdir -p "$BASE/images"
 
-docker build -t cracked-rootfs "$HERE/rootfs"
+# TODO(security): baking the key into the image means every VM shares it and
+# anything in the guest can read it. Replace with a host token-broker before any
+# public release. See the TODO in rootfs/Dockerfile.
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "WARN: ANTHROPIC_API_KEY is unset; the agent will not be able to run."
+  echo "      Re-run as: ANTHROPIC_API_KEY=sk-ant-... $0"
+fi
+docker build -t cracked-rootfs \
+  --build-arg "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+  "$HERE/rootfs"
 CID="$(docker create cracked-rootfs)"
 trap 'docker rm -f "$CID" >/dev/null 2>&1 || true; sudo rm -rf "$WORK"' EXIT
 

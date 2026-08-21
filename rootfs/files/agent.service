@@ -1,13 +1,16 @@
 [Unit]
 Description=Agent runtime
-After=xvfb.service
+After=chrome.service
 Requires=xvfb.service
 
 [Service]
 User=agent
 Environment=DISPLAY=:0
 Environment=HOME=/home/agent
-ExecStart=/usr/bin/python3 /usr/local/bin/agent.py
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/cracked-agent.env
+WorkingDirectory=/opt/agent
+ExecStart=/usr/bin/node /opt/agent/dist/main.js
 Restart=always
 RestartSec=2
 

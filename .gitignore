@@ -1,3 +1,5 @@
 bin/
 __pycache__/
 *.pyc
+rootfs/files/agent/node_modules/
+rootfs/files/agent/dist/

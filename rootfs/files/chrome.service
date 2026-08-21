@@ -1,0 +1,39 @@
+[Unit]
+Description=Chrome on display :0
+After=openbox.service
+Requires=xvfb.service
+
+[Service]
+User=agent
+Environment=DISPLAY=:0
+Environment=HOME=/home/agent
+# --user-data-dir is NOT the default path on purpose. Since Chrome 136,
+# --remote-debugging-port is silently ignored on the default profile dir: the
+# port accepts connections, /json/version 404s, and DevToolsActivePort is never
+# written. This path is non-default but persisted (it sits on the /dev/vdb
+# overlay), so logins survive delete and recreate.
+# --password-store=basic pins plaintext os_crypt. The VM has no keyring today so
+# Chrome falls back to it anyway, but a future apt install could pull one in and
+# silently make every existing profile undecryptable.
+ExecStart=/usr/bin/google-chrome \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --user-data-dir=/home/agent/chrome-profile \
+  --password-store=basic \
+  --remote-debugging-port=9222 \
+  --remote-debugging-address=127.0.0.1 \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-features=Translate,MediaRouter \
+  --start-maximized \
+  about:blank
+# Chrome must exit cleanly or the profile's LevelDB tears mid-write and saved
+# logins are lost. The host teardown ladder allows 20s for this.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

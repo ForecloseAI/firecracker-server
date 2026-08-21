@@ -12,7 +12,10 @@ import (
 
 // Teardown ladder budgets.
 const (
-	gracefulWait = 10 * time.Second
+	// 20s, not 10: the guest must stop Chrome cleanly inside this window or its
+	// profile LevelDB tears mid-write and saved logins are lost. Normal shutdown
+	// is ~2s, so the extra budget only applies to VMs that are already hanging.
+	gracefulWait = 20 * time.Second
 	termWait     = 5 * time.Second
 	killWait     = 2 * time.Second
 )

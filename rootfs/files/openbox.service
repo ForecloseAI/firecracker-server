@@ -1,0 +1,15 @@
+[Unit]
+Description=Openbox window manager on display :0
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=agent
+Environment=DISPLAY=:0
+Environment=HOME=/home/agent
+ExecStart=/usr/bin/openbox
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
