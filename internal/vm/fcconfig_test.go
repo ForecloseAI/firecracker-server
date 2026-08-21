@@ -43,7 +43,10 @@ func TestBootArgsOmitsTraps(t *testing.T) {
 	if hasToken(args, "root=") {
 		t.Errorf("boot_args must not set root=; firecracker appends it: %s", args)
 	}
-	for _, banned := range []string{"pci=off", "i8042.dumbkbd", "i8042.nokbd"} {
+	// i8042.nopnp makes the controller probe fail, leaving the guest with no
+	// keyboard, so SendCtrlAltDel becomes a silent no-op and teardown always
+	// degrades to SIGTERM.
+	for _, banned := range []string{"pci=off", "i8042.dumbkbd", "i8042.nokbd", "i8042.nopnp"} {
 		if strings.Contains(args, banned) {
 			t.Errorf("boot_args must not contain %q: %s", banned, args)
 		}

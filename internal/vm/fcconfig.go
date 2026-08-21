@@ -45,11 +45,22 @@ type netIface struct {
 }
 
 // bootArgs builds the kernel command line. Deliberately absent: root= (which
-// firecracker appends itself from the root drive), pci=off, and i8042.dumbkbd
-// or nokbd, either of which would break SendCtrlAltDel.
+// firecracker appends itself from the root drive), pci=off, i8042.dumbkbd and
+// i8042.nokbd (either breaks SendCtrlAltDel), and i8042.nopnp.
+//
+// i8042.nopnp is the subtle one. It is widely recommended as a boot-time saving
+// and does not obviously touch the keyboard, but on this kernel it makes the
+// controller probe fail outright:
+//
+//	i8042: PNP detection disabled
+//	i8042 i8042: probe with driver i8042 failed with error -22
+//
+// The guest then has no input device, so SendCtrlAltDel is delivered to nothing
+// and every teardown silently falls through to SIGTERM. That loses unflushed
+// guest writes, which is how a persisted Chrome profile gets corrupted.
 func bootArgs(v *VM) string {
 	ip := fmt.Sprintf("ip=%s::%s:%s::eth0:off", v.GuestIP, v.HostIP, hostnet.Mask)
-	return "console=ttyS0 reboot=k panic=1 i8042.noaux i8042.nomux i8042.nopnp " +
+	return "console=ttyS0 reboot=k panic=1 i8042.noaux i8042.nomux " +
 		"random.trust_cpu=on " + ip + " init=/sbin/overlay-init overlay_root=vdb"
 }
 
