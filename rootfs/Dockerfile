@@ -20,6 +20,12 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && mkdir -p /home/agent/Downloads /home/agent/workspace /home/agent/.config \
  && chown -R agent:agent /home/agent
 
+# overlay-init mounts /dev/vdb on /overlay and pivots with the old root at /rom.
+# Both must EXIST in the image: mount(8) does not create its mountpoint, and the
+# root is read-only at that stage so the script cannot mkdir them itself. Without
+# these the overlay silently fails and the VM boots read-only but "healthy".
+RUN mkdir -p /overlay /rom
+
 COPY files/overlay-init /sbin/overlay-init
 COPY files/agent.py     /usr/local/bin/agent.py
 COPY files/resolvconf.service files/xvfb.service files/x11vnc.service \
