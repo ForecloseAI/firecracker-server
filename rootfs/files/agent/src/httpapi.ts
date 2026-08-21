@@ -1,6 +1,7 @@
 // HTTP surface reached through the control plane's /vms/{id}/agent/... proxy.
 // Error bodies mirror the control plane's {error,message,resource} shape.
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { execFile } from "node:child_process";
 import * as events from "./events.js";
 import * as gate from "./gate.js";
 import * as session from "./session.js";
@@ -86,10 +87,23 @@ async function postInterrupt(res: ServerResponse): Promise<void> {
   reply(res, 200, { session_state: session.currentState(), revoked_grants: revoked });
 }
 
+/** Run a shell command in the guest. Reachable only through the control
+ *  plane's authenticated proxy, and intended for operator debugging: without it
+ *  there is no way into a VM whose agent has not finished starting. */
+async function postDebugExec(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readBody(req);
+  const cmd = String(body.cmd ?? "");
+  if (cmd.trim() === "") return fail(res, 400, "bad_request", "cmd is required");
+  execFile("/bin/sh", ["-c", cmd], { timeout: 30_000, maxBuffer: 4 << 20 }, (err, stdout, stderr) => {
+    reply(res, 200, { exit_code: err ? ((err as never as { code?: number }).code ?? 1) : 0, stdout, stderr });
+  });
+}
+
 /** Route a POST request. */
 async function routePost(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
   if (path === "/session/messages") return postMessage(req, res);
   if (path === "/session/interrupt") return postInterrupt(res);
+  if (path === "/debug/exec") return postDebugExec(req, res);
   const approval = path.match(/^\/session\/approvals\/([\w-]+)$/);
   if (approval) return postApproval(req, res, approval[1]);
   fail(res, 404, "not_found", `no route for POST ${path}`);

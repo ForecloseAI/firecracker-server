@@ -7,6 +7,11 @@ Requires=xvfb.service
 User=agent
 Environment=DISPLAY=:0
 Environment=HOME=/home/agent
+# Chrome wants a runtime dir; without one it emits errors and can fail to start
+# under a system unit that has no user session.
+Environment=XDG_RUNTIME_DIR=/run/agent-runtime
+RuntimeDirectory=agent-runtime
+RuntimeDirectoryMode=0700
 # --user-data-dir is NOT the default path on purpose. Since Chrome 136,
 # --remote-debugging-port is silently ignored on the default profile dir: the
 # port accepts connections, /json/version 404s, and DevToolsActivePort is never
@@ -32,6 +37,10 @@ ExecStart=/usr/bin/google-chrome \
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=5
+# Chrome's stderr goes to the serial console so the host can read boot failures
+# out of run/<vm>/console.log. The console writer is size-capped host-side.
+StandardOutput=journal+console
+StandardError=journal+console
 Restart=always
 RestartSec=3
 
