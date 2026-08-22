@@ -41,14 +41,23 @@ func (r *Registry) Refresh(v *VM) {
 	if s := r.Snapshot(v); s != StateRunning && s != StatePaused {
 		return
 	}
+	_, _ = r.Inspect(v)
+}
+
+// Inspect reconciles our record like Refresh but hands back firecracker's
+// reply, so a caller that wants to display it does not pay a second round
+// trip. The API allows only 10 concurrent connections, so halving the calls
+// on a polled page is worth the extra method.
+func (r *Registry) Inspect(v *VM) (*fc.InstanceInfo, error) {
 	info, err := fc.New(r.dirs.Sock(v.ID)).Describe()
 	if err != nil {
-		return
+		return nil, err
 	}
 	want := map[string]State{"Running": StateRunning, "Paused": StatePaused}
 	if to, ok := want[info.State]; ok {
 		_ = r.SetState(v, to)
 	}
+	return info, nil
 }
 
 // View renders a VM for the API, including the URLs a client needs.

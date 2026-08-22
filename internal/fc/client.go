@@ -18,11 +18,26 @@ type Client struct {
 }
 
 // New builds a client whose transport dials the given unix socket path.
+//
+// Keep-alives are OFF deliberately. Callers build a Client per operation, so
+// every call would otherwise leave its connection parked in that Transport's
+// idle pool, closed only whenever GC gets around to finalising it. Firecracker
+// caps its API at 10 concurrent connections, so anything polling faster than
+// GC reclaims -- the dashboard refreshes every 3s per VM -- wedges the socket
+// at "Too many open connections". That is not cosmetic: Pause, Resume and the
+// SendCtrlAltDel that starts a graceful teardown all stop working, so shutdown
+// degrades to SIGKILL and tears Chrome's profile mid-write.
+//
+// These calls are infrequent and sequential, so reusing a connection buys
+// nothing and costs a scarce resource.
 func New(sockPath string) *Client {
 	d := &net.Dialer{Timeout: 2 * time.Second}
-	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return d.DialContext(ctx, "unix", sockPath)
-	}}
+	tr := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, "unix", sockPath)
+		},
+	}
 	return &Client{http: &http.Client{Transport: tr, Timeout: 5 * time.Second}}
 }
 

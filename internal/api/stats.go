@@ -119,14 +119,14 @@ func (s *Server) handleVMStats(w http.ResponseWriter, r *http.Request) {
 		writeVMErr(w, err)
 		return
 	}
-	s.reg.Refresh(v)
-	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}}
+	// Inspect, not Refresh plus a second Describe: one firecracker round trip.
+	// It returns nil on failure, and the field is omitempty, so a wedged or
+	// gone socket simply drops out of the payload.
+	info, _ := s.reg.Inspect(v)
+	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}, Firecracker: info}
 	s.probeGuest(&d.vmStats, v.ID)
 	_, d.Events = s.usage.Snapshot(v.ID)
 	d.ConsoleTail = tailFile(s.reg.Layout().Console(v.ID), consoleTailBytes)
-	if info, err := fc.New(s.reg.Layout().Sock(v.ID)).Describe(); err == nil {
-		d.Firecracker = info
-	}
 	writeJSON(w, http.StatusOK, d)
 }
 
