@@ -141,6 +141,9 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeVMErr(w, err)
 		return
 	}
+	// Drop the usage watermark too: a ?purge=true recreate resets the guest's
+	// event log to id 1, and a stale high watermark would skip it entirely.
+	s.usage.Forget(v.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": v.ID, "purged": purge})
 }
 

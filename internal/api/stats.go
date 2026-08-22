@@ -1,0 +1,161 @@
+package api
+
+import (
+	_ "embed"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"sync"
+
+	"cracked/internal/agent"
+	"cracked/internal/fc"
+	"cracked/internal/hoststat"
+	"cracked/internal/vm"
+)
+
+// consoleTailBytes is how much serial output the detail view shows. The whole
+// log is capped at 4 MiB on disk, which is far more than anyone reads.
+const consoleTailBytes = 8 << 10
+
+//go:embed static/dashboard.html
+var dashboardHTML []byte
+
+// agentStatus is what a guest agent reported, or why it could not be reached.
+type agentStatus struct {
+	Reachable    bool   `json:"reachable"`
+	Ready        bool   `json:"ready"`
+	SessionState string `json:"session_state,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// vmStats is one dashboard row: host resource usage plus the guest agent's
+// state and lifetime spend.
+type vmStats struct {
+	vm.Stats
+	Agent agentStatus  `json:"agent"`
+	Usage agent.Totals `json:"usage"`
+}
+
+// fleet is the whole-host snapshot. /stats returns it and /metrics renders it.
+type fleet struct {
+	Host     hoststat.Host `json:"host"`
+	Capacity vm.Capacity   `json:"capacity"`
+	VMs      []vmStats     `json:"vms"`
+	Totals   agent.Totals  `json:"totals"`
+}
+
+// vmDetail is the peek-inside payload: a fleet row plus everything only worth
+// fetching one VM at a time.
+type vmDetail struct {
+	vmStats
+	Firecracker *fc.InstanceInfo `json:"firecracker,omitempty"`
+	ConsoleTail string           `json:"console_tail"`
+	Events      []agent.Event    `json:"events"`
+}
+
+// collect gathers one snapshot of the whole host. Every read surface renders
+// from this, so /stats, /vms/{id}/stats and /metrics cannot drift apart.
+func (s *Server) collect() fleet {
+	vms := s.reg.List()
+	f := fleet{
+		Host: hoststat.Read(s.reg.Layout().Base), Capacity: s.reg.Capacity(),
+		VMs: make([]vmStats, len(vms)),
+	}
+	var wg sync.WaitGroup
+	for i, v := range vms {
+		s.reg.Refresh(v)
+		f.VMs[i] = vmStats{Stats: s.reg.Stats(v)}
+		wg.Add(1)
+		go func() { defer wg.Done(); s.probeGuest(&f.VMs[i], v.ID) }()
+	}
+	wg.Wait()
+	f.Totals = sumUsage(f.VMs)
+	return f
+}
+
+// probeGuest fills in a row's agent health and spend. Failure is recorded on
+// the row and never returned: one unreachable guest must not fail the poll.
+func (s *Server) probeGuest(row *vmStats, id string) {
+	if row.State != vm.StateRunning {
+		row.Agent.Error = "vm is " + string(row.State)
+		row.Usage, _ = s.usage.Snapshot(id)
+		return
+	}
+	if h, err := agent.New(row.GuestIP, vm.AgentPort).Health(); err == nil {
+		row.Agent = agentStatus{Reachable: true, Ready: h.Ready, SessionState: h.SessionState}
+	} else {
+		row.Agent.Error = err.Error()
+	}
+	// Update returns the last known totals even when the guest is unreachable,
+	// so a blip shows stale spend rather than blanking it to zero.
+	row.Usage, _, _ = s.usage.Update(id, row.GuestIP, vm.AgentPort)
+}
+
+// sumUsage adds every VM's spend into one fleet total.
+func sumUsage(rows []vmStats) agent.Totals {
+	var t agent.Totals
+	for _, row := range rows {
+		t.CostUSD += row.Usage.CostUSD
+		t.InputTokens += row.Usage.InputTokens
+		t.OutputTokens += row.Usage.OutputTokens
+		t.CacheReadTokens += row.Usage.CacheReadTokens
+		t.CacheCreationTokens += row.Usage.CacheCreationTokens
+		t.Turns += row.Usage.Turns
+	}
+	return t
+}
+
+// handleStats reports host utilisation and one row per live VM.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.collect())
+}
+
+// handleVMStats reports one VM in depth: resource usage, firecracker's own
+// view, the serial console tail, and the agent's recent activity.
+func (s *Server) handleVMStats(w http.ResponseWriter, r *http.Request) {
+	v, err := s.reg.Get(r.PathValue("id"))
+	if err != nil {
+		writeVMErr(w, err)
+		return
+	}
+	s.reg.Refresh(v)
+	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}}
+	s.probeGuest(&d.vmStats, v.ID)
+	_, d.Events = s.usage.Snapshot(v.ID)
+	d.ConsoleTail = tailFile(s.reg.Layout().Console(v.ID), consoleTailBytes)
+	if info, err := fc.New(s.reg.Layout().Sock(v.ID)).Describe(); err == nil {
+		d.Firecracker = info
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// tailFile returns the last n bytes of a file, or "" if it cannot be read.
+func tailFile(path string, n int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	if fi.Size() > n {
+		if _, err := f.Seek(-n, io.SeekEnd); err != nil {
+			return ""
+		}
+	}
+	b, _ := io.ReadAll(f)
+	return string(b)
+}
+
+// handleDashboard serves the operator UI. The page authenticates its own
+// fetches with a header, so nothing here sets a cookie.
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := w.Write(dashboardHTML); err != nil {
+		log.Printf("write dashboard: %v", err)
+	}
+}

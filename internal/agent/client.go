@@ -49,21 +49,24 @@ type Usage struct {
 // Event is one entry of the guest's append-only log. The fields are the union
 // of what events.append emits; only those matching an event's type are set.
 type Event struct {
-	ID           int     `json:"id"`
-	Type         string  `json:"type"`
-	TS           string  `json:"ts"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
-	Usage        *Usage  `json:"usage,omitempty"`
-	DurationMS   int64   `json:"duration_ms,omitempty"`
-	Text         string  `json:"text,omitempty"`
-	Tool         string  `json:"tool,omitempty"`
-	Message      string  `json:"message,omitempty"`
-	Question     string  `json:"question,omitempty"`
-	Preview      string  `json:"preview,omitempty"`
-	ApprovalID   string  `json:"approval_id,omitempty"`
-	Decision     string  `json:"decision,omitempty"`
-	SessionState string  `json:"session_state,omitempty"`
-	IsError      bool    `json:"is_error,omitempty"`
+	ID         int     `json:"id"`
+	Type       string  `json:"type"`
+	TS         string  `json:"ts"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
+	Usage      *Usage  `json:"usage,omitempty"`
+	DurationMS int64   `json:"duration_ms,omitempty"`
+	Text       string  `json:"text,omitempty"`
+	Tool       string  `json:"tool,omitempty"`
+	// Tool arguments, kept opaque: the shape is whatever the tool declares,
+	// and the dashboard only ever shows a truncated preview of it.
+	Input        json.RawMessage `json:"input,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Question     string          `json:"question,omitempty"`
+	Preview      string          `json:"preview,omitempty"`
+	ApprovalID   string          `json:"approval_id,omitempty"`
+	Decision     string          `json:"decision,omitempty"`
+	SessionState string          `json:"session_state,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
 }
 
 // Health reports whether the agent is up and what its session is doing.

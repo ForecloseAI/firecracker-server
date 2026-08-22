@@ -125,3 +125,13 @@ func appendRecent(recent, fresh []Event) []Event {
 	}
 	return out
 }
+
+// Snapshot returns a VM's last known totals and event window without touching
+// the guest. Used for VMs that are not running, where a poll would only buy a
+// timeout, and for the detail view once Update has already run.
+func (a *Accumulator) Snapshot(id string) (Totals, []Event) {
+	e := a.entryFor(id)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.totals, e.recent
+}

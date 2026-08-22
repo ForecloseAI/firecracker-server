@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 
+	"cracked/internal/agent"
 	"cracked/internal/vm"
 )
 
@@ -16,21 +17,30 @@ import (
 type Server struct {
 	reg   *vm.Registry
 	token string
+	usage *agent.Accumulator
 }
 
 // New builds a Server guarded by the given bearer token.
 func New(reg *vm.Registry, token string) *Server {
-	return &Server{reg: reg, token: token}
+	return &Server{reg: reg, token: token, usage: agent.NewAccumulator()}
 }
 
 // Routes registers every endpoint using ServeMux method+wildcard patterns.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /{$}", s.handleRoot)
+	mux.HandleFunc("GET /dashboard", s.authNoCookie(s.handleDashboard))
+	// Cookie-free like the dashboard: neither route has an {id}, so a ?token=
+	// here would set a root-scoped cookie. Nothing needs one -- the page sends
+	// a header and so does Prometheus.
+	mux.HandleFunc("GET /stats", s.authNoCookie(s.handleStats))
+	mux.HandleFunc("GET /metrics", s.authNoCookie(s.handleMetrics))
 	mux.HandleFunc("GET /capacity", s.auth(s.handleCapacity))
 	mux.HandleFunc("POST /vms", s.auth(s.handleCreate))
 	mux.HandleFunc("GET /vms", s.auth(s.handleList))
 	mux.HandleFunc("GET /vms/{id}", s.auth(s.handleGet))
+	mux.HandleFunc("GET /vms/{id}/stats", s.authNoCookie(s.handleVMStats))
 	mux.HandleFunc("POST /vms/{id}/pause", s.auth(s.handlePause))
 	mux.HandleFunc("POST /vms/{id}/resume", s.auth(s.handleResume))
 	mux.HandleFunc("DELETE /vms/{id}", s.auth(s.handleDelete))
@@ -50,17 +60,39 @@ type apiError struct {
 // A query token is echoed into a path-scoped cookie because browsers cannot
 // set headers on subresource loads or WebSocket handshakes.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return s.guard(next, true)
+}
+
+// authNoCookie authenticates without ever setting one. The dashboard needs
+// this: its route has no {id}, so the cookie would be scoped to "/", and the
+// untrusted guest serves content on the SAME origin under /vms/{id}/agent/.
+// An injected page there could ride that ambient cookie and drive the fleet.
+func (s *Server) authNoCookie(next http.HandlerFunc) http.HandlerFunc {
+	return s.guard(next, false)
+}
+
+// guard is the single token comparison site for every authenticated route.
+func (s *Server) guard(next http.HandlerFunc, setCookie bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, fromQuery := extractToken(r)
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, apiError{"unauthorized", "invalid or missing token", ""})
 			return
 		}
-		if fromQuery {
+		if fromQuery && setCookie {
 			setTokenCookie(w, r, tok)
 		}
 		next(w, r)
 	}
+}
+
+// handleRoot sends a bare visit to the dashboard, preserving any ?token=.
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	target := "/dashboard"
+	if q := r.URL.RawQuery; q != "" {
+		target += "?" + q
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 // extractToken pulls the bearer token from the request, reporting whether it

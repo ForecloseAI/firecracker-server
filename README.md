@@ -60,6 +60,9 @@ A -X POST $H/vms/alice/resume              # unfreeze
 A -X DELETE "$H/vms/alice"                 # stop, KEEP the workspace
 A -X DELETE "$H/vms/alice?purge=true"      # stop and delete the workspace
 A $H/capacity                              # slot/vcpu/memory accounting
+A $H/stats                                 # what the host is ACTUALLY using
+A $H/vms/alice/stats                       # one VM in depth
+A $H/metrics                               # the same numbers, for Prometheus
 ```
 
 Capacity exhaustion returns **503** with `Retry-After: 30` and
@@ -72,6 +75,60 @@ http://<host>:8080/vms/alice/vnc/vnc.html?path=vms/alice/vnc/websockify&token=<T
 ```
 
 The agent and the human share display `:0`, so takeover is instant.
+
+## Dashboard
+
+```
+http://<host>:8080/dashboard?token=<T>
+```
+
+A single page, no build step. The token is taken out of the URL, kept in
+`sessionStorage`, and sent as a header — it deliberately never becomes a
+cookie, because a cookie here would be scoped to `/` and the untrusted guest
+serves same-origin content under `/vms/{id}/agent/`.
+
+The fleet table shows, per VM: uptime, state, CPU, resident memory, disk, agent
+state, turns, tokens and cost, with pause/resume/stop/purge and links to VNC.
+Click a VM to peek inside: firecracker's own view, the serial console tail, the
+agent's recent activity, and a shell into the guest.
+
+Three columns are easy to misread:
+
+- **cpu** is percent of *one* core, like `top`, so a fully busy 2-vCPU VM
+  reads ~200%.
+- **rss** is the firecracker process's resident memory, which tracks the guest
+  pages actually touched. It grows toward the 4096 MiB assigned and does not
+  shrink when the guest frees memory.
+- **disk** is blocks actually allocated to the sparse workspace image, not its
+  5 GiB cap. This is the real cost on the host.
+
+Cost and token counts are lifetime totals **for the workspace**, not for this
+boot: the guest's event log lives on the overlay and survives `DELETE` without
+`?purge=true`. The host aggregates it by polling
+`/session/events?poll=1&since=N` incrementally, so nothing is counted twice.
+`?purge=true` resets both.
+
+Destructive buttons need two clicks rather than opening a native dialog, so the
+page stays drivable by browser automation.
+
+## Metrics
+
+`GET /metrics` renders the same snapshot in Prometheus text format, behind the
+same token:
+
+```yaml
+scrape_configs:
+  - job_name: cracked
+    scrape_interval: 30s
+    authorization: { credentials: <CRACKED_TOKEN> }
+    static_configs: [{ targets: ["<host>:8080"] }]
+```
+
+Every VM series is labelled `vm="<id>"`. CPU is exported as
+`cracked_vm_cpu_seconds_total`, a counter, so utilisation is
+`rate(cracked_vm_cpu_seconds_total[5m]) * 100`. Keep the interval at 15s or
+slower: a scrape fans out to every guest, though a 2s per-guest timeout bounds
+the worst case.
 
 ## Storage model
 

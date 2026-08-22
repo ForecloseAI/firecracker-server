@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cracked</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #191c24; --line: #2a2f3d; --fg: #d6dae4;
+    --dim: #7c8598; --accent: #6ea8fe; --ok: #4ec9a0; --warn: #e8c05a;
+    --bad: #e06c75; --idle: #8b93a5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+  .spacer { flex: 1; }
+  .stat { color: var(--dim); white-space: nowrap; }
+  .stat b { color: var(--fg); font-weight: 600; }
+  main { padding: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 14px; margin-bottom: 16px; overflow-x: auto; }
+  .panel h2 { margin: 0 0 10px; font-size: 12px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--line);
+    white-space: nowrap; }
+  th:first-child, td:first-child, th.l, td.l { text-align: left; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px;
+    letter-spacing: .06em; text-transform: uppercase; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: #1e2230; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; border: 1px solid currentColor; }
+  .running { color: var(--ok); } .paused { color: var(--warn); }
+  .failed  { color: var(--bad); } .creating, .stopping { color: var(--idle); }
+  button { font: inherit; background: #232838; color: var(--fg); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 9px; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.armed { background: var(--bad); border-color: var(--bad); color: #12141a; }
+  button.armed:hover { color: #12141a; }
+  .acts { display: flex; gap: 5px; justify-content: flex-end; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: inherit;
+    color: var(--dim); max-height: 340px; overflow-y: auto; }
+  input[type=text] { font: inherit; flex: 1; min-width: 220px; padding: 5px 8px;
+    background: #0e1015; color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 18px; }
+  .kv dt { color: var(--dim); } .kv dd { margin: 0; }
+  .ev { border-bottom: 1px solid var(--line); padding: 6px 0; }
+  .ev:last-child { border-bottom: 0; }
+  .ev .t { color: var(--accent); margin-right: 8px; }
+  .ev .ts { color: var(--dim); float: right; font-size: 11px; }
+  .err { color: var(--bad); }
+  .muted { color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#/">cracked</a></h1>
+  <span id="hoststats" class="stat"></span>
+  <span class="spacer"></span>
+  <span id="spend" class="stat"></span>
+  <span id="status" class="stat"></span>
+</header>
+<main id="view"><p class="muted">loading...</p></main>
+
+<script>
+"use strict";
+
+// The token never becomes a cookie. A cookie for this page would be scoped to
+// "/", and the untrusted guest serves content on the SAME origin under
+// /vms/{id}/agent/, so an injected page there could ride it. Keeping it in
+// sessionStorage and sending it as a header means only this page can spend it.
+const TOKEN = (() => {
+  const q = new URLSearchParams(location.search).get("token");
+  if (q) {
+    sessionStorage.setItem("cracked_token", q);
+    history.replaceState(null, "", location.pathname + location.hash);
+    return q;
+  }
+  return sessionStorage.getItem("cracked_token") || "";
+})();
+
+const LIST_MS = 3000, DETAIL_MS = 5000;
+const DESTRUCTIVE = new Set(["delete", "purge"]);
+const SNAPSHOT_CMD = "uptime; echo; free -m; echo; df -h /; echo; ps aux --sort=-%cpu | head -15";
+const AGENTLOG_CMD = "journalctl -u agent -n 100 --no-pager";
+
+let armed = null;   // "act:id" waiting on a second click, survives re-render
+let timer = null;
+
+/** Call the control plane with header auth. */
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+  return data;
+}
+
+/** Escape server-derived text. Guests are untrusted and feed most of this page. */
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+/** Human-readable byte count. */
+function bytes(n) {
+  if (!n) return "0";
+  const u = ["B", "K", "M", "G", "T"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + u[i];
+}
+
+/** Compact token/turn count. */
+function num(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n || 0);
+}
+
+/** Dollars, with enough precision to see a single cheap turn. */
+function usd(n) {
+  if (!n) return "$0";
+  return n < 1 ? "$" + n.toFixed(4) : "$" + n.toFixed(2);
+}
+
+/** Coarse duration, largest two units. */
+function dur(sec) {
+  sec = Math.floor(sec || 0);
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600);
+  const m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m " + s + "s";
+  return s + "s";
+}
+
+/** How long ago a timestamp was, for telling an idle VM from a busy one. */
+function ago(ts) {
+  const then = Date.parse(ts);
+  if (isNaN(then)) return "?";
+  return dur((Date.now() - then) / 1000) + " ago";
+}
+
+/** State badge, coloured by lifecycle position. */
+function badge(state) {
+  return '<span class="badge ' + esc(state) + '">' + esc(state) + "</span>";
+}
+
+/** One-word summary of whether a VM's agent is answering. */
+function agentCell(a) {
+  if (a.reachable) return esc(a.session_state || (a.ready ? "ready" : "starting"));
+  return '<span class="err" title="' + esc(a.error) + '">unreachable</span>';
+}
+
+/** The header line: real host headroom, not the fixed slot budget. */
+function renderHost(f) {
+  const h = f.host, c = f.capacity;
+  document.getElementById("hoststats").innerHTML =
+    "slots <b>" + c.slots_used + "/" + c.slots_total + "</b>" +
+    " &nbsp;load <b>" + h.load1.toFixed(2) + "</b>/" + h.cpus + "cpu" +
+    " &nbsp;mem free <b>" + bytes(h.mem_available_bytes) + "</b> of " + bytes(h.mem_total_bytes) +
+    " &nbsp;disk free <b>" + bytes(h.disk_free_bytes) + "</b> of " + bytes(h.disk_total_bytes);
+  document.getElementById("spend").innerHTML =
+    "fleet <b>" + usd(f.totals.cost_usd) + "</b> over " + f.totals.turns + " turns";
+}
+
+/** Buttons for one VM row. Pause and resume swap by state; applyArmed paints
+ *  the red confirm state afterwards, so nothing here tracks it. */
+function rowActions(v) {
+  const b = (act, label) =>
+    '<button data-act="' + act + '" data-id="' + esc(v.id) + '">' + label + "</button>";
+  const out = [];
+  if (v.state === "running") out.push(b("pause", "pause"));
+  if (v.state === "paused") out.push(b("resume", "resume"));
+  out.push('<a href="' + esc(v.vnc_url) + "&token=" + encodeURIComponent(TOKEN) +
+    '" target="_blank"><button>vnc</button></a>');
+  out.push('<a href="#/vm/' + encodeURIComponent(v.id) + '"><button>peek</button></a>');
+  out.push(b("delete", "stop"), b("purge", "purge"));
+  return '<div class="acts">' + out.join("") + "</div>";
+}
+
+/** One table row. */
+function vmRow(v) {
+  return "<tr>" +
+    '<td class="l"><a href="#/vm/' + encodeURIComponent(v.id) + '">' + esc(v.id) + "</a></td>" +
+    '<td class="l">' + badge(v.state) + "</td>" +
+    "<td>" + dur(v.uptime_seconds) + "</td>" +
+    "<td>" + v.cpu_percent.toFixed(0) + "%</td>" +
+    "<td>" + bytes(v.rss_bytes) + "</td>" +
+    "<td>" + bytes(v.workspace_bytes) + "</td>" +
+    '<td class="l">' + agentCell(v.agent) + "</td>" +
+    "<td>" + v.usage.turns + "</td>" +
+    "<td>" + num(v.usage.input_tokens + v.usage.output_tokens +
+      v.usage.cache_read_tokens + v.usage.cache_creation_tokens) + "</td>" +
+    "<td>" + usd(v.usage.cost_usd) + "</td>" +
+    '<td class="l">' + rowActions(v) + "</td></tr>";
+}
+
+// Column headers, and whether each is left-aligned. Numbers read better
+// right-aligned; names, badges and states read better left.
+const COLS = [["vm", 1], ["state", 1], ["uptime", 0], ["cpu", 0], ["rss", 0],
+  ["disk", 0], ["agent", 1], ["turns", 0], ["tokens", 0], ["cost", 0], ["", 0]];
+
+/** The fleet table. */
+function renderList(f) {
+  renderHost(f);
+  const head = COLS.map(([h, left]) =>
+    "<th" + (left ? ' class="l"' : "") + ">" + h + "</th>").join("");
+  const body = f.vms.length
+    ? f.vms.map(vmRow).join("")
+    : '<tr><td colspan="11" class="l muted">no VMs running</td></tr>';
+  document.getElementById("view").innerHTML =
+    '<div class="row"><button data-act="create">create vm</button>' +
+    '<span class="muted">cpu is percent of one core, so a busy 2-vcpu VM reads ~200%. ' +
+    "cost and tokens are lifetime totals for the workspace.</span></div>" +
+    '<div class="panel"><table><thead><tr>' + head + "</tr></thead><tbody>" +
+    body + "</tbody></table></div>";
+  applyArmed();
+}
+
+/** Key/value block for the detail header. */
+function detailFacts(v) {
+  const fc = v.firecracker || {};
+  const pairs = [
+    ["state", badge(v.state)], ["uptime", dur(v.uptime_seconds)],
+    ["cpu", v.cpu_percent.toFixed(1) + "% of one core (" + v.cpu_seconds_total.toFixed(0) + "s total)"],
+    ["memory", bytes(v.rss_bytes) + " resident of " + v.mem_mib + " MiB assigned"],
+    ["workspace", bytes(v.workspace_bytes) + " used of " + bytes(v.workspace_cap_bytes)],
+    ["slot / pid", v.slot + " / " + v.pid], ["guest ip", esc(v.guest_ip) + " on " + esc(v.tap)],
+    ["agent", agentCell(v.agent)],
+    ["firecracker", esc(fc.state || "?") + " " + esc(fc.vmm_version || "")],
+    ["spend", usd(v.usage.cost_usd) + " over " + v.usage.turns + " turns, last " +
+      usd(v.usage.last_cost_usd) + " in " + Math.round((v.usage.last_duration_ms || 0) / 100) / 10 + "s"],
+    ["last turn", v.usage.last_activity ? esc(v.usage.last_activity) + " (" +
+      ago(v.usage.last_activity) + ")" : "never"],
+    ["tokens", "in " + num(v.usage.input_tokens) + ", out " + num(v.usage.output_tokens) +
+      ", cache read " + num(v.usage.cache_read_tokens) + ", cache write " + num(v.usage.cache_creation_tokens)],
+  ];
+  return '<dl class="kv">' + pairs.map(([k, val]) =>
+    "<dt>" + k + "</dt><dd>" + val + "</dd>").join("") + "</dl>";
+}
+
+/** One line of the agent's event log. */
+function eventLine(e) {
+  const body = {
+    text: () => esc(e.text),
+    tool_use: () => "<b>" + esc(e.tool) + "</b> " + esc(JSON.stringify(e.input ?? {}).slice(0, 300)),
+    usage: () => usd(e.cost_usd) + " in " + Math.round((e.duration_ms || 0) / 100) / 10 + "s",
+    approval_required: () => '<span class="err">needs a decision:</span> ' + esc(e.preview),
+    question: () => '<span class="err">asked:</span> ' + esc(e.question),
+    decision: () => esc(e.decision) + " " + esc(e.approval_id),
+    error: () => '<span class="err">' + esc(e.message) + "</span>",
+  }[e.type];
+  return '<div class="ev"><span class="ts">' + esc(e.ts || "") + '</span>' +
+    '<span class="t">' + esc(e.type) + "</span>" + (body ? body() : "") + "</div>";
+}
+
+/** The detail view repaints every few seconds. Capture the parts the operator
+ *  owns first, or a poll wipes a half-typed command and the output of one they
+ *  just ran. Text is moved as textContent, so nothing is re-parsed as HTML. */
+function saveShell() {
+  const cmd = document.getElementById("cmd"), out = document.getElementById("execout");
+  if (!cmd) return null;
+  return {
+    cmd: cmd.value, out: out.textContent, muted: out.classList.contains("muted"),
+    focused: document.activeElement === cmd,
+    start: cmd.selectionStart, end: cmd.selectionEnd,
+  };
+}
+
+/** Put the operator's own state back after a repaint. */
+function restoreShell(s) {
+  if (!s) return;
+  const cmd = document.getElementById("cmd"), out = document.getElementById("execout");
+  cmd.value = s.cmd;
+  out.textContent = s.out;
+  out.classList.toggle("muted", s.muted);
+  if (s.focused) {
+    cmd.focus();
+    cmd.setSelectionRange(s.start, s.end);
+  }
+}
+
+/** The peek-inside view for one VM. */
+function renderDetail(v) {
+  const shell = saveShell();
+  const events = (v.events || []).slice().reverse();
+  document.getElementById("view").innerHTML =
+    '<div class="row"><a href="#/">&larr; fleet</a>' +
+    "<b>" + esc(v.id) + "</b>" +
+    (v.state === "running"
+      ? '<button data-act="pause" data-id="' + esc(v.id) + '">pause</button>'
+      : "") +
+    (v.state === "paused"
+      ? '<button data-act="resume" data-id="' + esc(v.id) + '">resume</button>'
+      : "") +
+    '<a href="' + esc(v.vnc_url) + "&token=" + encodeURIComponent(TOKEN) +
+      '" target="_blank"><button>open vnc</button></a>' +
+    '<button data-act="delete" data-id="' + esc(v.id) + '">stop</button>' +
+    '<button data-act="purge" data-id="' + esc(v.id) + '">purge</button></div>' +
+    '<div class="panel"><h2>vm</h2>' + detailFacts(v) + "</div>" +
+    '<div class="panel"><h2>guest shell</h2>' +
+    '<div class="row"><input type="text" id="cmd" placeholder="command to run in the guest" ' +
+    'value="' + esc(SNAPSHOT_CMD) + '">' +
+    '<button data-act="exec" data-id="' + esc(v.id) + '">run</button>' +
+    '<button data-act="snapshot" data-id="' + esc(v.id) + '">resources</button>' +
+    '<button data-act="agentlog" data-id="' + esc(v.id) + '">agent log</button></div>' +
+    '<pre id="execout" class="muted">the agent\'s own stdout never reaches the host console; ' +
+    'use the agent log button to read it from the guest journal.</pre></div>' +
+    '<div class="panel"><h2>agent activity (newest first)</h2>' +
+    (events.length ? events.map(eventLine).join("") : '<p class="muted">no events yet</p>') + "</div>" +
+    '<div class="panel"><h2>serial console (tail)</h2><pre>' +
+    (esc(v.console_tail) || '<span class="muted">empty</span>') + "</pre></div>";
+  restoreShell(shell);
+  applyArmed();
+}
+
+/** Paint the armed button red. Kept out of the templates so the arming state
+ *  survives a re-render without every button needing to know about it. */
+function applyArmed() {
+  if (!armed) return;
+  const [act, id] = armed.split(/:(.*)/s);
+  document.querySelectorAll('button[data-act="' + act + '"]').forEach((b) => {
+    if ((b.dataset.id || "") === id) { b.classList.add("armed"); b.textContent = "confirm?"; }
+  });
+}
+
+/** Arm a destructive button for a second click. Deliberately not
+ *  window.confirm: a native dialog blocks any browser automation driving this. */
+function arm(key) {
+  armed = key;
+  applyArmed();
+  setTimeout(() => { if (armed === key) { armed = null; refresh(); } }, 3000);
+}
+
+/** Run a shell command in the guest through the authenticated agent proxy. */
+async function exec(id, cmd) {
+  const out = document.getElementById("execout");
+  out.classList.remove("muted");
+  out.textContent = "running...";
+  try {
+    const r = await api("POST", "/vms/" + encodeURIComponent(id) + "/agent/debug/exec", { cmd });
+    out.textContent = (r.stdout || "") + (r.stderr || "") + "\n[exit " + r.exit_code + "]";
+  } catch (err) {
+    out.textContent = "failed: " + err.message;
+  }
+}
+
+/** Apply a button press. Destructive actions have already been confirmed. */
+async function act(name, id) {
+  const p = "/vms/" + encodeURIComponent(id);
+  if (name === "exec") return exec(id, document.getElementById("cmd").value);
+  if (name === "snapshot") return exec(id, SNAPSHOT_CMD);
+  if (name === "agentlog") return exec(id, AGENTLOG_CMD);
+  if (name === "create") await api("POST", "/vms", {});
+  if (name === "pause" || name === "resume") await api("POST", p + "/" + name);
+  if (name === "delete") await api("DELETE", p);
+  if (name === "purge") { await api("DELETE", p + "?purge=true"); location.hash = "#/"; }
+  return refresh();
+}
+
+/** One click handler for the whole page, so re-rendering rebinds nothing. */
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const key = b.dataset.act + ":" + (b.dataset.id || "");
+  if (DESTRUCTIVE.has(b.dataset.act) && armed !== key) return arm(key);
+  armed = null;
+  try {
+    await act(b.dataset.act, b.dataset.id);
+  } catch (err) {
+    setStatus("failed: " + err.message, true);
+  }
+});
+
+/** Report poll health in the header. */
+function setStatus(msg, bad) {
+  const el = document.getElementById("status");
+  el.className = "stat" + (bad ? " err" : "");
+  el.textContent = msg;
+}
+
+/** The id in #/vm/{id}, or null on the fleet view. */
+function currentVM() {
+  const m = location.hash.match(/^#\/vm\/(.+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** Fetch and repaint whichever view is showing. */
+async function refresh() {
+  const id = currentVM();
+  try {
+    if (id) renderDetail(await api("GET", "/vms/" + encodeURIComponent(id) + "/stats"));
+    else renderList(await api("GET", "/stats"));
+    setStatus("updated " + new Date().toLocaleTimeString());
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+/** Restart polling at the cadence the current view wants. */
+function route() {
+  clearInterval(timer);
+  armed = null;
+  timer = setInterval(refresh, currentVM() ? DETAIL_MS : LIST_MS);
+  refresh();
+}
+
+addEventListener("hashchange", route);
+if (!TOKEN) {
+  document.getElementById("view").innerHTML =
+    '<p class="err">no token. open this page as /dashboard?token=&lt;CRACKED_TOKEN&gt;</p>';
+} else {
+  route();
+}
+</script>
+</body>
+</html>

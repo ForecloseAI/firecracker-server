@@ -49,6 +49,11 @@ type VM struct {
 	stopping       atomic.Bool
 	workspaceIsNew bool
 	console        interface{ Close() error }
+
+	// Previous CPU sample, so Stats can report a rate rather than a lifetime
+	// average. Guarded by the Registry mutex, like State.
+	lastCPUSeconds float64
+	lastSampleAt   time.Time
 }
 
 // View is the JSON representation returned by the API.
