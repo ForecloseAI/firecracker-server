@@ -125,10 +125,15 @@ func since(r *http.Request) int {
 }
 
 // pump replays history, then forwards live frames until the client leaves.
+//
+// sent is what stops duplicates: the subscription opens before history is
+// fetched (so nothing is missed), which means live frames for events already
+// in that history are sitting in the channel. Anything not newer is dropped.
 func (s *Server) pump(r *http.Request, w http.ResponseWriter, rc *http.ResponseController,
 	b *Bridge, ch chan Frame, from int) {
+	sent := from
 	for _, f := range b.history(from) {
-		writeFrame(w, f)
+		sent = emitFrame(w, f, sent)
 	}
 	rc.Flush()
 	tick := time.NewTicker(heartbeat)
@@ -138,13 +143,26 @@ func (s *Server) pump(r *http.Request, w http.ResponseWriter, rc *http.ResponseC
 		case <-r.Context().Done():
 			return
 		case f := <-ch:
-			writeFrame(w, f)
+			sent = emitFrame(w, f, sent)
 			rc.Flush()
 		case <-tick.C:
 			fmt.Fprint(w, ": beat\n\n")
 			rc.Flush()
 		}
 	}
+}
+
+// emitFrame writes a frame only if it is newer than the last one sent, and
+// reports the new high-water mark.
+func emitFrame(w http.ResponseWriter, f Frame, sent int) int {
+	if f.ID > 0 && f.ID <= sent {
+		return sent
+	}
+	writeFrame(w, f)
+	if f.ID > sent {
+		return f.ID
+	}
+	return sent
 }
 
 // writeFrame emits one SSE event, keyed by the guest's event id so that
