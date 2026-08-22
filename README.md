@@ -130,6 +130,39 @@ Every VM series is labelled `vm="<id>"`. CPU is exported as
 slower: a scrape fans out to every guest, though a 2s per-guest timeout bounds
 the worst case.
 
+## Chat UI
+
+Talk to an agent from a browser at `https://chat.usetypeo.com/chat?id=<vm>`.
+Text only. Any running VM is reachable by id; an unknown id shows the list of
+VMs that are running instead of spinning.
+
+```sh
+make install-chat
+sudo install -m0644 deploy/cracked-chat.service /etc/systemd/system/
+sudo install -m0644 deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+make hashpw USER_NAME=alice | sudo tee -a /etc/cracked/chat-users
+sudo systemctl edit cracked-chat     # Environment=CRACKED_TOKEN=<token>
+sudo systemctl enable --now cracked-chat
+sudo systemctl reload cracked-chat   # after adding a user; does not drop streams
+```
+
+Three origins, isolated by **hostname**:
+
+| Origin | Serves | Holds |
+|---|---|---|
+| `chat.usetypeo.com` | the page and `/api/*` | the `__Host-sess` cookie |
+| `vnc.usetypeo.com` | proxied noVNC, i.e. untrusted guest HTML | a 15-minute per-VM capability |
+| `:8080` | the control plane | not exposed publicly |
+
+The `__Host-` prefix requires an empty `Domain`, which is what structurally
+stops the chat session from reaching the VNC origin. **Never set a cookie with
+`Domain=.usetypeo.com` anywhere in this system.**
+
+The browser never opens a socket to a VM; the chat service reaches guests
+server-side. When a site needs a login, the agent asks via `ask_human` with
+kind `handoff` and you take over the VM's own screen, so the credential never
+touches this service.
+
 ## Storage model
 
 - `images/rootfs.ext4` — one immutable image, opened **read-only by every VM at
