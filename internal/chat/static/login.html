@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cracked · sign in</title>
+<style>
+  :root {
+    --bg:#12141a; --panel:#191c24; --line:#2a2f3d; --fg:#d6dae4;
+    --dim:#7c8598; --accent:#6ea8fe; --bad:#e06c75;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100dvh; display:grid; place-items:center;
+    background:var(--bg); color:var(--fg);
+    font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  form { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:22px; width:min(340px, 92vw); display:flex; flex-direction:column; gap:12px; }
+  h1 { margin:0 0 6px; font-size:14px; letter-spacing:.09em; text-transform:uppercase; }
+  label { display:flex; flex-direction:column; gap:5px; color:var(--dim); }
+  input { background:var(--bg); border:1px solid var(--line); border-radius:4px;
+    color:var(--fg); padding:9px 10px; font:inherit; }
+  input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  button { background:var(--accent); border:0; border-radius:4px; color:#0b0d12;
+    padding:10px; font:inherit; font-weight:600; cursor:pointer; }
+  .err { color:var(--bad); min-height:1.5em; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+  <h1>cracked</h1>
+  <p class="err" id="err"></p>
+  <label>user <input name="user" autocomplete="username" autocapitalize="off" autofocus required></label>
+  <label>password <input name="password" type="password" autocomplete="current-password" required></label>
+  <input type="hidden" name="next" id="next">
+  <button type="submit">sign in</button>
+</form>
+<script>
+  const q = new URLSearchParams(location.search);
+  if (q.get("e")) document.getElementById("err").textContent = "wrong username or password";
+  document.getElementById("next").value = q.get("next") || "/chat";
+</script>
+</body>
+</html>

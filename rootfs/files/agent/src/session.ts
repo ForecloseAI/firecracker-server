@@ -15,6 +15,7 @@ import { dirname } from "node:path";
 import * as events from "./events.js";
 import * as gate from "./gate.js";
 import * as digest from "./digest.js";
+import { humanServer } from "./human.js";
 
 const STATE = process.env.CRACKED_SESSION_FILE ?? "/home/agent/agent-state/session.json";
 const CDP_URL = "http://127.0.0.1:9222";
@@ -41,6 +42,13 @@ not by CSS class names.
 Reading, browsing, installing and running scripts are yours to do freely.
 Sending messages, deleting data and spending money will pause and ask the person
 first. If they say no, stop. Do not look for another way to do the same thing.
+
+## Asking the person
+Use ask_human when you genuinely need them. Keep the question to one short
+sentence.
+If a site needs a password, a one-time code, or any sign-in, call ask_human with
+kind "handoff". That hands them the browser so they type it themselves. Never
+ask anyone to tell you a secret, and never type one you found somewhere.
 
 ## When someone takes over
 The person may click around while you work. If the page is not what you left,
@@ -138,10 +146,11 @@ function buildOptions(resume: string | undefined): Record<string, unknown> {
     // (Task, TodoWrite, NotebookEdit, ToolSearch...), which measured as two
     // thirds of the fixed per-turn prefix: 54 tools and 18,843 tokens, against
     // 28 tools and 10,054 tokens with it.
-    tools: [...AUTO_ALLOWED, ...GATED, "mcp__chrome"],
-    allowedTools: [...AUTO_ALLOWED, ...BROWSER_TOOLS.map((t) => `mcp__chrome__${t}`)],
+    tools: [...AUTO_ALLOWED, ...GATED, "mcp__chrome", "mcp__human"],
+    allowedTools: [...AUTO_ALLOWED, ...BROWSER_TOOLS.map((t) => `mcp__chrome__${t}`),
+      "mcp__human__ask_human"],
     disallowedTools: ["WebFetch", "WebSearch"],
-    mcpServers: { chrome: chromeServerConfig() },
+    mcpServers: { chrome: chromeServerConfig(), human: humanServer },
     canUseTool: (tool: string, input: Record<string, unknown>) => gate.canUseTool(tool, input),
     hooks: buildHooks(),
     resume,

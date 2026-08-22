@@ -6,7 +6,13 @@ type Decision = { decision: "allow" | "deny"; reason?: string; answer?: string }
 type Pending = { resolve: (d: Decision) => void; kind: "approval" | "question" };
 type Grant = { tool: string; usesRemaining: number; expiresAt: number };
 
-const DECISION_TIMEOUT_MS = 30 * 60 * 1000;
+// Someone answering an approval may be away from the screen, but a plain
+// question left hanging for half an hour just blocks the agent.
+const APPROVAL_TIMEOUT_MS = 30 * 60 * 1000;
+const QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+// How the chat page should render a pending interaction.
+export type Ui = { kind: "text" | "confirm" | "choice" | "handoff"; options?: string[] };
 
 // Shell commands that destroy data or the machine. Everything else is free.
 const DESTRUCTIVE = [
@@ -41,14 +47,18 @@ function createGrant(tool: string, maxUses: number, ttlSeconds: number): Grant {
 }
 
 /** Emit a pending decision and block until a human answers or it times out. */
-function awaitDecision(kind: "approval" | "question", payload: Record<string, unknown>): Promise<Decision> {
+function awaitDecision(
+  kind: "approval" | "question",
+  payload: Record<string, unknown>,
+  timeoutMs = APPROVAL_TIMEOUT_MS,
+): Promise<Decision> {
   const id = `${kind === "question" ? "q" : "ap"}_${String(++counter).padStart(3, "0")}`;
   events.append(kind === "question" ? "question" : "approval_required", { approval_id: id, ...payload });
   return new Promise<Decision>((resolve) => {
     pending.set(id, { resolve, kind });
     setTimeout(() => {
       if (pending.delete(id)) resolve({ decision: "deny", reason: "timed out waiting for a human" });
-    }, DECISION_TIMEOUT_MS);
+    }, timeoutMs);
   });
 }
 
@@ -68,9 +78,11 @@ function describe(tool: string, input: Record<string, unknown>): string {
   return `Use ${tool} with ${JSON.stringify(input).slice(0, 200)}`;
 }
 
-/** Ask the person a free-text question and wait for their reply. */
-export async function ask(question: string): Promise<string> {
-  const d = await awaitDecision("question", { question });
+/** Ask the person something and wait. The ui descriptor drives how the chat
+ *  page renders it; handoff is the only way a secret ever gets typed. */
+export async function ask(question: string, ui: Ui): Promise<string> {
+  const timeout = ui.kind === "handoff" ? APPROVAL_TIMEOUT_MS : QUESTION_TIMEOUT_MS;
+  const d = await awaitDecision("question", { question, kind: ui.kind, ui }, timeout);
   return d.answer ?? "";
 }
 

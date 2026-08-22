@@ -1,0 +1,11 @@
+# Caddy handles issuance and renewal itself, and flushes text/event-stream and
+# passes WebSocket upgrades with no tuning. Resist adding directives here.
+chat.usetypeo.com {
+	reverse_proxy 127.0.0.1:8090
+}
+
+# Separate hostname on purpose: this origin renders untrusted guest HTML, and
+# the chat session cookie's __Host- prefix makes it unable to reach here.
+vnc.usetypeo.com {
+	reverse_proxy 127.0.0.1:8091
+}

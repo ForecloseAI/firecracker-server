@@ -45,6 +45,9 @@ async function postMessage(req: IncomingMessage, res: ServerResponse): Promise<v
   if (key && seenKeys.has(key)) return reply(res, 200, { message_id: seenKeys.get(key), replayed: true });
   const id = `m_${String(++messageSeq).padStart(3, "0")}`;
   if (key) seenKeys.set(key, id);
+  // Record the user's turn BEFORE dispatching. Without this the log holds only
+  // the agent's half, so any transcript replay shows answers with no questions.
+  events.append("user", { text, message_id: id });
   session.send(text);
   reply(res, 202, { message_id: id, session_state: session.currentState(), last_event_id: events.lastId() });
 }
