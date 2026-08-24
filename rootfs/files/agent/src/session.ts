@@ -120,7 +120,21 @@ function buildOptions(resume: string | undefined): Record<string, unknown> {
     tools: [...AUTO_ALLOWED, ...GATED, "mcp__chrome", "mcp__human"],
     allowedTools: [...AUTO_ALLOWED, ...BROWSER_TOOLS.map((t) => `mcp__chrome__${t}`),
       "mcp__human__ask_human"],
-    disallowedTools: ["WebFetch", "WebSearch"],
+    // WebFetch and WebSearch are out because this agent has a real, logged-in
+    // Chrome that a person is watching: fetching outside it would bypass their
+    // session and the screen.
+    //
+    // The four chrome tools are web-developer instruments a browsing agent never
+    // calls, and they are not cheap -- list_console_messages alone is the
+    // fattest schema the server ships. `disallowedTools` is the only lever that
+    // works: chrome-devtools-mcp exposes no category flag for them (only
+    // emulation, performance and network, all already off), and naming
+    // individual mcp__chrome__* entries in `tools` does NOT filter per tool --
+    // measured, all 22 still load. Dropping them here measured ~1,100 tokens off
+    // the prefix.
+    disallowedTools: ["WebFetch", "WebSearch",
+      "mcp__chrome__lighthouse_audit", "mcp__chrome__take_heapsnapshot",
+      "mcp__chrome__list_console_messages", "mcp__chrome__get_console_message"],
     mcpServers: { chrome: chromeServerConfig(), human: humanServer },
     canUseTool: (tool: string, input: Record<string, unknown>) => gate.canUseTool(tool, input),
     hooks: buildHooks(),
