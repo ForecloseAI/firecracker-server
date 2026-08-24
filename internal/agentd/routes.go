@@ -15,6 +15,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /agents", s.handleList)
+	mux.HandleFunc("GET /agent-types", s.handleTypes)
 	mux.HandleFunc("POST /agents/{id}/messages", s.withAgent(s.handleMessage))
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
 	mux.HandleFunc("POST /agents/{id}/approvals/{apid}", s.withAgent(s.handleApproval))
@@ -43,6 +44,7 @@ func (s *Server) withAgent(next agentHandler) http.HandlerFunc {
 // a single call. The task title arrives in Phase 6 with the roster.
 type view struct {
 	ID           string `json:"id"`
+	Type         string `json:"type"`
 	State        string `json:"state"`
 	LastEventID  int    `json:"last_event_id"`
 	Conversation int    `json:"conversation_bytes"`
@@ -52,11 +54,21 @@ type view struct {
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	out := make([]view, 0, len(s.agents))
 	for _, a := range s.agents {
-		out = append(out, view{ID: a.ID(), State: a.State(),
+		out = append(out, view{ID: a.ID(), Type: a.Type(), State: a.State(),
 			LastEventID: a.Log().LastID(), Conversation: a.ConversationBytes()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	reply(w, http.StatusOK, out)
+}
+
+// handleTypes lists the profiles an agent can be created from. This is what a
+// client shows the person when they ask for a new specialist.
+func (s *Server) handleTypes(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		reply(w, http.StatusOK, []Profile{})
+		return
+	}
+	reply(w, http.StatusOK, s.catalog.List())
 }
 
 // handleHealth is what the control plane's boot probe will read.

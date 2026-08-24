@@ -43,15 +43,16 @@ const maxIterations = 40
 // be called from a single goroutine, so every agent gets exactly one -- which
 // is also how agents will run in parallel from Phase 6 on.
 type Agent struct {
-	id     string
-	dir    string
-	client anthropic.Client
-	model  string
-	system string
-	tools  []anthropic.BetaTool
-	log    *Log
-	gate   *Gate
-	inbox  chan string
+	id      string
+	dir     string
+	client  anthropic.Client
+	model   string
+	system  string
+	profile Profile
+	tools   []anthropic.BetaTool
+	log     *Log
+	gate    *Gate
+	inbox   chan string
 
 	// Guards everything the HTTP surface reads while the agent goroutine
 	// writes it. The SDK runner itself stays confined to that one goroutine,
@@ -70,19 +71,20 @@ type Agent struct {
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
 // anywhere else just moves the knot.
-func New(id, dir, workspace, model, system string) (*Agent, error) {
+func New(id, dir, workspace string, p Profile) (*Agent, error) {
 	log, err := OpenLog(dir, id)
 	if err != nil {
 		return nil, err
 	}
 	gate := NewGate(log)
-	tools, err := Tools(workspace, gate)
+	tools, err := Tools(workspace, gate, p.Tools)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
-		id: id, dir: dir, client: anthropic.NewClient(),
-		model: model, system: system, tools: tools, log: log, gate: gate, state: "idle",
+		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
+		model: p.Model, system: ComposeSystemPrompt(p, filepath.Join(dir, "instructions.md")),
+		tools: tools, log: log, gate: gate, state: "idle",
 		inbox: make(chan string, inboxDepth),
 	}
 	if err := a.load(); err != nil {
@@ -100,6 +102,13 @@ func (a *Agent) Gate() *Gate { return a.gate }
 
 // ID is the agent's slug.
 func (a *Agent) ID() string { return a.id }
+
+// Type is the profile key the agent was created from.
+func (a *Agent) Type() string { return a.profile.Key }
+
+// SystemPrompt is the composed prompt, exposed so a caller can inspect what an
+// agent was actually given without reconstructing it.
+func (a *Agent) SystemPrompt() string { return a.system }
 
 // State reports whether the agent is idle or working.
 func (a *Agent) State() string {

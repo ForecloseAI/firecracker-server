@@ -13,7 +13,7 @@ import (
 func newTestAgent(t *testing.T) *Agent {
 	t.Helper()
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key-for-offline-tests")
-	a, err := New("boss", t.TempDir(), t.TempDir(), "claude-haiku-4-5", "test")
+	a, err := New("boss", t.TempDir(), t.TempDir(), testProfile())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestConversationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := New("boss", a.dir, t.TempDir(), "claude-haiku-4-5", "test")
+	reopened, err := New("boss", a.dir, t.TempDir(), testProfile())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,4 +113,9 @@ func TestSaveLeavesNoTempFileBehind(t *testing.T) {
 	if _, err := os.Stat(a.convPath() + ".tmp"); !os.IsNotExist(err) {
 		t.Error("save left its temp file behind")
 	}
+}
+
+// testProfile is a minimal profile for tests that do not care about the role.
+func testProfile() Profile {
+	return Profile{Key: "test", Model: "claude-haiku-4-5", Prompt: "test"}
 }

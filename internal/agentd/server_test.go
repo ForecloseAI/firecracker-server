@@ -16,7 +16,7 @@ import (
 func newTestServer(t *testing.T) (*Server, *Agent) {
 	t.Helper()
 	a := newTestAgent(t)
-	return NewServer(a), a
+	return NewServer(testCatalog(t), a), a
 }
 
 // do runs one request against the routes and returns the recorder.
@@ -169,7 +169,7 @@ func TestStreamReplaysThenContinuesLiveWithoutDuplicates(t *testing.T) {
 	for _, txt := range []string{"one", "two", "three"} {
 		a.Log().Append(Event{Type: "text", Text: txt})
 	}
-	srv := httptest.NewServer(NewServer(a).Routes())
+	srv := httptest.NewServer(NewServer(testCatalog(t), a).Routes())
 	defer srv.Close()
 
 	// Resume from two events back, so exactly two are replayed.
@@ -219,4 +219,14 @@ func readIDs(t *testing.T, body interface{ Read([]byte) (int, error) }, n int, a
 		t.Fatalf("read only %v before the stream ended", ids)
 	}
 	return ids
+}
+
+// testCatalog loads the built-in profiles for handler tests.
+func testCatalog(t *testing.T) *Catalog {
+	t.Helper()
+	c, err := LoadCatalog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

@@ -21,6 +21,7 @@ const beat = 15 * time.Second
 // wrong, not a second layer of defence.
 type Server struct {
 	agents  map[string]*Agent
+	catalog *Catalog
 	started time.Time
 
 	// seen collapses a retried or double-tapped send. In memory only, like the
@@ -31,14 +32,14 @@ type Server struct {
 	seq  int
 }
 
-// NewServer wires a server over the given agents. Phase 6 replaces the fixed
-// list with a real roster.
-func NewServer(agents ...*Agent) *Server {
+// NewServer wires a server over the given agents. The roster replaces the
+// fixed list in the next phase.
+func NewServer(catalog *Catalog, agents ...*Agent) *Server {
 	byID := make(map[string]*Agent, len(agents))
 	for _, a := range agents {
 		byID[a.ID()] = a
 	}
-	return &Server{agents: byID, started: time.Now(), seen: map[string]string{}}
+	return &Server{agents: byID, catalog: catalog, started: time.Now(), seen: map[string]string{}}
 }
 
 // apiError is the error shape every endpoint uses, matching the control plane

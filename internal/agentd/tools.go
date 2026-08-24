@@ -21,7 +21,7 @@ type askInput struct {
 // chokepoint. The TypeScript agent could only gate Bash, because Read, Write
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
-func Tools(root string, gate *Gate) ([]anthropic.BetaTool, error) {
+func Tools(root string, gate *Gate, allow []string) ([]anthropic.BetaTool, error) {
 	files, err := fileTools(root)
 	if err != nil {
 		return nil, err
@@ -33,7 +33,31 @@ func Tools(root string, gate *Gate) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(files, rest...), nil
+	return keepAllowed(append(files, rest...), allow), nil
+}
+
+// keepAllowed narrows the surface to what a profile declares. An empty list
+// means everything, so a profile that says nothing about tools is not silently
+// crippled.
+//
+// This is a real restriction, not a prompt instruction: a tool that is not in
+// the list is not sent to the model at all, so it cannot be called. That is how
+// boss-only powers will be enforced when delegation arrives.
+func keepAllowed(tools []anthropic.BetaTool, allow []string) []anthropic.BetaTool {
+	if len(allow) == 0 {
+		return tools
+	}
+	wanted := make(map[string]bool, len(allow))
+	for _, name := range allow {
+		wanted[name] = true
+	}
+	out := make([]anthropic.BetaTool, 0, len(tools))
+	for _, tool := range tools {
+		if wanted[tool.Name()] {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 // askTool is the model's only channel to the person.

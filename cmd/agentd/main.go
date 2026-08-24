@@ -15,45 +15,30 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"cracked/internal/agentd"
 )
 
-// agentID is the one agent Phase 2 runs. The roster arrives in Phase 6.
+// agentID is the one agent this phase runs. The roster arrives next.
 const agentID = "boss"
-
-// system is a placeholder prompt. The real composition -- BASE_IDENTITY, the
-// profile's role, the agent's own instructions, then BASE_LIMITS last -- lands
-// in Phase 5.
-const system = `You are a helpful agent working on a computer. You can read, write and edit
-files in your workspace, search them, and run shell commands.
-
-Reading, writing, searching and running ordinary commands are yours to do
-freely. Commands that could destroy data or the machine will pause and ask the
-person first. If they say no, stop, and do not look for another way to do the
-same thing.
-
-Use ask_human when you genuinely need the person. Keep the question to one
-short sentence.
-
-Keep replies short and direct. Answer, then stop.`
 
 func main() {
 	once := flag.String("once", "", "run one turn with this prompt and exit, instead of serving")
 	addr := flag.String("addr", "127.0.0.1:8081", "address to serve on")
-	model := flag.String("model", "claude-sonnet-5", "model id")
+	model := flag.String("model", "", "model id, overriding the profile's own")
+	profile := flag.String("profile", "boss", "which agent profile to run")
 	workspace := flag.String("workspace", ".", "directory the agent may read")
 	stateDir := flag.String("state-dir", "./agent-state", "where the log and conversation live")
-	sysFile := flag.String("system", "", "read the system prompt from this file instead of the built-in one")
 	flag.Parse()
 
-	agent, err := build(*model, *workspace, *stateDir, *sysFile)
+	agent, catalog, err := build(*profile, *model, *workspace, *stateDir)
 	if err == nil && *once != "" {
 		err = runOnce(agent, *once)
 	} else if err == nil {
-		err = serve(agent, *addr)
+		err = serve(agent, catalog, *addr)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -62,11 +47,11 @@ func main() {
 }
 
 // serve runs the agent's goroutine and its HTTP surface until interrupted.
-func serve(agent *agentd.Agent, addr string) error {
+func serve(agent *agentd.Agent, catalog *agentd.Catalog, addr string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go agent.Run(ctx)
-	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(agent).Routes()}
+	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(catalog, agent).Routes()}
 	// No WriteTimeout: it is an absolute deadline and would cut every SSE
 	// stream at the same age, however active the client is.
 	go func() {
@@ -94,14 +79,32 @@ func runOnce(agent *agentd.Agent, prompt string) error {
 	return turnErr
 }
 
-// build assembles the agent from the flags.
-func build(model, workspace, stateDir, sysFile string) (*agentd.Agent, error) {
-	sys, err := systemPrompt(sysFile)
+// build assembles the agent from the flags, resolving its profile from the
+// catalog: the built-in profiles plus anything in <state-dir>/agent-types.
+func build(profileKey, model, workspace, stateDir string) (*agentd.Agent, *agentd.Catalog, error) {
+	catalog, err := agentd.LoadCatalog(filepath.Join(stateDir, "agent-types"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	p, ok := catalog.Get(profileKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("no profile %q; try one of %s", profileKey, keys(catalog))
+	}
+	if model != "" {
+		p.Model = model // the flag wins, which is what makes cheap testing possible
 	}
 	dir := filepath.Join(stateDir, "agents", agentID)
-	return agentd.New(agentID, dir, workspace, model, sys)
+	agent, err := agentd.New(agentID, dir, workspace, p)
+	return agent, catalog, err
+}
+
+// keys lists the catalog's profile keys, for an error message worth reading.
+func keys(c *agentd.Catalog) string {
+	var out []string
+	for _, p := range c.List() {
+		out = append(out, p.Key)
+	}
+	return strings.Join(out, ", ")
 }
 
 // replay prints the events this turn appended, which is the same data a Phase 3
@@ -141,18 +144,6 @@ func show(e agentd.Event) {
 	case "turn_complete":
 		fmt.Printf("  [turn] ok=%v %dms\n", !e.IsError, e.DurationMS)
 	}
-}
-
-// systemPrompt returns the built-in prompt, or the contents of a file. The
-// override exists to exercise prompt caching, which silently does nothing
-// below a ~1024-token prefix -- so the built-in placeholder is far too short
-// to prove the cache breakpoint is placed correctly.
-func systemPrompt(path string) (string, error) {
-	if path == "" {
-		return system, nil
-	}
-	buf, err := os.ReadFile(path)
-	return string(buf), err
 }
 
 // reportMemory prints the Go-heap side of the memory picture. Process RSS is
