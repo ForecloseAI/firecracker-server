@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -235,6 +236,50 @@ func (b *Bridge) replay(evs []agent.Event) []Frame {
 	}
 	if len(out) > ringSize {
 		out = out[len(out)-ringSize:]
+	}
+	return b.withPending(out)
+}
+
+// unshownPending lists interactions still waiting on a human that the truncated
+// window no longer carries, ordered by id so a reconnect is deterministic.
+func (b *Bridge) unshownPending(out []Frame) []*Pending {
+	shown := make(map[string]bool, len(out))
+	for _, f := range out {
+		if f.Kind == "pending" {
+			shown[f.PendingID] = true
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	missing := make([]*Pending, 0, len(b.pending))
+	for _, p := range b.pending {
+		if !shown[p.ID] {
+			missing = append(missing, p)
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i].ID < missing[j].ID })
+	return missing
+}
+
+// withPending re-appends cards for interactions still waiting on a human.
+//
+// replay truncates to the newest ringSize frames, but frameFor's side effects
+// rebuild b.pending from the WHOLE log -- so a card older than the window is
+// dropped from the page while the bridge still accepts an answer for its id.
+// The agent stays blocked and the person never sees what it is waiting for,
+// until the gate times out half an hour later.
+//
+// Appended, not prepended, so the card lands at the bottom where the newest
+// thing belongs. ID 0 keeps emitFrame's resume watermark untouched.
+func (b *Bridge) withPending(out []Frame) []Frame {
+	for _, p := range b.unshownPending(out) {
+		ui := p.UI
+		// The card's original capability is 15 minutes old at best.
+		if ui.Kind == "handoff" && b.caps != nil {
+			ui.URL = b.caps.Mint(b.id)
+		}
+		out = append(out, Frame{Kind: "pending", PendingID: p.ID,
+			Prompt: p.Prompt, Detail: p.Detail, UI: &ui})
 	}
 	return out
 }
