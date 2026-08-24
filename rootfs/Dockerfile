@@ -47,12 +47,18 @@ RUN chmod 0755 /sbin/overlay-init
 # a future version switches to full puppeteer it fails here instead of silently
 # adding a ~170MB second browser. --omit=dev keeps devDependencies out too.
 ENV PUPPETEER_SKIP_DOWNLOAD=true
-COPY files/agent/package.json files/agent/tsconfig.json /opt/agent/
+COPY files/agent/package.json files/agent/package-lock.json files/agent/tsconfig.json /opt/agent/
 COPY files/agent/src /opt/agent/src
+# `npm run build` is tsc plus a copy of src/memory/templates into dist: tsc
+# emits only .js, so without that copy import.meta.url resolves next to a dist
+# that holds no markdown and every VM boots healthy with no memory. The test -f
+# turns that silent degradation into a build failure here, in seconds, instead
+# of after the multi-GB ext4 pipeline in build-rootfs.sh.
 RUN cd /opt/agent \
- && npm install --omit=dev --no-audit --no-fund \
+ && npm ci --omit=dev --no-audit --no-fund \
  && npm install --no-save --no-audit --no-fund typescript @types/node \
- && ./node_modules/.bin/tsc -p tsconfig.json \
+ && npm run build \
+ && test -f /opt/agent/dist/memory/templates/system/definition.md \
  && rm -rf /opt/agent/node_modules/typescript /opt/agent/node_modules/@types \
  && rm -rf /opt/agent/node_modules/@anthropic-ai/*-musl \
  && npm cache clean --force \

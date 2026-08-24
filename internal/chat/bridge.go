@@ -14,10 +14,13 @@ import (
 const (
 	guestPort   = 8080
 	ringSize    = 200
-	idleGrace   = 60 * time.Second
 	backoffMax  = 15 * time.Second
 	backoffBase = time.Second
 )
+
+// idleGrace is how long a bridge keeps its guest stream open after the last
+// browser leaves. A var, not a const, so tests can shrink it.
+var idleGrace = 60 * time.Second
 
 // Frame is what the browser receives. One shape for the whole protocol.
 type Frame struct {
@@ -47,17 +50,26 @@ type Bridge struct {
 	subs    map[chan Frame]struct{}
 	pending map[string]*Pending
 	last    int
+	ctx     context.Context
 	stop    context.CancelFunc
 	idle    *time.Timer
 }
 
 // newBridge starts a consumer for one VM id.
 func newBridge(id string, control *Control, caps *Caps) *Bridge {
-	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{id: id, control: control, caps: caps,
-		subs: map[chan Frame]struct{}{}, pending: map[string]*Pending{}, stop: cancel}
-	go b.run(ctx)
+		subs: map[chan Frame]struct{}{}, pending: map[string]*Pending{}}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.startLocked()
 	return b
+}
+
+// startLocked launches the guest consumer. The caller holds b.mu.
+func (b *Bridge) startLocked() {
+	ctx, cancel := context.WithCancel(context.Background())
+	b.ctx, b.stop = ctx, cancel
+	go b.run(ctx)
 }
 
 // run reconnects to the guest forever, re-resolving its IP each time because a
@@ -116,7 +128,11 @@ func (b *Bridge) frameFor(ev agent.Event) (Frame, bool) {
 	case "text":
 		return Frame{ID: ev.ID, Kind: "say", Role: "agent", Text: ev.Text}, true
 	case "tool_use":
-		return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Tool, Label: beatLabel(ev.Tool)}, true
+		// Only the path reaches the browser, never the input body: a Write
+		// input carries the whole file, which for a memory file is kilobytes
+		// of JSON per beat.
+		label, detail := beatLabel(ev.Tool, ev.Input)
+		return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Tool, Label: label, Detail: detail}, true
 	case "state":
 		return Frame{ID: ev.ID, Kind: "state", State: ev.SessionState}, true
 	case "approval_required", "question":
@@ -173,7 +189,10 @@ func (b *Bridge) emit(f Frame) {
 	}
 }
 
-// Subscribe registers a browser and returns its frame channel.
+// Subscribe registers a browser and returns its frame channel. It restarts the
+// consumer when an idle timeout stopped it: the bridge stays in the server's
+// map after stopping, so without this every later visit gets a live-looking SSE
+// connection that no frame is ever written to.
 func (b *Bridge) Subscribe() chan Frame {
 	ch := make(chan Frame, 64)
 	b.mu.Lock()
@@ -183,6 +202,10 @@ func (b *Bridge) Subscribe() chan Frame {
 		b.idle.Stop()
 		b.idle = nil
 	}
+	if b.ctx.Err() != nil {
+		log.Printf("chat bridge %s: reviving after idle stop", b.id)
+		b.startLocked()
+	}
 	return ch
 }
 
@@ -191,10 +214,12 @@ func (b *Bridge) Subscribe() chan Frame {
 func (b *Bridge) history(since int) []Frame {
 	view, err := b.control.VM(b.id)
 	if err != nil {
+		log.Printf("chat bridge %s: history resolve: %v", b.id, err)
 		return nil
 	}
 	evs, _, err := agent.New(view.GuestIP, guestPort).EventsSince(since)
 	if err != nil {
+		log.Printf("chat bridge %s: history fetch: %v", b.id, err)
 		return nil
 	}
 	return b.replay(evs)
@@ -241,6 +266,7 @@ func (b *Bridge) stopIfEmpty() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.subs) == 0 {
+		log.Printf("chat bridge %s: idle, stopping guest stream", b.id)
 		b.stop()
 	}
 }

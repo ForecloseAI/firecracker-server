@@ -2,6 +2,7 @@
 // then waits for Chrome's DevTools endpoint, then starts the agent session.
 import * as events from "./events.js";
 import * as httpapi from "./httpapi.js";
+import * as memory from "./memory/install.js";
 import * as session from "./session.js";
 
 const PORT = Number(process.env.CRACKED_AGENT_PORT ?? 8080);
@@ -42,6 +43,10 @@ async function boot(): Promise<void> {
   events.init();
   httpapi.listen(PORT);
   console.log(`agent http listening on ${PORT}`);
+  // Before the DevTools wait, which can burn 90s and then give up: the memory
+  // tree and the hook registration should exist even in a VM whose Chrome never
+  // came up. Must be before session.start(), which is where the hook fires.
+  memory.install();
   if (!(await waitForDevtools(90_000))) {
     events.append("error", { message: `${CDP_VERSION_URL} never became usable; is chrome.service up?` });
     return;
