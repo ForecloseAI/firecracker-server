@@ -1,17 +1,22 @@
 // Command agentd runs the Go multi-agent daemon.
 //
-// Phase 2: one agent, one tool, a durable event log and a conversation that
-// survives a restart. There is no HTTP surface yet -- this exists to prove the
-// harness and to be read, not to be deployed.
+// Phase 3: one agent, one tool, a durable event log, a conversation that
+// survives a restart, and an HTTP surface with SSE and interrupt. Not deployed
+// anywhere yet -- the TypeScript agent still runs in every VM.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
+	"time"
 
 	"cracked/internal/agentd"
 )
@@ -26,29 +31,50 @@ const system = `You are a helpful agent running on a Linux machine. You can read
 Keep replies short and direct. Answer, then stop.`
 
 func main() {
-	once := flag.String("once", "", "run one turn with this prompt, then exit")
+	once := flag.String("once", "", "run one turn with this prompt and exit, instead of serving")
+	addr := flag.String("addr", "127.0.0.1:8081", "address to serve on")
 	model := flag.String("model", "claude-sonnet-5", "model id")
 	workspace := flag.String("workspace", ".", "directory the agent may read")
 	stateDir := flag.String("state-dir", "./agent-state", "where the log and conversation live")
 	sysFile := flag.String("system", "", "read the system prompt from this file instead of the built-in one")
 	flag.Parse()
 
-	if *once == "" {
-		fmt.Fprintln(os.Stderr, "usage: agentd -once \"<prompt>\" [-model M] [-workspace DIR] [-state-dir DIR]")
-		os.Exit(2)
+	agent, err := build(*model, *workspace, *stateDir, *sysFile)
+	if err == nil && *once != "" {
+		err = runOnce(agent, *once)
+	} else if err == nil {
+		err = serve(agent, *addr)
 	}
-	if err := run(*once, *model, *workspace, *stateDir, *sysFile); err != nil {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// run builds the agent, takes one turn, and prints what the turn logged.
-func run(prompt, model, workspace, stateDir, sysFile string) error {
-	agent, err := build(model, workspace, stateDir, sysFile)
-	if err != nil {
+// serve runs the agent's goroutine and its HTTP surface until interrupted.
+func serve(agent *agentd.Agent, addr string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go agent.Run(ctx)
+	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(agent).Routes()}
+	// No WriteTimeout: it is an absolute deadline and would cut every SSE
+	// stream at the same age, however active the client is.
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdown)
+	}()
+	log.Printf("agentd listening on %s", addr)
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
+	return nil
+}
+
+// runOnce takes a single turn and prints what it logged. Kept alongside serve
+// because it is the fastest way to exercise the loop without a client.
+func runOnce(agent *agentd.Agent, prompt string) error {
 	from := agent.Log().LastID()
 	turnErr := agent.Turn(context.Background(), prompt)
 	if err := replay(agent, from); err != nil {

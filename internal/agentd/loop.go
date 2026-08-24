@@ -9,13 +9,24 @@ package agentd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// ErrBusy is returned when an agent's inbox is full. Reported to the caller as
+// 503 rather than blocking an HTTP handler on a model call.
+var ErrBusy = errors.New("agent queue is full")
+
+// inboxDepth is how many messages may wait while a turn runs. Small on
+// purpose: a person queueing a dozen instructions at an agent that is stuck is
+// better told so than silently buffered.
+const inboxDepth = 8
 
 // maxTokens bounds one assistant response.
 const maxTokens = 8192
@@ -32,15 +43,23 @@ const maxIterations = 40
 // be called from a single goroutine, so every agent gets exactly one -- which
 // is also how agents will run in parallel from Phase 6 on.
 type Agent struct {
-	id       string
-	dir      string
-	client   anthropic.Client
-	model    string
-	system   string
-	tools    []anthropic.BetaTool
-	messages []anthropic.BetaMessageParam
-	log      *Log
-	state    string
+	id     string
+	dir    string
+	client anthropic.Client
+	model  string
+	system string
+	tools  []anthropic.BetaTool
+	log    *Log
+	inbox  chan string
+
+	// Guards everything the HTTP surface reads while the agent goroutine
+	// writes it. The SDK runner itself stays confined to that one goroutine,
+	// which is what the SDK requires.
+	mu        sync.Mutex
+	messages  []anthropic.BetaMessageParam
+	state     string
+	cancel    context.CancelFunc
+	convBytes int
 }
 
 // New builds an agent rooted at dir, restoring its conversation and log from
@@ -53,6 +72,7 @@ func New(id, dir, model, system string, tools []anthropic.BetaTool) (*Agent, err
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(),
 		model: model, system: system, tools: tools, log: log, state: "idle",
+		inbox: make(chan string, inboxDepth),
 	}
 	if err := a.load(); err != nil {
 		return nil, err
@@ -64,11 +84,90 @@ func New(id, dir, model, system string, tools []anthropic.BetaTool) (*Agent, err
 // Log exposes the event log, for the HTTP surface in Phase 3.
 func (a *Agent) Log() *Log { return a.log }
 
-// State reports whether the agent is idle or working.
-func (a *Agent) State() string { return a.state }
+// ID is the agent's slug.
+func (a *Agent) ID() string { return a.id }
 
-// Messages exposes the conversation so far.
-func (a *Agent) Messages() []anthropic.BetaMessageParam { return a.messages }
+// State reports whether the agent is idle or working.
+func (a *Agent) State() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state
+}
+
+// ConversationBytes is the size of the persisted history, tracked at save time
+// rather than measured on demand. This is the term that grows without bound,
+// so it is reported by /debug/memstats from here on.
+func (a *Agent) ConversationBytes() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.convBytes
+}
+
+// Messages exposes a copy of the conversation so far.
+func (a *Agent) Messages() []anthropic.BetaMessageParam {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.messages)
+}
+
+// Run drives the agent until ctx is done, taking one queued message at a time.
+// One goroutine per agent: the SDK runner is not safe for concurrent use, and
+// this is also the shape many agents in parallel will take.
+func (a *Agent) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case text := <-a.inbox:
+			a.runTurn(ctx, text)
+		}
+	}
+}
+
+// runTurn executes one turn under a cancellable child context, so Interrupt can
+// stop the turn without tearing down the agent.
+func (a *Agent) runTurn(parent context.Context, text string) {
+	ctx, cancel := context.WithCancel(parent)
+	a.setCancel(cancel)
+	defer func() {
+		a.setCancel(nil)
+		cancel()
+	}()
+	a.Turn(ctx, text) // errors are already recorded in the event log
+}
+
+// Send queues a user message. A full inbox is reported rather than blocking the
+// HTTP handler on a model call that may take a minute.
+func (a *Agent) Send(text string) error {
+	select {
+	case a.inbox <- text:
+		return nil
+	default:
+		return ErrBusy
+	}
+}
+
+// Interrupt cancels the in-flight turn, reporting whether there was one.
+//
+// The rollback rule is what makes this safe: the cancelled turn is discarded
+// rather than adopted, so the conversation stays at its last complete boundary
+// and the agent can take the next message immediately.
+func (a *Agent) Interrupt() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel == nil {
+		return false
+	}
+	a.cancel()
+	return true
+}
+
+// setCancel records (or clears) the in-flight turn's canceller.
+func (a *Agent) setCancel(c context.CancelFunc) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cancel = c
+}
 
 // convPath is where the message history is persisted.
 func (a *Agent) convPath() string { return filepath.Join(a.dir, "conversation.json") }
@@ -84,6 +183,7 @@ func (a *Agent) load() error {
 	if err != nil {
 		return err
 	}
+	a.convBytes = len(buf)
 	return json.Unmarshal(buf, &a.messages)
 }
 
@@ -98,6 +198,9 @@ func (a *Agent) save() error {
 	if err := os.WriteFile(tmp, buf, 0o640); err != nil {
 		return err
 	}
+	a.mu.Lock()
+	a.convBytes = len(buf)
+	a.mu.Unlock()
 	return os.Rename(tmp, a.convPath())
 }
 
@@ -144,7 +247,9 @@ func (a *Agent) Turn(ctx context.Context, text string) error {
 		a.finish(started, err)
 		return err
 	}
+	a.mu.Lock()
 	a.messages = runner.Messages()
+	a.mu.Unlock()
 	a.finish(started, nil)
 	return a.save()
 }
@@ -205,10 +310,13 @@ func (a *Agent) finish(started time.Time, err error) {
 // and only logged it on interrupt, so a streaming client had to infer busy from
 // turn_complete; every transition is an event here.
 func (a *Agent) setState(s string) {
+	a.mu.Lock()
 	if a.state == s {
+		a.mu.Unlock()
 		return
 	}
 	a.state = s
+	a.mu.Unlock()
 	a.log.Append(Event{Type: "state", SessionState: s})
 }
 
