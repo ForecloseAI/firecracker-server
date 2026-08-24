@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,29 +28,41 @@ func main() {
 	once := flag.String("once", "", "run one turn with this prompt and exit, instead of serving")
 	addr := flag.String("addr", "127.0.0.1:8081", "address to serve on")
 	model := flag.String("model", "", "model id, overriding the profile's own")
-	profile := flag.String("profile", "boss", "which agent profile to run")
+	profile := flag.String("profile", "boss", "profile to use for -once runs")
+	maxLive := flag.Int("max-live-agents", 8, "how many agents may hold a goroutine at once")
 	workspace := flag.String("workspace", ".", "directory the agent may read")
 	stateDir := flag.String("state-dir", "./agent-state", "where the log and conversation live")
 	flag.Parse()
 
-	agent, catalog, err := build(*profile, *model, *workspace, *stateDir)
-	if err == nil && *once != "" {
-		err = runOnce(agent, *once)
-	} else if err == nil {
-		err = serve(agent, catalog, *addr)
-	}
+	err := run(*once, *profile, *model, *workspace, *stateDir, *addr, *maxLive)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// serve runs the agent's goroutine and its HTTP surface until interrupted.
-func serve(agent *agentd.Agent, catalog *agentd.Catalog, addr string) error {
+// run builds the supervisor and either takes one turn or serves.
+func run(once, profile, model, workspace, stateDir, addr string, maxLive int) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go agent.Run(ctx)
-	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(catalog, agent).Routes()}
+	catalog, err := agentd.LoadCatalog(filepath.Join(stateDir, "agent-types"))
+	if err != nil {
+		return err
+	}
+	sup, err := agentd.NewSupervisor(ctx, stateDir, workspace, catalog, model, maxLive)
+	if err != nil {
+		return err
+	}
+	defer sup.Close()
+	if once != "" {
+		return runOnce(sup, profile, once)
+	}
+	return serve(ctx, sup, addr)
+}
+
+// serve runs the HTTP surface until interrupted.
+func serve(ctx context.Context, sup *agentd.Supervisor, addr string) error {
+	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(sup).Routes()}
 	// No WriteTimeout: it is an absolute deadline and would cut every SSE
 	// stream at the same age, however active the client is.
 	go func() {
@@ -67,9 +78,22 @@ func serve(agent *agentd.Agent, catalog *agentd.Catalog, addr string) error {
 	return nil
 }
 
-// runOnce takes a single turn and prints what it logged. Kept alongside serve
-// because it is the fastest way to exercise the loop without a client.
-func runOnce(agent *agentd.Agent, prompt string) error {
+// runOnce takes a single turn against one agent and prints what it logged.
+// Kept alongside serve because it is the fastest way to exercise the loop
+// without a client. The profile flag names which agent it addresses: "boss"
+// unless a specialist is being tried out.
+func runOnce(sup *agentd.Supervisor, profile, prompt string) error {
+	id := profile
+	if id != agentd.BossID {
+		if _, err := sup.Create(profile, profile); err != nil {
+			// Already on the roster from an earlier run, which is fine.
+			_ = err
+		}
+	}
+	agent, err := sup.Get(id)
+	if err != nil {
+		return err
+	}
 	from := agent.Log().LastID()
 	turnErr := agent.Turn(context.Background(), prompt)
 	if err := replay(agent, from); err != nil {
@@ -77,34 +101,6 @@ func runOnce(agent *agentd.Agent, prompt string) error {
 	}
 	reportMemory()
 	return turnErr
-}
-
-// build assembles the agent from the flags, resolving its profile from the
-// catalog: the built-in profiles plus anything in <state-dir>/agent-types.
-func build(profileKey, model, workspace, stateDir string) (*agentd.Agent, *agentd.Catalog, error) {
-	catalog, err := agentd.LoadCatalog(filepath.Join(stateDir, "agent-types"))
-	if err != nil {
-		return nil, nil, err
-	}
-	p, ok := catalog.Get(profileKey)
-	if !ok {
-		return nil, nil, fmt.Errorf("no profile %q; try one of %s", profileKey, keys(catalog))
-	}
-	if model != "" {
-		p.Model = model // the flag wins, which is what makes cheap testing possible
-	}
-	dir := filepath.Join(stateDir, "agents", agentID)
-	agent, err := agentd.New(agentID, dir, workspace, p)
-	return agent, catalog, err
-}
-
-// keys lists the catalog's profile keys, for an error message worth reading.
-func keys(c *agentd.Catalog) string {
-	var out []string
-	for _, p := range c.List() {
-		out = append(out, p.Key)
-	}
-	return strings.Join(out, ", ")
 }
 
 // replay prints the events this turn appended, which is the same data a Phase 3

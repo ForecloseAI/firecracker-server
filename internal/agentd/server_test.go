@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,11 +13,29 @@ import (
 	"time"
 )
 
-// newTestServer builds a server over one idle agent with no tools.
+// newTestServer builds a server over a supervisor with just the boss.
 func newTestServer(t *testing.T) (*Server, *Agent) {
 	t.Helper()
-	a := newTestAgent(t)
-	return NewServer(testCatalog(t), a), a
+	sup := newTestSupervisor(t)
+	a, err := sup.Get(BossID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewServer(sup), a
+}
+
+// newTestSupervisor builds a supervisor over temp directories.
+func newTestSupervisor(t *testing.T) *Supervisor {
+	t.Helper()
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key-for-offline-tests")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sup, err := NewSupervisor(ctx, t.TempDir(), t.TempDir(), testCatalog(t), "claude-haiku-4-5", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sup.Close)
+	return sup
 }
 
 // do runs one request against the routes and returns the recorder.
@@ -35,7 +54,7 @@ func TestListReportsStateAndWatermark(t *testing.T) {
 	a.Log().Append(Event{Type: "text", Text: "something"})
 
 	w := do(t, s, "GET", "/agents", "")
-	var got []view
+	var got []Status
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +84,7 @@ func TestMessageIsAcceptedNotAwaited(t *testing.T) {
 // A double-tapped send must collapse, or the agent runs the same instruction
 // twice. The second call reports the first call's id and does not queue again.
 func TestIdempotencyKeyCollapsesRepeat(t *testing.T) {
-	s, a := newTestServer(t)
+	s, _ := newTestServer(t)
 	send := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/agents/boss/messages", strings.NewReader(`{"text":"once"}`))
 		req.Header.Set("Idempotency-Key", "same-key")
@@ -77,21 +96,39 @@ func TestIdempotencyKeyCollapsesRepeat(t *testing.T) {
 	if first.Code != http.StatusAccepted || second.Code != http.StatusOK {
 		t.Fatalf("codes = %d, %d; want 202 then 200", first.Code, second.Code)
 	}
-	if len(a.inbox) != 1 {
-		t.Errorf("queued %d messages, want 1", len(a.inbox))
+	var a1, a2 map[string]any
+	json.Unmarshal(first.Body.Bytes(), &a1)
+	json.Unmarshal(second.Body.Bytes(), &a2)
+	if a1["message_id"] != a2["message_id"] {
+		t.Errorf("ids differ: %v vs %v; a repeat must report the first id", a1, a2)
+	}
+	if a2["replayed"] != true {
+		t.Errorf("second send = %v, want replayed=true", a2)
 	}
 }
 
 // A full inbox must be reported, not silently buffered or blocked on: the
 // person needs to know the agent is not keeping up.
-func TestFullInboxReports503WithRetryAfter(t *testing.T) {
-	s, a := newTestServer(t)
+//
+// Tested on a bare agent, with no goroutine draining it -- through the server
+// the drain would race the fill and make this flaky.
+func TestFullInboxIsReported(t *testing.T) {
+	a := newTestAgent(t)
 	for i := 0; i < inboxDepth; i++ {
 		if err := a.Send("filler"); err != nil {
 			t.Fatalf("filling inbox: %v", err)
 		}
 	}
-	w := do(t, s, "POST", "/agents/boss/messages", `{"text":"one too many"}`)
+	if err := a.Send("one too many"); !errors.Is(err, ErrBusy) {
+		t.Errorf("Send on a full inbox = %v, want ErrBusy", err)
+	}
+}
+
+// And ErrBusy must reach the client as a retryable 503 rather than a 500.
+func TestBusyMapsTo503WithRetryAfter(t *testing.T) {
+	s, _ := newTestServer(t)
+	w := httptest.NewRecorder()
+	s.sendFailed(w, ErrBusy)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}
@@ -165,11 +202,15 @@ func TestPollReturnsOnlyEventsAfterWatermark(t *testing.T) {
 // emit drops anything not newer than the high-water mark. This test drives both
 // halves: two events replayed, one delivered live.
 func TestStreamReplaysThenContinuesLiveWithoutDuplicates(t *testing.T) {
-	_, a := newTestServer(t)
+	sup := newTestSupervisor(t)
+	a, err := sup.Get(BossID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, txt := range []string{"one", "two", "three"} {
 		a.Log().Append(Event{Type: "text", Text: txt})
 	}
-	srv := httptest.NewServer(NewServer(testCatalog(t), a).Routes())
+	srv := httptest.NewServer(NewServer(sup).Routes())
 	defer srv.Close()
 
 	// Resume from two events back, so exactly two are replayed.

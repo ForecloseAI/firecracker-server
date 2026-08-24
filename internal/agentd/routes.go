@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 )
@@ -15,6 +14,8 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /agents", s.handleList)
+	mux.HandleFunc("POST /agents", s.handleCreate)
+	mux.HandleFunc("DELETE /agents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /agent-types", s.handleTypes)
 	mux.HandleFunc("POST /agents/{id}/messages", s.withAgent(s.handleMessage))
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
@@ -31,56 +32,81 @@ type agentHandler func(http.ResponseWriter, *http.Request, *Agent)
 func (s *Server) withAgent(next agentHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		a, ok := s.agents[id]
-		if !ok {
-			fail(w, http.StatusNotFound, "not_found", "no agent "+id, "agent")
+		a, err := s.sup.Get(id)
+		if errors.Is(err, ErrNoCapacity) {
+			w.Header().Set("Retry-After", "10")
+			fail(w, http.StatusServiceUnavailable, "capacity_exhausted", err.Error(), "agents")
+			return
+		}
+		if err != nil {
+			fail(w, http.StatusNotFound, "not_found", err.Error(), "agent")
 			return
 		}
 		next(w, r, a)
 	}
 }
 
-// view is one agent's row in GET /agents: everything a polling client needs in
-// a single call. The task title arrives in Phase 6 with the roster.
-type view struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	State        string `json:"state"`
-	LastEventID  int    `json:"last_event_id"`
-	Conversation int    `json:"conversation_bytes"`
+// handleList reports every agent and what it is doing. This is the poll a
+// client makes: one call, every agent, its state and its current task title.
+//
+// It deliberately does not start anything. A dashboard refreshing every few
+// seconds must not be able to spawn the whole roster into memory.
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	reply(w, http.StatusOK, s.sup.List())
 }
 
-// handleList reports every agent and what it is doing. This is the poll.
-func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	out := make([]view, 0, len(s.agents))
-	for _, a := range s.agents {
-		out = append(out, view{ID: a.ID(), Type: a.Type(), State: a.State(),
-			LastEventID: a.Log().LastID(), Conversation: a.ConversationBytes()})
+// createReq is the body of POST /agents.
+type createReq struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+// handleCreate adds an agent to the roster. It does not start it: an agent
+// runs when it is first addressed.
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var req createReq
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Type == "" {
+		fail(w, http.StatusBadRequest, "bad_request", "type is required", "")
+		return
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	reply(w, http.StatusOK, out)
+	rec, err := s.sup.Create(req.Type, req.Name)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "agent")
+		return
+	}
+	reply(w, http.StatusCreated, rec)
+}
+
+// handleDelete stops an agent and drops it from the roster. With ?purge=true
+// its state goes too; without, recreating the same id gets its history back,
+// mirroring what DELETE on a VM does with its workspace.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.sup.Delete(id, r.URL.Query().Get("purge") == "true"); err != nil {
+		fail(w, http.StatusConflict, "conflict", err.Error(), "agent")
+		return
+	}
+	reply(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 }
 
 // handleTypes lists the profiles an agent can be created from. This is what a
 // client shows the person when they ask for a new specialist.
 func (s *Server) handleTypes(w http.ResponseWriter, r *http.Request) {
-	if s.catalog == nil {
-		reply(w, http.StatusOK, []Profile{})
-		return
-	}
-	reply(w, http.StatusOK, s.catalog.List())
+	reply(w, http.StatusOK, s.sup.Catalog().List())
 }
 
 // handleHealth is what the control plane's boot probe will read.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	statuses := s.sup.List()
 	working := 0
-	for _, a := range s.agents {
-		if a.State() == "working" {
+	for _, st := range statuses {
+		if st.State == "working" {
 			working++
 		}
 	}
 	reply(w, http.StatusOK, map[string]any{
-		"ok": true, "ready": true, "agents": len(s.agents), "working": working,
+		"ok": true, "ready": true, "agents": len(statuses),
+		"live": s.sup.LiveCount(), "working": working,
 	})
 }
 

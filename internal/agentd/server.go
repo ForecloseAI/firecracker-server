@@ -20,8 +20,7 @@ const beat = 15 * time.Second
 // loopback. Adding a second auth scheme here would be a second thing to get
 // wrong, not a second layer of defence.
 type Server struct {
-	agents  map[string]*Agent
-	catalog *Catalog
+	sup     *Supervisor
 	started time.Time
 
 	// seen collapses a retried or double-tapped send. In memory only, like the
@@ -32,14 +31,9 @@ type Server struct {
 	seq  int
 }
 
-// NewServer wires a server over the given agents. The roster replaces the
-// fixed list in the next phase.
-func NewServer(catalog *Catalog, agents ...*Agent) *Server {
-	byID := make(map[string]*Agent, len(agents))
-	for _, a := range agents {
-		byID[a.ID()] = a
-	}
-	return &Server{agents: byID, catalog: catalog, started: time.Now(), seen: map[string]string{}}
+// NewServer wires a server over a supervisor.
+func NewServer(sup *Supervisor) *Server {
+	return &Server{sup: sup, started: time.Now(), seen: map[string]string{}}
 }
 
 // apiError is the error shape every endpoint uses, matching the control plane
@@ -100,6 +94,8 @@ type memReport struct {
 	HeapSysBytes   uint64         `json:"heap_sys_bytes"`
 	Goroutines     int            `json:"goroutines"`
 	UptimeSeconds  int64          `json:"uptime_seconds"`
+	AgentsTotal    int            `json:"agents_total"`
+	AgentsLive     int            `json:"agents_live"`
 	Conversations  map[string]int `json:"conversation_bytes"`
 }
 
@@ -107,14 +103,16 @@ type memReport struct {
 func (s *Server) handleMemstats(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	conv := make(map[string]int, len(s.agents))
-	for id, a := range s.agents {
-		conv[id] = a.ConversationBytes()
+	statuses := s.sup.List()
+	conv := make(map[string]int, len(statuses))
+	for _, st := range statuses {
+		conv[st.ID] = st.Conversation
 	}
 	reply(w, http.StatusOK, memReport{
 		HeapAllocBytes: m.HeapAlloc, HeapSysBytes: m.HeapSys,
 		Goroutines:    runtime.NumGoroutine(),
 		UptimeSeconds: int64(time.Since(s.started).Seconds()),
+		AgentsTotal:   len(statuses), AgentsLive: s.sup.LiveCount(),
 		Conversations: conv,
 	})
 }
