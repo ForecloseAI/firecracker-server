@@ -17,6 +17,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /agents", s.handleList)
 	mux.HandleFunc("POST /agents/{id}/messages", s.withAgent(s.handleMessage))
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
+	mux.HandleFunc("POST /agents/{id}/approvals/{apid}", s.withAgent(s.handleApproval))
 	mux.HandleFunc("GET /agents/{id}/events", s.withAgent(s.handleEvents))
 	mux.HandleFunc("GET /debug/memstats", s.handleMemstats)
 	return mux
@@ -106,6 +107,37 @@ func (s *Server) sendFailed(w http.ResponseWriter, err error) {
 		return
 	}
 	fail(w, http.StatusInternalServerError, "internal", err.Error(), "")
+}
+
+// handleApproval delivers a human's answer to a waiting tool call.
+//
+// A 404 here means the interaction already settled -- answered by someone else,
+// timed out, or revoked by an interrupt. That is a normal race with a second
+// client, not a client error, so it says so rather than failing silently.
+func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request, a *Agent) {
+	var d Decision
+	if json.NewDecoder(r.Body).Decode(&d) != nil {
+		fail(w, http.StatusBadRequest, "bad_request", "could not read the decision", "")
+		return
+	}
+	id := r.PathValue("apid")
+	if !a.Gate().Resolve(id, normalise(d)) {
+		fail(w, http.StatusNotFound, "not_found", "no pending decision", "approval")
+		return
+	}
+	reply(w, http.StatusOK, map[string]any{"approval_id": id, "decision": normalise(d).Decision})
+}
+
+// normalise fills in the decision a bare answer implies, so a client answering
+// a question does not have to also say "allow".
+func normalise(d Decision) Decision {
+	if d.Decision == "" {
+		d.Decision = "deny"
+		if d.Answer != "" {
+			d.Decision = "allow"
+		}
+	}
+	return d
 }
 
 // handleInterrupt stops the turn in flight, if there is one.

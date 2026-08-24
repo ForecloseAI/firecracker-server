@@ -41,6 +41,14 @@ type Event struct {
 	SessionState string `json:"session_state,omitempty"`
 	Message      string `json:"message,omitempty"`
 	IsError      bool   `json:"is_error,omitempty"`
+
+	// A pending interaction waiting on a human, and its resolution.
+	ApprovalID string `json:"approval_id,omitempty"`
+	Preview    string `json:"preview,omitempty"`
+	Question   string `json:"question,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	UI         *UI    `json:"ui,omitempty"`
+	Decision   string `json:"decision,omitempty"`
 }
 
 // Log is one agent's append-only event log, durable on disk so a transcript

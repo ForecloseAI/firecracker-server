@@ -67,7 +67,7 @@ func TestCapTextFlagsTruncation(t *testing.T) {
 // containing one is truncated at the comma with no error. This test caught
 // exactly that, and pins the description against regrowing a comma.
 func TestReadSchemaSurvivesTagParsing(t *testing.T) {
-	tools, err := FileTools(t.TempDir())
+	tools, err := Tools(t.TempDir(), NewGate(mustLog(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,4 +89,14 @@ func TestReadSchemaSurvivesTagParsing(t *testing.T) {
 	if d := got.Properties["path"].Description; !strings.Contains(d, "workspace") {
 		t.Errorf("path description = %q, want the full sentence; a comma in the struct tag truncates it", d)
 	}
+}
+
+// mustLog opens a throwaway log for tests that need a gate.
+func mustLog(t *testing.T) *Log {
+	t.Helper()
+	l, err := OpenLog(t.TempDir(), "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
 }

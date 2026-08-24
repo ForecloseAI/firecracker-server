@@ -50,6 +50,7 @@ type Agent struct {
 	system string
 	tools  []anthropic.BetaTool
 	log    *Log
+	gate   *Gate
 	inbox  chan string
 
 	// Guards everything the HTTP surface reads while the agent goroutine
@@ -62,16 +63,26 @@ type Agent struct {
 	convBytes int
 }
 
-// New builds an agent rooted at dir, restoring its conversation and log from
-// disk. The client reads ANTHROPIC_API_KEY from the environment.
-func New(id, dir, model, system string, tools []anthropic.BetaTool) (*Agent, error) {
+// New builds an agent rooted at dir, working in workspace, restoring its
+// conversation and log from disk. The client reads ANTHROPIC_API_KEY from the
+// environment.
+//
+// The agent owns its log, gate and tools rather than being handed them: the
+// gate records into the log and the tools call the gate, so assembling them
+// anywhere else just moves the knot.
+func New(id, dir, workspace, model, system string) (*Agent, error) {
 	log, err := OpenLog(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	gate := NewGate(log)
+	tools, err := Tools(workspace, gate)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(),
-		model: model, system: system, tools: tools, log: log, state: "idle",
+		model: model, system: system, tools: tools, log: log, gate: gate, state: "idle",
 		inbox: make(chan string, inboxDepth),
 	}
 	if err := a.load(); err != nil {
@@ -81,8 +92,11 @@ func New(id, dir, model, system string, tools []anthropic.BetaTool) (*Agent, err
 	return a, nil
 }
 
-// Log exposes the event log, for the HTTP surface in Phase 3.
+// Log exposes the event log, for the HTTP surface.
 func (a *Agent) Log() *Log { return a.log }
+
+// Gate exposes the approval gate, so the HTTP surface can deliver answers.
+func (a *Agent) Gate() *Gate { return a.gate }
 
 // ID is the agent's slug.
 func (a *Agent) ID() string { return a.id }
@@ -153,6 +167,9 @@ func (a *Agent) Send(text string) error {
 // rather than adopted, so the conversation stays at its last complete boundary
 // and the agent can take the next message immediately.
 func (a *Agent) Interrupt() bool {
+	// Consent given for one piece of work must not carry into whatever the
+	// person asks for next, so every grant and every pending prompt goes too.
+	a.gate.RevokeAll()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.cancel == nil {

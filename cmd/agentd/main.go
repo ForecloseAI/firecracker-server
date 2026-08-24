@@ -27,7 +27,17 @@ const agentID = "boss"
 // system is a placeholder prompt. The real composition -- BASE_IDENTITY, the
 // profile's role, the agent's own instructions, then BASE_LIMITS last -- lands
 // in Phase 5.
-const system = `You are a helpful agent running on a Linux machine. You can read files.
+const system = `You are a helpful agent working on a computer. You can read, write and edit
+files in your workspace, search them, and run shell commands.
+
+Reading, writing, searching and running ordinary commands are yours to do
+freely. Commands that could destroy data or the machine will pause and ask the
+person first. If they say no, stop, and do not look for another way to do the
+same thing.
+
+Use ask_human when you genuinely need the person. Keep the question to one
+short sentence.
+
 Keep replies short and direct. Answer, then stop.`
 
 func main() {
@@ -86,16 +96,12 @@ func runOnce(agent *agentd.Agent, prompt string) error {
 
 // build assembles the agent from the flags.
 func build(model, workspace, stateDir, sysFile string) (*agentd.Agent, error) {
-	tools, err := agentd.FileTools(workspace)
-	if err != nil {
-		return nil, err
-	}
 	sys, err := systemPrompt(sysFile)
 	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(stateDir, "agents", agentID)
-	return agentd.New(agentID, dir, model, sys, tools)
+	return agentd.New(agentID, dir, workspace, model, sys)
 }
 
 // replay prints the events this turn appended, which is the same data a Phase 3
@@ -122,6 +128,12 @@ func show(e agentd.Event) {
 		fmt.Printf("  [state] %s\n", e.SessionState)
 	case "error":
 		fmt.Printf("  [error] %s\n", e.Message)
+	case "approval_required":
+		fmt.Printf("  [approval %s] %s\n", e.ApprovalID, e.Preview)
+	case "question":
+		fmt.Printf("  [question %s] %s\n", e.ApprovalID, e.Question)
+	case "decision":
+		fmt.Printf("  [decision %s] %s\n", e.ApprovalID, e.Decision)
 	case "usage":
 		fmt.Printf("  [usage] model=%s in=%d out=%d cache_read=%d cache_write=%d\n",
 			e.Model, e.Usage.InputTokens, e.Usage.OutputTokens,
