@@ -51,7 +51,10 @@ func (s *Server) Routes() http.Handler {
 	return cop.Handler(mux)
 }
 
-// bridge returns the consumer for a VM, starting one on first use.
+// bridge returns the consumer for a VM, starting one on first use. A cached
+// bridge may have stopped itself after an idle period; Subscribe revives it, so
+// do not add eviction here. Removing it from this map would need s.mu while
+// holding b.mu, which inverts the lock order every other path takes.
 func (s *Server) bridge(id string) *Bridge {
 	s.mu.Lock()
 	defer s.mu.Unlock()
