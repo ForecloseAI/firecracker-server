@@ -21,13 +21,13 @@ type askInput struct {
 // chokepoint. The TypeScript agent could only gate Bash, because Read, Write
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
-func Tools(root string, gate *Gate, allow []string) ([]anthropic.BetaTool, error) {
-	files, err := fileTools(root)
+func Tools(r roots, gate *Gate, allow []string) ([]anthropic.BetaTool, error) {
+	files, err := fileTools(r)
 	if err != nil {
 		return nil, err
 	}
 	rest, err := buildTools(
-		func() (anthropic.BetaTool, error) { return bashTool(root, gate) },
+		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, gate) },
 		func() (anthropic.BetaTool, error) { return askTool(gate) },
 	)
 	if err != nil {

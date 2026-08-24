@@ -97,11 +97,11 @@ func TestParseProfileRejectsMissingFrontMatter(t *testing.T) {
 // will make boss-only powers structural.
 func TestProfileToolListNarrowsTheSurface(t *testing.T) {
 	gate := NewGate(mustLog(t))
-	all, err := Tools(t.TempDir(), gate, nil)
+	all, err := Tools(roots{workspace: t.TempDir()}, gate, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	narrow, err := Tools(t.TempDir(), gate, []string{"Read", "Grep"})
+	narrow, err := Tools(roots{workspace: t.TempDir()}, gate, []string{"Read", "Grep"})
 	if err != nil {
 		t.Fatal(err)
 	}

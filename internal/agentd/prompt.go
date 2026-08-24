@@ -71,16 +71,24 @@ the person has not given.
 Do not try to reach the host machine or any other virtual machine.`
 
 // ComposeSystemPrompt builds one agent's system prompt: the shared identity,
-// the profile's role, the agent's own standing instructions, then the limits.
+// the profile's role, what it remembers, its own standing instructions, then
+// the limits.
 //
-// instructions.md is read here rather than at startup so a restart is all it
-// takes to change what an agent is, with no rebuild.
-func ComposeSystemPrompt(p Profile, instructionsPath string) string {
+// Memory and instructions are read here rather than baked in, so a restart is
+// all it takes to change what an agent knows or is, with no rebuild. That also
+// means both are frozen for the life of a running agent -- which is what keeps
+// the cached prefix stable, and why an evicted agent comes back with a fresh
+// view of its own memory. Anything deeper it reads on demand by following links
+// from the index.
+func ComposeSystemPrompt(p Profile, agentDir string) string {
 	parts := []string{BaseIdentity}
 	if role := strings.TrimSpace(p.Prompt); role != "" {
 		parts = append(parts, role)
 	}
-	if own := readCapped(instructionsPath, instructionsCap); own != "" {
+	if mem := RenderMemorySection(agentDir); mem != "" {
+		parts = append(parts, mem)
+	}
+	if own := readCapped(instructionsPath(agentDir), instructionsCap); own != "" {
 		parts = append(parts, "## Your standing instructions\n"+own)
 	}
 	return strings.Join(append(parts, BaseLimits), "\n\n")

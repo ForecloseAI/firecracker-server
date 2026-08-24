@@ -76,14 +76,19 @@ func New(id, dir, workspace string, p Profile) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := EnsureMemory(dir); err != nil {
+		// A memory failure must degrade to "an agent with no memory", never to
+		// "an agent that did not start".
+		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
+	}
 	gate := NewGate(log)
-	tools, err := Tools(workspace, gate, p.Tools)
+	tools, err := Tools(roots{workspace: workspace, own: dir}, gate, p.Tools)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
-		model: p.Model, system: ComposeSystemPrompt(p, filepath.Join(dir, "instructions.md")),
+		model: p.Model, system: ComposeSystemPrompt(p, dir),
 		tools: tools, log: log, gate: gate, state: "idle",
 		inbox: make(chan string, inboxDepth),
 	}

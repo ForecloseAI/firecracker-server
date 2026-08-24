@@ -52,23 +52,44 @@ type grepInput struct {
 	Path    string `json:"path" jsonschema:"description=Subdirectory to search - defaults to the whole workspace"`
 }
 
-// fileTools returns the file tools, all confined to root.
-func fileTools(root string) ([]anthropic.BetaTool, error) {
+// roots is where an agent's file tools may reach: the shared workspace, and
+// its own state directory.
+//
+// Its own state has to be reachable or the agent cannot maintain its memory --
+// the doctrine tells it to edit memory/index.md, and a tool that refuses is
+// worse than no tool. Another agent's state directory is not in this list, so
+// one agent still cannot read another's memory.
+type roots struct {
+	workspace string // also the base for Glob and Grep walks
+	own       string
+}
+
+// fileTools returns the file tools, confined to the given roots.
+func fileTools(r roots) ([]anthropic.BetaTool, error) {
 	return buildTools(
-		func() (anthropic.BetaTool, error) { return readTool(root) },
-		func() (anthropic.BetaTool, error) { return writeTool(root) },
-		func() (anthropic.BetaTool, error) { return editTool(root) },
-		func() (anthropic.BetaTool, error) { return globTool(root) },
-		func() (anthropic.BetaTool, error) { return grepTool(root) },
+		func() (anthropic.BetaTool, error) { return readTool(r) },
+		func() (anthropic.BetaTool, error) { return writeTool(r) },
+		func() (anthropic.BetaTool, error) { return editTool(r) },
+		func() (anthropic.BetaTool, error) { return globTool(r) },
+		func() (anthropic.BetaTool, error) { return grepTool(r) },
 	)
 }
 
+// list is the roots a path may resolve under, skipping any that is unset.
+func (r roots) list() []string {
+	out := []string{r.workspace}
+	if r.own != "" {
+		out = append(out, r.own)
+	}
+	return out
+}
+
 // readTool reads a text file.
-func readTool(root string) (anthropic.BetaTool, error) {
+func readTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[readInput](
 		"Read", "Read a UTF-8 text file and return its contents.",
 		func(ctx context.Context, in readInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			full, err := resolve(root, in.Path)
+			full, err := resolve(r, in.Path)
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
@@ -81,11 +102,11 @@ func readTool(root string) (anthropic.BetaTool, error) {
 }
 
 // writeTool creates or overwrites a file, making parent directories as needed.
-func writeTool(root string) (anthropic.BetaTool, error) {
+func writeTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[writeInput](
 		"Write", "Create or overwrite a file with the given contents.",
 		func(ctx context.Context, in writeInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			full, err := resolve(root, in.Path)
+			full, err := resolve(r, in.Path)
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
@@ -100,11 +121,11 @@ func writeTool(root string) (anthropic.BetaTool, error) {
 }
 
 // editTool replaces exact text in a file.
-func editTool(root string) (anthropic.BetaTool, error) {
+func editTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[editInput](
 		"Edit", "Replace exact text in a file. Fails unless old_string appears exactly once, unless replace_all is set.",
 		func(ctx context.Context, in editInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			full, err := resolve(root, in.Path)
+			full, err := resolve(r, in.Path)
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
@@ -137,7 +158,7 @@ func applyEdit(full string, in editInput) string {
 }
 
 // globTool lists files matching a pattern.
-func globTool(root string) (anthropic.BetaTool, error) {
+func globTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[globInput](
 		"Glob", "List workspace files whose path matches a glob pattern.",
 		func(ctx context.Context, in globInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
@@ -145,7 +166,7 @@ func globTool(root string) (anthropic.BetaTool, error) {
 			if err != nil {
 				return toolText("bad pattern: " + err.Error()), nil
 			}
-			return toolText(joinOrNone(walkMatch(root, re), "no files matched")), nil
+			return toolText(joinOrNone(walkMatch(r.workspace, re), "no files matched")), nil
 		})
 }
 
@@ -199,7 +220,7 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 }
 
 // grepTool searches file contents.
-func grepTool(root string) (anthropic.BetaTool, error) {
+func grepTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[grepInput](
 		"Grep", "Search workspace file contents with a regular expression.",
 		func(ctx context.Context, in grepInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
@@ -207,11 +228,11 @@ func grepTool(root string) (anthropic.BetaTool, error) {
 			if err != nil {
 				return toolText("bad pattern: " + err.Error()), nil
 			}
-			base, err := resolve(root, orDefault(in.Path, "."))
+			base, err := resolve(r, orDefault(in.Path, "."))
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
-			return toolText(joinOrNone(grepTree(root, base, re), "no matches")), nil
+			return toolText(joinOrNone(grepTree(r.workspace, base, re), "no matches")), nil
 		})
 }
 
@@ -260,25 +281,33 @@ func joinOrNone(lines []string, empty string) string {
 	return body
 }
 
-// resolve confines a path to root. Everything the agent touches goes through
-// here, so a traversal out of the workspace fails in one place rather than in
-// each tool. This is a hard block, not an approval prompt: there is no reason
-// for a workspace tool to reach outside and no answer a person could give that
-// would make it right.
-func resolve(root, path string) (string, error) {
-	base, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("bad workspace root: %v", err)
-	}
+// resolve confines a path to the agent's roots. Everything the agent touches
+// goes through here, so a traversal out of them fails in one place rather than
+// in each tool. This is a hard block, not an approval prompt: there is no
+// answer a person could give that makes reaching into /etc correct.
+//
+// A relative path is taken against the workspace, which is where work happens;
+// memory is reached by the absolute path the prompt already names.
+func resolve(r roots, path string) (string, error) {
 	full := path
 	if !filepath.IsAbs(full) {
+		base, err := filepath.Abs(r.workspace)
+		if err != nil {
+			return "", fmt.Errorf("bad workspace root: %v", err)
+		}
 		full = filepath.Join(base, full)
 	}
 	full = filepath.Clean(full)
-	if full != base && !strings.HasPrefix(full, base+string(filepath.Separator)) {
-		return "", fmt.Errorf("%s is outside the workspace", path)
+	for _, root := range r.list() {
+		base, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if full == base || strings.HasPrefix(full, base+string(filepath.Separator)) {
+			return full, nil
+		}
 	}
-	return full, nil
+	return "", fmt.Errorf("%s is outside the workspace and your own files", path)
 }
 
 // capText truncates to readCap, telling the model it was truncated so it can

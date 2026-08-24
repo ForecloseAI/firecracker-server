@@ -13,7 +13,7 @@ func TestResolveConfinesToRoot(t *testing.T) {
 	root := t.TempDir()
 	escapes := []string{"../outside", "a/../../outside", "/etc/passwd", "sub/../../.."}
 	for _, p := range escapes {
-		if got, err := resolve(root, p); err == nil {
+		if got, err := resolve(roots{workspace: root}, p); err == nil {
 			t.Errorf("resolve(%q) = %q, want an out-of-workspace error", p, got)
 		}
 	}
@@ -29,7 +29,7 @@ func TestResolveAllowsInsideRoot(t *testing.T) {
 		filepath.Join(root, "x.md"): filepath.Join(root, "x.md"),
 	}
 	for in, want := range inside {
-		got, err := resolve(root, in)
+		got, err := resolve(roots{workspace: root}, in)
 		if err != nil {
 			t.Fatalf("resolve(%q): %v", in, err)
 		}
@@ -43,7 +43,7 @@ func TestResolveAllowsInsideRoot(t *testing.T) {
 // starts with /work. The separator in the comparison is what stops it.
 func TestResolveRejectsSiblingWithSharedPrefix(t *testing.T) {
 	root := t.TempDir()
-	if _, err := resolve(root, root+"-other/secret"); err == nil {
+	if _, err := resolve(roots{workspace: root}, root+"-other/secret"); err == nil {
 		t.Error("a sibling directory sharing the root's prefix was allowed in")
 	}
 }
@@ -67,7 +67,7 @@ func TestCapTextFlagsTruncation(t *testing.T) {
 // containing one is truncated at the comma with no error. This test caught
 // exactly that, and pins the description against regrowing a comma.
 func TestReadSchemaSurvivesTagParsing(t *testing.T) {
-	tools, err := Tools(t.TempDir(), NewGate(mustLog(t)), nil)
+	tools, err := Tools(roots{workspace: t.TempDir()}, NewGate(mustLog(t)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
