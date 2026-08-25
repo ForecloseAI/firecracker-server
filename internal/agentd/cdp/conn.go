@@ -52,10 +52,21 @@ type Conn struct {
 	mu      sync.Mutex
 	nextID  int
 	pending map[int]chan reply
-	events  map[string][]chan json.RawMessage
+	events  map[string][]*sub
 	closed  bool
 
 	wmu sync.Mutex // serialises writes; see the type doc
+}
+
+// sub is one event subscriber.
+//
+// A struct rather than a bare channel so unsubscribe can identify it by pointer
+// -- two subscribers to the same method are otherwise indistinguishable -- and
+// so closing it twice is safe. Both matter once retiring a subscription is a
+// routine thing rather than something that never happens.
+type sub struct {
+	ch     chan json.RawMessage
+	closed bool
 }
 
 // reply is one command result, or the error Chrome answered with.
@@ -103,7 +114,7 @@ func Dial(ctx context.Context, wsURL string) (*Conn, error) {
 	c := &Conn{
 		ws:      ws,
 		pending: map[int]chan reply{},
-		events:  map[string][]chan json.RawMessage{},
+		events:  map[string][]*sub{},
 	}
 	go c.readPump()
 	return c, nil
@@ -156,13 +167,21 @@ func (c *Conn) deliver(m message) {
 
 // publish fans an event out to its subscribers, dropping it for any subscriber
 // that is not keeping up. A slow reader must not stall the whole connection.
+//
+// The lock is held ACROSS the sends, not merely across the lookup. This version
+// copied the slice and sent unlocked, which was safe only because nothing ever
+// closed a subscriber channel -- and the moment retiring a subscription became
+// possible, that copy could be mid-send on a channel unsubscribe had just
+// closed. A send on a closed channel is an unrecoverable panic, and it would
+// take agentd down with every agent on the machine. The sends are non-blocking
+// selects over buffered channels, so the hold is bounded by the subscriber
+// count and cannot block on a reader.
 func (c *Conn) publish(m message) {
 	c.mu.Lock()
-	subs := append([]chan json.RawMessage(nil), c.events[m.Method]...)
-	c.mu.Unlock()
-	for _, ch := range subs {
+	defer c.mu.Unlock()
+	for _, s := range c.events[m.Method] {
 		select {
-		case ch <- m.Params:
+		case s.ch <- m.Params:
 		default:
 		}
 	}
@@ -178,6 +197,7 @@ func (c *Conn) failAll(err error) {
 		ch <- reply{err: fmt.Errorf("devtools connection lost: %w", err)}
 		delete(c.pending, id)
 	}
+	c.closeSubsLocked()
 }
 
 // Call sends one command and waits for its reply. sessionID targets an attached
@@ -270,15 +290,54 @@ func (c *Conn) isClosed() bool {
 	return c.closed
 }
 
-// Subscribe returns a channel of params for one CDP event. The buffer is what
-// lets publish drop rather than block; a subscriber that cares about every
-// frame should drain promptly.
-func (c *Conn) Subscribe(method string) <-chan json.RawMessage {
-	ch := make(chan json.RawMessage, 32)
+// Subscribe returns a channel of params for one CDP event, and the func that
+// retires it. The buffer is what lets publish drop rather than block; a
+// subscriber that cares about every frame should drain promptly.
+//
+// The retirement func is not a nicety. Before it, a subscriber lived as long as
+// the process: every Chrome restart -- observed at NRestarts=230 -- stranded the
+// navigation and dialog watchers of the connection it replaced, parked forever
+// on channels nobody would ever write to again.
+func (c *Conn) Subscribe(method string) (<-chan json.RawMessage, func()) {
+	s := &sub{ch: make(chan json.RawMessage, 32)}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.events[method] = append(c.events[method], ch)
-	return ch
+	c.events[method] = append(c.events[method], s)
+	return s.ch, func() { c.unsubscribe(method, s) }
+}
+
+// unsubscribe drops one subscriber and closes its channel, waking whatever is
+// ranging over it. Safe to call twice, and safe after the connection is gone.
+func (c *Conn) unsubscribe(method string, s *sub) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	subs := c.events[method]
+	for i, other := range subs {
+		if other == s {
+			c.events[method] = append(subs[:i:i], subs[i+1:]...)
+			break
+		}
+	}
+	closeSub(s)
+}
+
+// closeSub closes a subscriber once. Caller holds c.mu.
+func closeSub(s *sub) {
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+}
+
+// closeSubsLocked retires every subscriber, so no watcher outlives the
+// connection it was reading. Caller holds c.mu.
+func (c *Conn) closeSubsLocked() {
+	for method, subs := range c.events {
+		for _, s := range subs {
+			closeSub(s)
+		}
+		delete(c.events, method)
+	}
 }
 
 // Close shuts the connection down. Safe to call twice.
@@ -286,6 +345,7 @@ func (c *Conn) Close() error {
 	c.mu.Lock()
 	already := c.closed
 	c.closed = true
+	c.closeSubsLocked()
 	c.mu.Unlock()
 	if already {
 		return nil

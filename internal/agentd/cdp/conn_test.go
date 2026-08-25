@@ -126,7 +126,7 @@ func TestSubscribeReceivesInterleavedEvents(t *testing.T) {
 		writeJSON(ws, message{ID: m.ID, Result: json.RawMessage(`{}`)})
 	})
 	c := dialFake(t, url)
-	evs := c.Subscribe("Page.loadEventFired")
+	evs, _ := c.Subscribe("Page.loadEventFired")
 	if err := c.Call(context.Background(), "", "Page.enable", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -193,5 +193,67 @@ func TestCallCarriesSessionID(t *testing.T) {
 	}
 	if got := <-seen; got != "SESSION-7" {
 		t.Errorf("sessionId = %q, want SESSION-7", got)
+	}
+}
+
+// The panic this guards is not silent -- it is a crash -- but it is rare enough
+// to survive review and frequent enough to happen in production, which is
+// worse. publish used to copy the subscriber slice under the lock and send
+// outside it, which was safe only because nothing ever closed a subscriber
+// channel. Retiring a subscription makes closing routine, and a send landing on
+// a just-closed channel takes agentd down with every agent on the machine.
+func TestRetiringASubscriptionWhileEventsArriveDoesNotPanic(t *testing.T) {
+	url := fakeChrome(t, func(ws *websocket.Conn, m message) {
+		for i := 0; i < 40; i++ {
+			writeJSON(ws, message{Method: "Page.loadEventFired", Params: json.RawMessage(`{}`)})
+		}
+		writeJSON(ws, message{ID: m.ID, Result: json.RawMessage(`{}`)})
+	})
+	c := dialFake(t, url)
+	for i := 0; i < 30; i++ {
+		_, stop := c.Subscribe("Page.loadEventFired")
+		if err := c.Call(context.Background(), "", "Page.enable", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		stop()
+		stop() // retiring twice must be safe: a watcher defers it, and Close may have got there first
+	}
+}
+
+// Every Chrome restart -- observed at NRestarts=230 from a stale SingletonLock --
+// left the previous connection's navigation and dialog watchers parked forever
+// on channels nobody would ever write to again. Closing the connection has to
+// wake them, or a long-lived VM accumulates goroutines for the life of the
+// process.
+func TestClosingTheConnectionWakesItsWatchers(t *testing.T) {
+	c := dialFake(t, fakeChrome(t, func(_ *websocket.Conn, _ message) {}))
+	evs, _ := c.Subscribe("Page.loadEventFired")
+	done := make(chan struct{})
+	go func() {
+		for range evs {
+		}
+		close(done)
+	}()
+	c.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a watcher survived the connection it was reading")
+	}
+}
+
+// A dead connection must wake watchers too, not just an orderly Close: the
+// browser crashing is the common case, and failAll is the path it takes.
+func TestALostConnectionWakesItsWatchers(t *testing.T) {
+	c := dialFake(t, fakeChrome(t, func(ws *websocket.Conn, _ message) { ws.CloseNow() }))
+	evs, _ := c.Subscribe("Page.loadEventFired")
+	go c.Call(context.Background(), "", "Page.enable", nil, nil)
+	select {
+	case _, ok := <-evs:
+		if ok {
+			t.Error("expected the channel to be closed, not written to")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a watcher survived the connection dying")
 	}
 }

@@ -180,8 +180,10 @@ func (b *Browser) enableDomains(ctx context.Context) error {
 // invalidation to Chrome's own events rather than to our commands is what makes
 // a stale uid impossible to act on rather than merely unlikely.
 func (b *Browser) watchNavigation() {
-	navigated := b.conn.Subscribe("Page.frameNavigated")
-	loaded := b.conn.Subscribe("Page.loadEventFired")
+	navigated, stopNav := b.conn.Subscribe("Page.frameNavigated")
+	loaded, stopLoad := b.conn.Subscribe("Page.loadEventFired")
+	defer stopNav()
+	defer stopLoad()
 	for {
 		select {
 		case params, ok := <-navigated:

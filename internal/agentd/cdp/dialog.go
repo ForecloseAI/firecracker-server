@@ -22,8 +22,10 @@ type Dialog struct {
 
 // watchDialogs tracks what Chrome is showing, so the tools can refuse cheaply.
 func (b *Browser) watchDialogs() {
-	opening := b.conn.Subscribe("Page.javascriptDialogOpening")
-	closed := b.conn.Subscribe("Page.javascriptDialogClosed")
+	opening, stopOpen := b.conn.Subscribe("Page.javascriptDialogOpening")
+	closed, stopClosed := b.conn.Subscribe("Page.javascriptDialogClosed")
+	defer stopOpen()
+	defer stopClosed()
 	for {
 		select {
 		case params, ok := <-opening:
