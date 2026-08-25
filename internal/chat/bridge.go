@@ -44,12 +44,15 @@ type Frame struct {
 	Label     string `json:"label,omitempty"`
 	State     string `json:"state,omitempty"`
 	PendingID string `json:"pending_id,omitempty"`
-	Prompt    string `json:"prompt,omitempty"`
-	Detail    string `json:"detail,omitempty"`
-	UI        *UI    `json:"ui,omitempty"`
-	Decision  string `json:"decision,omitempty"`
-	OK        bool   `json:"ok,omitempty"`
-	DurMS     int64  `json:"duration_ms,omitempty"`
+	// Agent names who is asking, on pending cards only. Any agent can raise its
+	// hand, and the person answers THAT agent -- so the card has to say which.
+	Agent    string `json:"agent,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+	UI       *UI    `json:"ui,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	OK       bool   `json:"ok,omitempty"`
+	DurMS    int64  `json:"duration_ms,omitempty"`
 }
 
 // Bridge consumes one VM's event log and fans frames out to browsers.
@@ -82,6 +85,11 @@ func (b *Bridge) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.ctx, b.stop = ctx, cancel
 	go b.run(ctx)
+	// A second consumer on the SAME context: the transcript comes from the
+	// boss's log, but a raised hand can come from any agent on the machine, and
+	// one log cannot carry both. Sharing the context is what keeps the lifecycle
+	// single -- stopIfEmpty cancels both, Subscribe revives both.
+	go b.runPending(ctx)
 }
 
 // run reconnects to the guest forever, re-resolving its IP each time because a
@@ -100,6 +108,115 @@ func (b *Bridge) run(ctx context.Context) {
 		}
 		delay = min(delay*2, backoffMax)
 	}
+}
+
+// runPending reconnects to the machine's raised hands forever, on the same
+// backoff as the transcript.
+func (b *Bridge) runPending(ctx context.Context) {
+	delay := backoffBase
+	for ctx.Err() == nil {
+		if err := b.consumePending(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("chat bridge %s: pending: %v", b.id, err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, backoffMax)
+	}
+}
+
+// consumePending resolves the guest and streams its raised hands.
+func (b *Bridge) consumePending(ctx context.Context) error {
+	view, err := b.control.VM(b.id)
+	if err != nil {
+		return err
+	}
+	cl := agent.New(view.GuestIP, guestPort)
+	now, err := cl.Pending()
+	if err != nil {
+		return err
+	}
+	b.resync(now)
+	return cl.StreamPending(ctx, b.onPending)
+}
+
+// onPending turns one hub change into a card appearing or being taken down.
+//
+// Both frames carry ID 0 deliberately: they are live state, not points in the
+// guest's log, so they must not move the resume watermark.
+func (b *Bridge) onPending(c agentapi.PendingChange) {
+	if c.ClearedID != "" {
+		b.forget(c.ClearedID)
+		b.emit(Frame{Kind: "resolved", PendingID: c.ClearedID})
+		return
+	}
+	// The hub replays its whole current set on every connect, so a reconnect
+	// re-raises cards the page is already showing. Without this the page stacks
+	// a duplicate node per card per blip, and only the newest ever greys out.
+	if b.known(c.Raised.ID) {
+		return
+	}
+	b.emit(b.cardFor(*c.Raised))
+}
+
+// known reports whether a card is already being shown.
+func (b *Bridge) known(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.pending[id]
+	return ok
+}
+
+// resync reconciles against the hub's current set when a stream opens.
+//
+// The stream only ever replays `raised`, never `cleared`, so a card answered
+// while this bridge was idle-stopped is invisible to it. Without this diff that
+// card returns on the next page load with buttons that 404 -- the stale-orphan
+// failure this phase set out to end, coming back through the one door the
+// stream cannot cover.
+func (b *Bridge) resync(now []agentapi.Raised) {
+	keep := make(map[string]bool, len(now))
+	for _, r := range now {
+		keep[r.ID] = true
+	}
+	for _, id := range b.dropMissing(keep) {
+		b.emit(Frame{Kind: "resolved", PendingID: id})
+	}
+	for _, r := range now {
+		if !b.known(r.ID) {
+			b.emit(b.cardFor(r))
+		}
+	}
+}
+
+// dropMissing forgets every card the hub no longer holds, returning their ids.
+func (b *Bridge) dropMissing(keep map[string]bool) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var gone []string
+	for id := range b.pending {
+		if !keep[id] {
+			gone = append(gone, id)
+			delete(b.pending, id)
+		}
+	}
+	return gone
+}
+
+// cardFor builds a card, stores it so an answer can be looked up, and returns
+// the frame that renders it.
+func (b *Bridge) cardFor(r agentapi.Raised) Frame {
+	p := buildPending(r)
+	if p.UI.Kind == "handoff" && b.caps != nil {
+		p.UI.URL = b.caps.Mint(b.id)
+	}
+	b.mu.Lock()
+	b.pending[p.ID] = p
+	b.mu.Unlock()
+	return Frame{Kind: "pending", PendingID: p.ID, Agent: p.Agent,
+		Prompt: p.Prompt, Detail: p.Detail, UI: &p.UI}
 }
 
 // consume resolves the guest and streams its events until the stream ends.
@@ -147,30 +264,12 @@ func (b *Bridge) frameFor(ev agentapi.Event) (Frame, bool) {
 		return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Tool, Label: label, Detail: detail}, true
 	case "state":
 		return Frame{ID: ev.ID, Kind: "state", State: ev.SessionState}, true
-	case "approval_required", "question":
-		return b.pendingFrame(ev), true
-	case "decision":
-		b.forget(ev.ApprovalID)
-		return Frame{ID: ev.ID, Kind: "resolved", PendingID: ev.ApprovalID, Decision: ev.Decision}, true
 	case "turn_complete":
 		return Frame{ID: ev.ID, Kind: "turn", OK: !ev.IsError, DurMS: ev.DurationMS}, true
 	case "error":
 		return Frame{ID: ev.ID, Kind: "error", Text: ev.Message}, true
 	}
 	return Frame{}, false
-}
-
-// pendingFrame registers a pending interaction and renders its card.
-func (b *Bridge) pendingFrame(ev agentapi.Event) Frame {
-	p := buildPending(ev)
-	if p.UI.Kind == "handoff" {
-		p.UI.URL = b.caps.Mint(b.id)
-	}
-	b.mu.Lock()
-	b.pending[p.ID] = p
-	b.mu.Unlock()
-	return Frame{ID: ev.ID, Kind: "pending", PendingID: p.ID,
-		Prompt: p.Prompt, Detail: p.Detail, UI: &p.UI}
 }
 
 // forget drops a resolved pending interaction.
@@ -251,47 +350,46 @@ func (b *Bridge) replay(evs []agentapi.Event) []Frame {
 	return b.withPending(out)
 }
 
-// unshownPending lists interactions still waiting on a human that the truncated
-// window no longer carries, ordered by id so a reconnect is deterministic.
-func (b *Bridge) unshownPending(out []Frame) []*Pending {
-	shown := make(map[string]bool, len(out))
-	for _, f := range out {
-		if f.Kind == "pending" {
-			shown[f.PendingID] = true
-		}
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	missing := make([]*Pending, 0, len(b.pending))
-	for _, p := range b.pending {
-		if !shown[p.ID] {
-			missing = append(missing, p)
-		}
-	}
-	sort.Slice(missing, func(i, j int) bool { return missing[i].ID < missing[j].ID })
-	return missing
-}
-
-// withPending re-appends cards for interactions still waiting on a human.
+// withPending appends a card for every hand currently up.
 //
-// replay truncates to the newest ringSize frames, but frameFor's side effects
-// rebuild b.pending from the WHOLE log -- so a card older than the window is
-// dropped from the page while the bridge still accepts an answer for its id.
-// The agent stays blocked and the person never sees what it is waiting for,
-// until the gate times out half an hour later.
+// The transcript no longer carries cards at all, so there is nothing to
+// reconcile against: the hub is the only source and it is authoritative. What
+// this replaces walked the replayed window looking for cards it had missed --
+// which silently dropped any card older than the window while the agent stayed
+// blocked, and appended a duplicate node for every one it re-emitted.
 //
-// Appended, not prepended, so the card lands at the bottom where the newest
-// thing belongs. ID 0 keeps emitFrame's resume watermark untouched.
+// ID 0 keeps emitFrame's resume watermark untouched: a card is live state, not
+// a point in the guest's log.
 func (b *Bridge) withPending(out []Frame) []Frame {
-	for _, p := range b.unshownPending(out) {
+	for _, p := range b.cards() {
 		ui := p.UI
 		// The card's original capability is 15 minutes old at best.
 		if ui.Kind == "handoff" && b.caps != nil {
 			ui.URL = b.caps.Mint(b.id)
 		}
-		out = append(out, Frame{Kind: "pending", PendingID: p.ID,
+		out = append(out, Frame{Kind: "pending", PendingID: p.ID, Agent: p.Agent,
 			Prompt: p.Prompt, Detail: p.Detail, UI: &ui})
 	}
+	return out
+}
+
+// cards is every raised hand, in a stable order rather than map order.
+func (b *Bridge) cards() []*Pending {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]*Pending, 0, len(b.pending))
+	for _, p := range b.pending {
+		out = append(out, p)
+	}
+	// Ordered by when the person was asked. Sorting by id would group by agent
+	// instead, because ids are namespaced -- so a worker's newer question would
+	// sort above the boss's older one purely on the letter it starts with.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.Before(out[j].Since)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 

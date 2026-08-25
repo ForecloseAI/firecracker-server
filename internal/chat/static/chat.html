@@ -44,6 +44,7 @@
   .turn { align-self:center; color:var(--dim); font-size:12px; }
   .card { align-self:flex-start; max-width:min(680px,92%); background:var(--panel);
     border:1px solid var(--warn); border-radius:6px; padding:11px; }
+  .card .who { color:var(--dim); font-size:12px; margin-bottom:4px; }
   .card .prompt { margin-bottom:6px; }
   .card .detail { color:var(--dim); font-size:12px; white-space:pre-wrap;
     overflow-wrap:anywhere; margin-bottom:9px; }
@@ -174,7 +175,9 @@ function renderPending(f) {
   setWorking(false);
   setState("waiting for you", "waiting");
   const el = add("card", "");
-  el.innerHTML = "<div class='prompt'>" + esc(f.prompt) + "</div>" +
+  // Any agent can raise its hand, so the card says which one is asking.
+  el.innerHTML = (f.agent ? "<div class='who'>" + esc(f.agent) + " is asking</div>" : "") +
+    "<div class='prompt'>" + esc(f.prompt) + "</div>" +
     (f.detail ? "<div class='detail'>" + esc(f.detail) + "</div>" : "");
   for (const opt of (f.ui && f.ui.options) || []) {
     el.appendChild(optionButton(f, opt));

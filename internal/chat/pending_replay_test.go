@@ -1,31 +1,23 @@
 package chat
 
 import (
-	"fmt"
 	"testing"
+	"time"
 
 	"cracked/internal/agentapi"
 )
 
-// approvalEvent is a guest approval waiting on a human decision.
-func approvalEvent(id int, approvalID string) agentapi.Event {
-	return agentapi.Event{ID: id, Type: "approval_required", ApprovalID: approvalID,
-		Tool: "Bash", Preview: "Run shell command: rm -rf /tmp/x"}
+// raise pushes one hand up through the bridge, as the guest's hub would.
+func raise(b *Bridge, id, agent string) {
+	b.onPending(agentapi.PendingChange{Raised: &agentapi.Raised{
+		ID: id, Agent: agent, Kind: "approval_required", Tool: "Bash", Preview: "rm -rf /tmp/x",
+	}})
 }
 
-// noisyLog is `n` ordinary frames, enough to blow past the replay window.
-func noisyLog(from, n int) []agentapi.Event {
-	out := make([]agentapi.Event, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, agentapi.Event{ID: from + i, Type: "text", Text: fmt.Sprintf("line %d", i)})
-	}
-	return out
-}
-
-// pendingFrames picks out the cards in a replay result.
-func pendingFrames(frames []Frame) []Frame {
-	var out []Frame
-	for _, f := range frames {
+// cardsIn picks the pending frames out of a batch.
+func cardsIn(fs []Frame) []Frame {
+	out := []Frame{}
+	for _, f := range fs {
 		if f.Kind == "pending" {
 			out = append(out, f)
 		}
@@ -33,77 +25,150 @@ func pendingFrames(frames []Frame) []Frame {
 	return out
 }
 
-// A card older than the replay window must still reach the page. The bridge goes
-// on accepting an answer for its id, so without this the agent sits blocked on a
-// question nobody can see until the gate times out half an hour later.
-func TestPendingSurvivesTruncation(t *testing.T) {
-	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agentapi.Event{approvalEvent(1, "ap_001")}, noisyLog(2, ringSize+50)...)
-
-	frames := b.replay(evs)
-
-	cards := pendingFrames(frames)
-	if len(cards) != 1 {
-		t.Fatalf("got %d cards, want 1 -- the card was truncated away", len(cards))
+// Cards come from the hub, not from the transcript. This is the whole point of
+// the phase: a WORKER's approval is never in the boss's log, so a page that
+// derived cards from that log could not show one at all -- and the person would
+// never learn the agent was blocked.
+func TestCardsComeFromTheHubNotTheLog(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	raise(b, "cody.ap_001", "cody")
+	got := cardsIn(b.withPending(nil))
+	if len(got) != 1 {
+		t.Fatalf("got %d cards, want the worker's", len(got))
 	}
-	if cards[0].PendingID != "ap_001" {
-		t.Errorf("PendingID = %q, want ap_001", cards[0].PendingID)
-	}
-	// ID 0 keeps emitFrame's resume watermark untouched; a real id here would be
-	// silently swallowed as already-sent.
-	if cards[0].ID != 0 {
-		t.Errorf("re-emitted card ID = %d, want 0", cards[0].ID)
-	}
-	if frames[len(frames)-1].Kind != "pending" {
-		t.Error("the card must land last, where the newest thing belongs")
+	if got[0].Agent != "cody" || got[0].PendingID != "cody.ap_001" {
+		t.Errorf("card = %+v, want it attributed to cody", got[0])
 	}
 }
 
-// Within the window the card is already there, and a second copy would render as
-// a duplicate: chat.html appends a new node per pending frame.
-func TestPendingNotDuplicatedWhenInWindow(t *testing.T) {
-	b := &Bridge{pending: map[string]*Pending{}}
-
-	frames := b.replay([]agentapi.Event{approvalEvent(1, "ap_001"), {ID: 2, Type: "text", Text: "hi"}})
-
-	if got := len(pendingFrames(frames)); got != 1 {
-		t.Fatalf("got %d cards, want exactly 1", got)
+// A reload must show one card, not two. The old path re-emitted stranded cards
+// alongside any the replay window still held, and chat.html appends a new node
+// per pending frame -- so duplicates piled up with live-looking buttons, while
+// only the newest ever greyed out.
+func TestReconnectDoesNotDuplicateCards(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	raise(b, "boss.ap_001", "boss")
+	first := cardsIn(b.withPending(nil))
+	second := cardsIn(b.withPending(nil))
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("first %d cards, second %d; want exactly 1 each", len(first), len(second))
 	}
 }
 
 // An answered card must not come back on the next page load.
-func TestResolvedPendingNotReemitted(t *testing.T) {
-	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agentapi.Event{
-		approvalEvent(1, "ap_001"),
-		{ID: 2, Type: "decision", ApprovalID: "ap_001", Decision: "allow"},
-	}, noisyLog(3, ringSize+50)...)
-
-	frames := b.replay(evs)
-
-	if got := len(pendingFrames(frames)); got != 0 {
-		t.Fatalf("got %d cards, want 0 -- a resolved card was re-emitted", got)
+func TestResolvedCardIsNotReemitted(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	raise(b, "boss.ap_001", "boss")
+	b.onPending(agentapi.PendingChange{ClearedID: "boss.ap_001"})
+	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
+		t.Errorf("an answered card came back: %+v", got)
 	}
 }
 
-// Several stranded cards must come back in a stable order, not map order.
-func TestUnshownPendingIsOrdered(t *testing.T) {
-	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agentapi.Event{
-		approvalEvent(1, "ap_003"), approvalEvent(2, "ap_001"), approvalEvent(3, "ap_002"),
-	}, noisyLog(4, ringSize+50)...)
+// A gate that gives up logs NO decision event -- it just stops waiting. The old
+// path only dropped a card when it saw one, so a timed-out card became a
+// permanent orphan that every later page load re-rendered, and clicking it hit
+// an id the guest had already forgotten.
+func TestTimedOutCardDisappears(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	raise(b, "cody.ap_001", "cody")
+	b.onPending(agentapi.PendingChange{ClearedID: "cody.ap_001"})
+	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
+		t.Errorf("a timed-out card survived: %+v", got)
+	}
+	if _, live := b.Pending("cody.ap_001"); live {
+		t.Error("the bridge would still accept an answer for a card nobody is waiting on")
+	}
+}
 
-	for i := 0; i < 5; i++ {
-		cards := pendingFrames(b.replay(evs))
-		if len(cards) != 3 {
-			t.Fatalf("got %d cards, want 3", len(cards))
-		}
-		got := []string{cards[0].PendingID, cards[1].PendingID, cards[2].PendingID}
-		want := []string{"ap_001", "ap_002", "ap_003"}
-		for j := range want {
-			if got[j] != want[j] {
-				t.Fatalf("order = %v, want %v", got, want)
-			}
-		}
+// Clearing must reach the browser, or the card stays live-looking forever. It
+// cannot come from a `decision` event: a worker's decision lands in the
+// worker's log, which chat does not stream.
+func TestClearingEmitsResolved(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	ch := b.Subscribe()
+	defer b.Unsubscribe(ch)
+	raise(b, "cody.ap_001", "cody")
+	b.onPending(agentapi.PendingChange{ClearedID: "cody.ap_001"})
+	<-ch // the pending frame
+	if f := <-ch; f.Kind != "resolved" || f.PendingID != "cody.ap_001" {
+		t.Errorf("frame = %+v, want a resolved for cody.ap_001", f)
+	}
+}
+
+// Cards render in a stable order, not Go's map order, so they do not shuffle on
+// every reload.
+func TestCardsComeBackInAStableOrder(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	for _, id := range []string{"cody.ap_003", "boss.ap_001", "cody.ap_002"} {
+		raise(b, id, "x")
+	}
+	got := cardsIn(b.withPending(nil))
+	if len(got) != 3 || got[0].PendingID != "boss.ap_001" || got[2].PendingID != "cody.ap_003" {
+		t.Errorf("order = %v", []string{got[0].PendingID, got[1].PendingID, got[2].PendingID})
+	}
+}
+
+// The hub replays its whole current set every time a stream opens, so the same
+// card arrives again on every blip. Without dedup the page stacks a duplicate
+// node per card per reconnect, and because its map keeps only the newest, the
+// older copies keep live-looking buttons that can never grey out.
+func TestRaisedTwiceEmitsOneCard(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	ch := b.Subscribe()
+	defer b.Unsubscribe(ch)
+	raise(b, "cody.ap_001", "cody")
+	raise(b, "cody.ap_001", "cody")
+	if f := <-ch; f.Kind != "pending" {
+		t.Fatalf("first frame = %+v, want the card", f)
+	}
+	select {
+	case f := <-ch:
+		t.Errorf("a second frame was emitted for the same card: %+v", f)
+	default:
+	}
+}
+
+// A card answered while every browser was away is invisible to the stream: the
+// hub replays `raised` on connect but never `cleared`. Without reconciling
+// against the snapshot the card comes back on the next page load with buttons
+// that 404 — the stale orphan this phase exists to end, returning through the
+// one door the stream cannot cover.
+func TestResyncClearsCardsSettledWhileStopped(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	raise(b, "cody.ap_001", "cody")
+	b.resync(nil) // the hub no longer holds it
+	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
+		t.Errorf("a card settled while away came back: %+v", got)
+	}
+	if _, live := b.Pending("cody.ap_001"); live {
+		t.Error("the bridge would still accept an answer for it")
+	}
+}
+
+// Cards render in the order the person was asked. Ids are namespaced, so
+// sorting by id would group by agent — a worker's newer question would jump
+// above the boss's older one purely on the letter it starts with.
+func TestCardsAreOrderedByWhenAsked(t *testing.T) {
+	b := newBridge("alice", deadControl(t), nil)
+	defer b.stop()
+	base := time.Now().UTC()
+	for i, id := range []string{"zeta.ap_001", "alpha.ap_001"} {
+		b.onPending(agentapi.PendingChange{Raised: &agentapi.Raised{
+			ID: id, Agent: "x", Kind: "approval_required", Tool: "Bash",
+			Since: base.Add(time.Duration(i) * time.Second),
+		}})
+	}
+	got := cardsIn(b.withPending(nil))
+	if len(got) != 2 || got[0].PendingID != "zeta.ap_001" {
+		t.Errorf("order = %v, want the earlier question first", got)
 	}
 }
