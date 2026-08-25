@@ -54,11 +54,18 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // profile that sets the flag but forgets a name just quietly loses that tool.
 // The flag is the single source of truth; tools: stays authoritative for
 // everything else.
+//
+// The names come straight from browserAllowed, which is also what filters the
+// server's tools/list -- so the allow list and the surface cannot drift apart.
 func withBrowser(allow []string, browser bool) []string {
 	if !browser || len(allow) == 0 {
 		return allow
 	}
-	return append(append([]string(nil), allow...), browserToolNames...)
+	out := append([]string(nil), allow...)
+	for name := range browserAllowed {
+		out = append(out, name)
+	}
+	return out
 }
 
 // toolDeps is what tool construction needs beyond the roots: the approval
@@ -70,7 +77,7 @@ type toolDeps struct {
 	team    *Supervisor
 	self    string
 	browser bool
-	chrome  openBrowser
+	chrome  *browserServer
 	snaps   *snapshotStore
 	log     *Log
 }

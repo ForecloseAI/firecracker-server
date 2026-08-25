@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"cracked/internal/agentd/cdp"
 )
 
 // ErrNoCapacity is returned when the live-agent ceiling is reached and every
@@ -45,53 +43,23 @@ type Supervisor struct {
 	mu     sync.Mutex
 	agents map[string]*live
 
-	// One Chrome for the whole machine, connected on first use. Agents share
-	// the browser the person is watching, so this must never become one browser
-	// per agent: a second context is signed out of everything.
-	chromeMu sync.Mutex
-	chrome   *cdp.Browser
+	// One chrome-devtools-mcp server for the whole machine, started on first
+	// use. Agents share the browser the person is watching, so this must never
+	// become one server per agent: a second one would be a second puppeteer
+	// connection to the same Chrome.
+	browser *browserServer
 }
 
 // ChromeURL is where the guest's Chrome exposes DevTools. A var so a test can
 // point it at a stub, matching how the gate's timeouts are shrunk.
 var ChromeURL = "http://127.0.0.1:9222"
 
-// Chrome returns the shared browser, connecting on first use and reconnecting
-// when the last connection died.
+// Browser is the machine's shared chrome-devtools-mcp server.
 //
-// Lazily, because four of the six shipped profiles never open a page and an
-// accountant's first turn must not depend on a service it has no use for --
-// and because agentd is deliberately not ordered after chrome.service, so an
-// agent can be built before Chrome is listening.
-//
-// The liveness check is not defensive programming. Chrome restarts on
-// Restart=always, and was observed at NRestarts=230 from a stale SingletonLock;
-// caching the connection forever meant every browser tool on the machine
-// returned "devtools connection is closed" from then until agentd itself was
-// restarted.
-func (s *Supervisor) Chrome(ctx context.Context) (*cdp.Browser, error) {
-	s.chromeMu.Lock()
-	defer s.chromeMu.Unlock()
-	if s.chrome != nil && s.chrome.Alive() {
-		return s.chrome, nil
-	}
-	b, err := cdp.Connect(ctx, ChromeURL)
-	if err != nil {
-		return nil, err
-	}
-	s.chrome = b
-	return b, nil
-}
-
-// closeChrome drops the shared browser, if one was ever opened.
-func (s *Supervisor) closeChrome() {
-	s.chromeMu.Lock()
-	defer s.chromeMu.Unlock()
-	if s.chrome != nil {
-		s.chrome.Close()
-		s.chrome = nil
-	}
-}
+// Constructed with the supervisor but started on first use, because five of the
+// six shipped profiles never open a page and a VM that never browses should
+// never fork node.
+func (s *Supervisor) Browser() *browserServer { return s.browser }
 
 // NewSupervisor loads the roster and ensures this machine has a boss.
 func NewSupervisor(ctx context.Context, stateDir, workspace string,
@@ -106,7 +74,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	return &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
-		agents: map[string]*live{},
+		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL),
 	}, nil
 }
 
@@ -286,7 +254,7 @@ func (s *Supervisor) Close() {
 	s.mu.Unlock()
 	s.wg.Wait()
 	// After the agents, not before: one of them may be mid-action on the page.
-	s.closeChrome()
+	s.browser.Close()
 }
 
 // LiveCount is how many agents currently hold a goroutine, for /debug/memstats.

@@ -54,6 +54,10 @@ COPY files/agent/src /opt/agent/src
 # that holds no markdown and every VM boots healthy with no memory. The test -f
 # turns that silent degradation into a build failure here, in seconds, instead
 # of after the multi-GB ext4 pipeline in build-rootfs.sh.
+#
+# The second test -f is the same class of guard for the browser: agentd spawns
+# chrome-devtools-mcp as a subprocess, so a missing entrypoint would give every
+# VM a researcher with no browser tools and no complaint from anywhere.
 RUN cd /opt/agent \
  && npm ci --omit=dev --no-audit --no-fund \
  && npm install --no-save --no-audit --no-fund typescript @types/node \
@@ -61,6 +65,7 @@ RUN cd /opt/agent \
  && test -f /opt/agent/dist/memory/templates/system/definition.md \
  && rm -rf /opt/agent/node_modules/typescript /opt/agent/node_modules/@types \
  && rm -rf /opt/agent/node_modules/@anthropic-ai/*-musl \
+ && test -f /opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
 

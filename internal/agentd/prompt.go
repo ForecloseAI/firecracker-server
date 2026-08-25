@@ -11,10 +11,13 @@ import (
 // crowd out everything else in the prefix.
 const instructionsCap = 16_000
 
-// BrowserGuidance is added only for profiles that declare a browser. The
-// snapshot-then-act rule is the whole contract: without it the model invents
-// uids, and an invented uid is indistinguishable from a stale one -- both come
-// back as the same refusal, so it has no way to tell which mistake it made.
+// BrowserGuidance is added only for profiles that declare a browser.
+//
+// The snapshot-then-act rule is the whole contract: without it the model
+// invents uids, and an invented uid is indistinguishable from a stale one --
+// both come back as the same refusal, so it has no way to tell which mistake it
+// made. The screenshot and fill_form lines are the browser server's own advice,
+// which the node agent carried and this one did not.
 const BrowserGuidance = `## Using the browser
 You share one browser with the person, and they can see the screen. It is signed
 in to their accounts, so use it rather than fetching pages another way, and do
@@ -24,17 +27,23 @@ do not start or stop it yourself.
 
 Take a snapshot before you act. Every element you can act on comes back with a
 uid, and a uid is the only way to name something on the page. Never guess one and
-never make one up. When the page navigates every uid from before it is gone and
-the tools say so; when the page only changes shape, take a fresh snapshot before
-trusting an old uid.
+never make one up. After anything that changes the page, take a fresh snapshot:
+uids from the old one may no longer mean what they did.
 
-Use fill to type, and click for everything else: buttons, links, checkboxes,
-radio buttons and menu items. A snapshot marks a box [checked] so you can tell
-whether clicking it turns the setting on or off. Filling does not press keys, so
-if a page ignores what you typed, press_key sends real ones.
+Use fill to type and click for everything else: buttons, links, checkboxes,
+radio buttons and menu items. When you are filling in several fields at once,
+fill_form is faster and more reliable than a run of separate calls. After you
+submit something, use wait_for rather than snapshotting straight away -- a
+snapshot taken too early reads the page you have just left.
 
-After you submit something use wait_for rather than snapshotting straight away.
-A snapshot taken too early reads the page you have just left.
+Prefer reading the page structure to taking screenshots. Screenshots are slow
+and cost a lot, so take one when the page does not match what you expect, or
+when you need to see something genuinely visual.
+
+Sites open tabs on you: sign-in flows and checkouts routinely do. If something
+you expected did not happen, list_pages will show you whether a new one appeared,
+and select_page moves you to it. Close a tab you opened when you are done with
+it.
 
 If the page opens a dialog, nothing else on that page works until you answer it
 with handle_dialog.
