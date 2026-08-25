@@ -102,6 +102,25 @@ type EventsPage struct {
 	LastEventID int     `json:"last_event_id"`
 }
 
+// ModelUsage is what one model has cost, in tokens. Split by model because the
+// price differs by a factor of ten across the range, so a single token total
+// cannot be turned back into money.
+type ModelUsage struct {
+	Model string `json:"model"`
+	Usage
+	Turns int64 `json:"turns"`
+}
+
+// UsageReport is GET /usage: what this daemon has spent across every agent it
+// runs, in tokens. No dollar figure -- the host owns the price table, so rates
+// can change without rebuilding a guest image.
+type UsageReport struct {
+	ByModel        []ModelUsage `json:"by_model"`
+	Turns          int64        `json:"turns"`
+	LastDurationMS int64        `json:"last_duration_ms,omitempty"`
+	LastActivity   time.Time    `json:"last_activity,omitzero"`
+}
+
 // Task is a piece of work an agent has open.
 type Task struct {
 	Slug      string    `json:"slug"`

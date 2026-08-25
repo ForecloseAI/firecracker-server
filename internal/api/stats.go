@@ -19,6 +19,9 @@ import (
 // log is capped at 4 MiB on disk, which is far more than anyone reads.
 const consoleTailBytes = 8 << 10
 
+// detailEvents is how many trailing events the peek-inside view shows.
+const detailEvents = 50
+
 //go:embed static/dashboard.html
 var dashboardHTML []byte
 
@@ -36,6 +39,8 @@ type vmStats struct {
 	vm.Stats
 	Agent agentStatus  `json:"agent"`
 	Usage agent.Totals `json:"usage"`
+	// Why this row's spend could not be read, when it could not be.
+	UsageError string `json:"usage_error,omitempty"`
 }
 
 // fleet is the whole-host snapshot. /stats returns it and /metrics renders it.
@@ -80,7 +85,7 @@ func (s *Server) collect() fleet {
 func (s *Server) probeGuest(row *vmStats, id string) {
 	if row.State != vm.StateRunning {
 		row.Agent.Error = "vm is " + string(row.State)
-		row.Usage, _ = s.usage.Snapshot(id)
+		row.Usage = s.usage.Snapshot(id)
 		return
 	}
 	if h, err := agent.New(row.GuestIP, vm.AgentPort).Health(); err == nil {
@@ -89,8 +94,29 @@ func (s *Server) probeGuest(row *vmStats, id string) {
 		row.Agent.Error = err.Error()
 	}
 	// Update returns the last known totals even when the guest is unreachable,
-	// so a blip shows stale spend rather than blanking it to zero.
-	row.Usage, _, _ = s.usage.Update(id, row.GuestIP, vm.AgentPort)
+	// so a blip shows stale spend rather than blanking it to zero. The error is
+	// RECORDED rather than discarded: a guest whose usage cannot be read renders
+	// a clean $0.00 otherwise, which is indistinguishable from a VM that has done
+	// nothing -- and that is exactly how the whole go-agent rollout stayed
+	// invisible for as long as it did.
+	var err error
+	row.Usage, err = s.usage.Update(id, row.GuestIP, vm.AgentPort)
+	if err != nil {
+		row.UsageError = err.Error()
+	}
+}
+
+// recentEvents fetches the boss's tail for the detail view, on demand.
+//
+// These used to be accumulated into memory on every fleet poll, for every VM,
+// so that opening one detail view could show fifty lines. Fetching them only
+// when someone actually looks costs one request and holds nothing.
+func recentEvents(v *vm.VM) []agentapi.Event {
+	evs, _, err := agent.New(v.GuestIP, vm.AgentPort).EventsSince(agentapi.BossID, 0)
+	if err != nil || len(evs) <= detailEvents {
+		return evs
+	}
+	return evs[len(evs)-detailEvents:]
 }
 
 // sumUsage adds every VM's spend into one fleet total.
@@ -126,7 +152,7 @@ func (s *Server) handleVMStats(w http.ResponseWriter, r *http.Request) {
 	info, _ := s.reg.Inspect(v)
 	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}, Firecracker: info}
 	s.probeGuest(&d.vmStats, v.ID)
-	_, d.Events = s.usage.Snapshot(v.ID)
+	d.Events = recentEvents(v)
 	d.ConsoleTail = tailFile(s.reg.Layout().Console(v.ID), consoleTailBytes)
 	writeJSON(w, http.StatusOK, d)
 }

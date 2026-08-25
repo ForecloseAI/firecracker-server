@@ -433,14 +433,28 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 		}
 	}
 	cleared, uses := appliedEdits(msg)
-	a.log.Append(Event{Type: "usage", Model: msg.Model, Usage: &Usage{
+	used := Usage{
 		InputTokens:              msg.Usage.InputTokens,
 		OutputTokens:             msg.Usage.OutputTokens,
 		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
 		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
 		ClearedInputTokens:       cleared,
 		ClearedToolUses:          uses,
-	}})
+	}
+	a.log.Append(Event{Type: "usage", Model: msg.Model, Usage: &used})
+	// The log is this agent's transcript; the meter is the machine's total. Both
+	// are written, because the host must not have to read every agent's log back
+	// to answer what the VM has cost.
+	a.meter().Record(msg.Model, used)
+}
+
+// meter is the machine's spend counter, or nil when this agent has no team --
+// which is only ever the case in a unit test.
+func (a *Agent) meter() *Meter {
+	if a.team == nil {
+		return nil
+	}
+	return a.team.Meter()
 }
 
 // appliedEdits totals what context editing removed from this request, so the
@@ -458,11 +472,13 @@ func (a *Agent) finish(started time.Time, err error) {
 	if err != nil {
 		a.log.Append(Event{Type: "error", Message: err.Error()})
 	}
+	took := time.Since(started)
 	a.log.Append(Event{
 		Type:       "turn_complete",
 		IsError:    err != nil,
-		DurationMS: time.Since(started).Milliseconds(),
+		DurationMS: took.Milliseconds(),
 	})
+	a.meter().FinishTurn(took)
 	a.setState("idle")
 }
 

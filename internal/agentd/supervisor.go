@@ -48,6 +48,11 @@ type Supervisor struct {
 	// become one server per agent: a second one would be a second puppeteer
 	// connection to the same Chrome.
 	browser *browserServer
+
+	// What this machine has spent, across every agent. Owned here rather than
+	// per-agent because the question the host asks is "what did this VM cost",
+	// and an evicted agent must not take its share of the answer with it.
+	meter *Meter
 }
 
 // ChromeURL is where the guest's Chrome exposes DevTools. A var so a test can
@@ -75,8 +80,12 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL),
+		meter: OpenMeter(stateDir),
 	}, nil
 }
+
+// Meter exposes the machine's running spend, for the HTTP surface.
+func (s *Supervisor) Meter() *Meter { return s.meter }
 
 // Roster exposes the durable roster.
 func (s *Supervisor) Roster() *Roster { return s.roster }

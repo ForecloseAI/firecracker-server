@@ -164,6 +164,21 @@ function agentCell(a) {
   return '<span class="err" title="' + esc(a.error) + '">unreachable</span>';
 }
 
+/** Spend, or why it could not be read. A clean $0.00 over an unreadable guest
+ *  is indistinguishable from a VM that has done nothing, which is how a whole
+ *  agent rollout stayed invisible. */
+function cost(v) {
+  if (v.usage_error) {
+    return '<span class="err" title="' + esc(v.usage_error) + '">unknown</span>';
+  }
+  const un = v.usage.unpriced_models;
+  if (un && un.length) {
+    return usd(v.usage.cost_usd) +
+      ' <span class="err" title="no price for: ' + esc(un.join(", ")) + '">+?</span>';
+  }
+  return usd(v.usage.cost_usd);
+}
+
 /** The header line: real host headroom, not the fixed slot budget. */
 function renderHost(f) {
   const h = f.host, c = f.capacity;
@@ -204,7 +219,7 @@ function vmRow(v) {
     "<td>" + v.usage.turns + "</td>" +
     "<td>" + num(v.usage.input_tokens + v.usage.output_tokens +
       v.usage.cache_read_tokens + v.usage.cache_creation_tokens) + "</td>" +
-    "<td>" + usd(v.usage.cost_usd) + "</td>" +
+    "<td>" + cost(v) + "</td>" +
     '<td class="l">' + rowActions(v) + "</td></tr>";
 }
 
@@ -241,8 +256,8 @@ function detailFacts(v) {
     ["slot / pid", v.slot + " / " + v.pid], ["guest ip", esc(v.guest_ip) + " on " + esc(v.tap)],
     ["agent", agentCell(v.agent)],
     ["firecracker", esc(fc.state || "?") + " " + esc(fc.vmm_version || "")],
-    ["spend", usd(v.usage.cost_usd) + " over " + v.usage.turns + " turns, last " +
-      usd(v.usage.last_cost_usd) + " in " + Math.round((v.usage.last_duration_ms || 0) / 100) / 10 + "s"],
+    ["spend", cost(v) + " over " + v.usage.turns + " turns, last took " +
+      Math.round((v.usage.last_duration_ms || 0) / 100) / 10 + "s"],
     ["last turn", v.usage.last_activity ? esc(v.usage.last_activity) + " (" +
       ago(v.usage.last_activity) + ")" : "never"],
     ["tokens", "in " + num(v.usage.input_tokens) + ", out " + num(v.usage.output_tokens) +

@@ -17,6 +17,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agents", s.handleCreate)
 	mux.HandleFunc("DELETE /agents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /agent-types", s.handleTypes)
+	mux.HandleFunc("GET /usage", s.handleUsage)
 	mux.HandleFunc("POST /agents/{id}/messages", s.withAgent(s.handleMessage))
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
 	mux.HandleFunc("POST /agents/{id}/approvals/{apid}", s.withAgent(s.handleApproval))
@@ -119,6 +120,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		OK: true, Ready: true, Agents: len(statuses),
 		Live: s.sup.LiveCount(), Working: working, SessionState: state,
 	})
+}
+
+// handleUsage reports what this machine has spent, in tokens, across every
+// agent. Tokens and not dollars: the host owns the price table, so a rate change
+// does not mean rebuilding a guest image.
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	reply(w, http.StatusOK, s.sup.Meter().Report())
 }
 
 // sendReq is the body of POST /agents/{id}/messages.

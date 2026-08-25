@@ -42,6 +42,13 @@ func (c *Client) Health() (agentapi.Health, error) {
 	return h, err
 }
 
+// Usage is what the daemon has spent, in tokens, across every agent it runs.
+func (c *Client) Usage() (agentapi.UsageReport, error) {
+	var r agentapi.UsageReport
+	err := c.get("/usage", &r)
+	return r, err
+}
+
 // Agents lists the roster. This is the call that makes every other one
 // possible: there is no implicit "the agent" any more, so a caller that wants
 // to reach all of them has to ask which exist.
