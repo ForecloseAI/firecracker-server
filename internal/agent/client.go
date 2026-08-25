@@ -120,11 +120,22 @@ func (c *Client) SendMessage(agentID, text, idempotencyKey string) error {
 	return c.post("/agents/"+agentID+"/messages", map[string]string{"text": text}, hdr)
 }
 
-// Resolve answers a pending approval or question. The approval id names the
-// agent that raised it, so this needs no agent argument of its own -- which is
-// what stops an answer being delivered to the wrong one.
-func (c *Client) Resolve(agentID, approvalID string, body map[string]any) error {
-	return c.post("/agents/"+agentID+"/approvals/"+approvalID, body, nil)
+// Pending is every agent currently waiting on a person: the team's raised
+// hands. Machine-wide, because a person answers the team rather than polling
+// each specialist to find out which one has its hand up.
+func (c *Client) Pending() ([]agentapi.Raised, error) {
+	var out []agentapi.Raised
+	err := c.get("/pending", &out)
+	return out, err
+}
+
+// Resolve answers a pending approval or question.
+//
+// No agent argument: the id names the agent that raised it, so there is no way
+// to deliver an answer to the wrong one, and no way for a worker's approval to
+// be routed through the boss.
+func (c *Client) Resolve(approvalID string, body map[string]any) error {
+	return c.post("/approvals/"+approvalID, body, nil)
 }
 
 // Interrupt stops one agent's turn and revokes its outstanding consent grants.

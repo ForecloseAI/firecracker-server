@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // How long a pending interaction waits. Someone answering an approval may be
@@ -38,6 +40,7 @@ type grant struct {
 // CONCURRENTLY when the model invokes several tools in one turn.
 type Gate struct {
 	log *Log
+	hub *Interactions
 
 	mu      sync.Mutex
 	pending map[string]*pending
@@ -45,9 +48,10 @@ type Gate struct {
 	seq     int
 }
 
-// NewGate builds a gate that records its decisions in log.
-func NewGate(log *Log) *Gate {
-	return &Gate{log: log, pending: map[string]*pending{}}
+// NewGate builds a gate that records its decisions in log and raises its
+// pending interactions on hub, which may be nil in a test.
+func NewGate(log *Log, hub *Interactions) *Gate {
+	return &Gate{log: log, hub: hub, pending: map[string]*pending{}}
 }
 
 // Check blocks until a human allows or denies a gated call.
@@ -90,7 +94,11 @@ func (g *Gate) Ask(ctx context.Context, question string, ui UI) (string, error) 
 func (g *Gate) await(ctx context.Context, timeout time.Duration, tool string, ev Event) (Decision, error) {
 	id, ch := g.register(ev.Type, tool)
 	ev.ApprovalID = id
+	// Both, and they are not the same thing: the log is this agent's transcript,
+	// which must record that it asked; the hub is the live set of hands up, which
+	// is what a person is shown and answers.
 	g.log.Append(ev)
+	g.hub.Raise(raisedFrom(id, g.log.agent, ev))
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -106,6 +114,12 @@ func (g *Gate) await(ctx context.Context, timeout time.Duration, tool string, ev
 }
 
 // register mints an id and the channel its answer will arrive on.
+//
+// The id carries the agent that raised it. seq is per-gate and gates are
+// per-agent, so without the prefix the boss's first approval and a worker's
+// first are both "ap_001" -- one card would overwrite the other in any client
+// that keys on the id, and answering one would answer the wrong agent. It is
+// also what lets the answer be routed back without asking who to send it to.
 func (g *Gate) register(kind, tool string) (string, chan Decision) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -114,18 +128,20 @@ func (g *Gate) register(kind, tool string) (string, chan Decision) {
 	if kind == "question" {
 		prefix = "q_"
 	}
-	id := prefix + pad(g.seq)
+	id := g.log.agent + "." + prefix + pad(g.seq)
 	// Buffered, so Resolve never blocks on a waiter that has already given up.
 	ch := make(chan Decision, 1)
 	g.pending[id] = &pending{answer: ch, tool: tool}
 	return id, ch
 }
 
-// forget drops a pending interaction that timed out or was cancelled.
+// forget drops a pending interaction that timed out or was cancelled, and takes
+// the raised hand down with it.
 func (g *Gate) forget(id string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	delete(g.pending, id)
+	g.mu.Unlock()
+	g.hub.Clear(id)
 }
 
 // Resolve delivers a human's answer, reporting whether anything was waiting.
@@ -140,9 +156,18 @@ func (g *Gate) Resolve(id string, d Decision) bool {
 	if !ok {
 		return false
 	}
+	g.hub.Clear(id)
 	g.log.Append(Event{Type: "decision", ApprovalID: id, Decision: d.Decision})
 	p.answer <- d
 	return true
+}
+
+// raisedFrom turns the logged event into the card a person sees.
+func raisedFrom(id, agent string, ev Event) agentapi.Raised {
+	return agentapi.Raised{
+		ID: id, Agent: agent, Kind: ev.Type, Tool: ev.Tool, Preview: ev.Preview,
+		Input: ev.Input, Question: ev.Question, UI: ev.UI,
+	}
 }
 
 // IsPending reports whether an interaction with this id is still waiting.

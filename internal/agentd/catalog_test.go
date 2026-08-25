@@ -96,7 +96,7 @@ func TestParseProfileRejectsMissingFrontMatter(t *testing.T) {
 // name is never sent to the model, so it cannot be called at all. This is what
 // will make boss-only powers structural.
 func TestProfileToolListNarrowsTheSurface(t *testing.T) {
-	gate := NewGate(mustLog(t))
+	gate := NewGate(mustLog(t), NewInteractions())
 	all, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: gate}, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -61,6 +61,29 @@ type Decision struct {
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 }
 
+// Raised is one agent waiting on a person: a raised hand.
+//
+// Agent is the point of it. Any agent may need the person -- every worker
+// profile carries Bash and ask_human -- and the person must be able to see who
+// is asking and answer that agent, rather than the boss answering on its behalf.
+type Raised struct {
+	ID       string          `json:"id"`
+	Agent    string          `json:"agent"`
+	Kind     string          `json:"kind"` // approval_required | question
+	Tool     string          `json:"tool,omitempty"`
+	Preview  string          `json:"preview,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Question string          `json:"question,omitempty"`
+	UI       *UI             `json:"ui,omitempty"`
+	Since    time.Time       `json:"since"`
+}
+
+// PendingChange is one hub event: a hand raised, or one lowered.
+type PendingChange struct {
+	Raised    *Raised `json:"raised,omitempty"`
+	ClearedID string  `json:"cleared_id,omitempty"`
+}
+
 // Event is one entry in an agent's log. The field set is the union of what
 // every event type needs, only the relevant ones being set.
 type Event struct {

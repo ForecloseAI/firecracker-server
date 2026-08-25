@@ -67,7 +67,7 @@ func TestCapTextFlagsTruncation(t *testing.T) {
 // containing one is truncated at the comma with no error. This test caught
 // exactly that, and pins the description against regrowing a comma.
 func TestReadSchemaSurvivesTagParsing(t *testing.T) {
-	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t))}, nil)
+	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t), NewInteractions())}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

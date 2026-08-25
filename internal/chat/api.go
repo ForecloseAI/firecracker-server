@@ -245,7 +245,7 @@ func (s *Server) forward(w http.ResponseWriter, vmID, pendingID string, body map
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := cl.Resolve(chatAgent, pendingID, body); err != nil {
+	if err := cl.Resolve(pendingID, body); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}

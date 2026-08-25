@@ -10,7 +10,7 @@ import (
 // newTestGate builds a gate over a throwaway log.
 func newTestGate(t *testing.T) *Gate {
 	t.Helper()
-	return NewGate(mustLog(t))
+	return NewGate(mustLog(t), NewInteractions())
 }
 
 // pendingID waits for the gate to register an interaction and returns its id.

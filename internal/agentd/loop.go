@@ -108,7 +108,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		// "an agent that did not start".
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
-	gate := NewGate(log)
+	gate := NewGate(log, hubOf(team))
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
@@ -133,6 +133,15 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	}
 	a.log.Append(Event{Type: "ready", Message: "agent " + id + " ready"})
 	return a, nil
+}
+
+// hubOf is the machine's interaction hub, or nil when this agent has no team --
+// which is only ever the case in a unit test.
+func hubOf(team *Supervisor) *Interactions {
+	if team == nil {
+		return nil
+	}
+	return team.Interactions()
 }
 
 // Log exposes the event log, for the HTTP surface.

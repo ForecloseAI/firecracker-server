@@ -63,7 +63,7 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 // half matters too -- `puppeteer` also matches a coder installing it for the
 // person's own project, and that task must not dead-end.
 func TestTheBrowserRedirectNamesTheToolsAndLeavesADoorOpen(t *testing.T) {
-	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t))}, nil)
+	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t), NewInteractions())}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestTheBrowserRedirectNamesTheToolsAndLeavesADoorOpen(t *testing.T) {
 // second way to grant something the flag is supposed to control.
 func TestNamingBrowserToolsWithoutTheFlagGrantsNothing(t *testing.T) {
 	tools, err := Tools(roots{workspace: t.TempDir()},
-		toolDeps{gate: NewGate(mustLog(t)), browser: false},
+		toolDeps{gate: NewGate(mustLog(t), NewInteractions()), browser: false},
 		[]string{"Read", "take_snapshot", "click", "fill"})
 	if err != nil {
 		t.Fatal(err)

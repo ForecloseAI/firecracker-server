@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,6 +54,11 @@ type Supervisor struct {
 	// per-agent because the question the host asks is "what did this VM cost",
 	// and an evicted agent must not take its share of the answer with it.
 	meter *Meter
+
+	// Every agent currently waiting on a person. Machine-wide, because a raised
+	// hand belongs to the team rather than to one agent's transcript, and the
+	// person answering it must be able to reach whichever agent raised it.
+	hub *Interactions
 }
 
 // ChromeURL is where the guest's Chrome exposes DevTools. A var so a test can
@@ -80,8 +86,29 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL),
-		meter: OpenMeter(stateDir),
+		meter: OpenMeter(stateDir), hub: NewInteractions(),
 	}, nil
+}
+
+// Interactions exposes the machine's raised hands, for the HTTP surface.
+func (s *Supervisor) Interactions() *Interactions { return s.hub }
+
+// ResolveApproval delivers an answer to whichever agent raised it.
+//
+// The id names that agent, so nothing has to be told where to send it. Only
+// LIVE agents are considered, deliberately: Get STARTS an agent, and a pending
+// interaction can only exist on one that is running and blocked -- so "not
+// live" correctly means "already settled", which is the existing 404 and a
+// normal race rather than a client error.
+func (s *Supervisor) ResolveApproval(apid string, d Decision) bool {
+	id, _, ok := strings.Cut(apid, ".")
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	l, live := s.agents[id]
+	s.mu.Unlock()
+	return live && l.agent.Gate().Resolve(apid, d)
 }
 
 // Meter exposes the machine's running spend, for the HTTP surface.
