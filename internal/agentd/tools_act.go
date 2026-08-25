@@ -23,8 +23,11 @@ type pressKeyInput struct {
 	Key string `json:"key" jsonschema:"required,description=A key such as Enter or Tab or Escape - or a combination such as Control+A"`
 }
 
+// Text is a LIST even for one string. On the first live run the model passed a
+// bare string here and had to be told by schema validation and retry, costing a
+// round trip, so the description says so rather than implying it.
 type waitForInput struct {
-	Text      []string `json:"text" jsonschema:"required,description=Wait until any one of these strings appears on the page"`
+	Text      []string `json:"text" jsonschema:"required,description=A list of strings - the wait ends as soon as any one of them shows up on the page"`
 	TimeoutMS int      `json:"timeout_ms" jsonschema:"description=How long to wait in milliseconds - defaults to 5000 and caps at 30000"`
 }
 
