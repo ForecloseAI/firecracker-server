@@ -230,7 +230,7 @@ func (s *Server) resolvePending(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "already resolved"})
 		return
 	}
-	body, known := p.Body(req.Option)
+	body, known := p.Body(req.Option, req.Text)
 	if !known {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown option"})
 		return

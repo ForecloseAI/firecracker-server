@@ -15,32 +15,33 @@ func TestBeatLabel(t *testing.T) {
 		label  string
 		detail string
 	}{
-		{"memory concept", "Write", `{"file_path":"/home/agent/agent-state/memory/people/naman.md"}`,
+		{"memory concept", "Write", `{"path":"/home/agent/agent-state/agentd/agents/boss/memory/people/naman.md"}`,
 			"Updating memory", "people/naman.md"},
-		{"memory index edit", "Edit", `{"file_path":"/home/agent/agent-state/memory/index.md"}`,
+		{"memory index edit", "Edit", `{"path":"/home/agent/agent-state/agentd/agents/boss/memory/index.md"}`,
 			"Updating memory", "index.md"},
-		{"instructions", "Write", `{"file_path":"/home/agent/agent-state/instructions.md"}`,
+		{"instructions", "Write", `{"path":"/home/agent/agent-state/agentd/agents/boss/instructions.md"}`,
 			"Updating its instructions", ""},
-		{"ordinary file", "Write", `{"file_path":"/home/agent/workspace/notes.txt"}`,
+		{"ordinary file", "Write", `{"path":"/home/agent/workspace/notes.txt"}`,
 			"Writing a file", ""},
-		{"reading memory is still reading", "Read", `{"file_path":"/home/agent/agent-state/memory/index.md"}`,
+		{"reading memory is still reading", "Read", `{"path":"/home/agent/agent-state/agentd/agents/boss/memory/index.md"}`,
 			"Reading a file", ""},
-		{"prefix must not match a sibling dir", "Write", `{"file_path":"/home/agent/agent-state/memory-notes/x.md"}`,
+		{"prefix must not match a sibling dir", "Write", `{"path":"/home/agent/agent-state/agentd/agents/boss/memory-notes/x.md"}`,
 			"Writing a file", ""},
-		// The Task tools are enabled in the guest but deliberately absent from
-		// `beats`: they are the agent's own planning aid, and an empty label is
-		// what keeps them out of the chat transcript (renderBeat drops labelless
-		// frames). Giving any of them a label here would silently make task
-		// tracking user-facing.
-		{"TaskCreate never reaches the transcript", "TaskCreate",
-			`{"subject":"x","description":"y","activeForm":"Doing x"}`, "", ""},
-		{"TaskUpdate never reaches the transcript", "TaskUpdate",
-			`{"taskId":"t1","status":"completed"}`, "", ""},
-		{"TaskList never reaches the transcript", "TaskList", `{}`, "", ""},
+		// ask_human is deliberately absent from `beats`: the card it raises IS its
+		// rendering, so a beat would narrate the same question twice, immediately
+		// above the card asking it. An empty label is what keeps it out --
+		// renderBeat drops labelless frames.
+		{"ask_human is the card, not a beat", "ask_human", `{"question":"which city?"}`, "", ""},
+		// Working as a team is most of what a boss does, and none of it used to be
+		// narrated: the person watched an idle-looking page while agents worked.
+		{"delegating is narrated", "delegate", `{"to":"cody","title":"fix it"}`,
+			"Handing work to a specialist", ""},
+		{"messaging a teammate is narrated", "message_agent", `{"to":"cody"}`,
+			"Messaging a teammate", ""},
 		{"unknown tool stays silent", "SomeFutureTool", `{}`, "", ""},
 		{"malformed input degrades", "Write", `not json`, "Writing a file", ""},
 		{"absent input degrades", "Write", ``, "Writing a file", ""},
-		{"browser tool ignores input", "mcp__chrome__click", `{"uid":"e1"}`, "Clicking", ""},
+		{"browser tool ignores input", "click", `{"uid":"e1"}`, "Clicking", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

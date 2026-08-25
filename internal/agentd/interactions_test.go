@@ -179,3 +179,22 @@ func TestPendingListsEveryAgentsRaisedHand(t *testing.T) {
 		t.Errorf("agents = %v, want boss and coder", seen)
 	}
 }
+
+// The person addresses the boss directly, so it must always be startable.
+// Refusing because every specialist is busy would lock them out of their own
+// conversation precisely when the work they asked for is running -- and the
+// only symptom is a send that fails with a 503.
+func TestTheBossStartsEvenWhenEveryWorkerIsBusy(t *testing.T) {
+	sup := supervisorWith(t, 1)
+	if _, err := sup.Create("coder", "Ada"); err != nil {
+		t.Fatal(err)
+	}
+	ada, err := sup.Get("ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ada.setState("working") // the ceiling is 1, and it is now full and busy
+	if _, err := sup.Get(BossID); err != nil {
+		t.Fatalf("the boss could not start: %v", err)
+	}
+}

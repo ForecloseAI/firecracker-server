@@ -99,7 +99,7 @@ func questionPending(r agentapi.Raised) *Pending {
 		p.bodies["done"] = map[string]any{"answer": "done"}
 		p.bodies["cancel"] = map[string]any{"answer": "not now"}
 	default:
-		p.UI = UI{Kind: "text", Options: []Option{}}
+		textCard(p)
 	}
 	return p
 }
@@ -111,6 +111,20 @@ func uiKind(r agentapi.Raised) string {
 		return "text"
 	}
 	return r.UI.Kind
+}
+
+// textCard is a question answered in the person's own words.
+//
+// A card with no options renders as a prompt with no way to reply, and
+// ask_human DEFAULTS to this kind -- so the most likely question an agent can
+// ask had no answer path at all, and blocked for ten minutes while the person
+// typed into the composer instead. It must be declinable for the same reason.
+func textCard(p *Pending) {
+	p.UI = UI{Kind: "text", Options: []Option{
+		{ID: freeText, Label: "Send", Tone: "ok"},
+		{ID: "skip", Label: "Not now", Tone: "bad"},
+	}}
+	p.bodies["skip"] = map[string]any{"decision": "deny", "reason": "the person declined"}
 }
 
 // yesNo is the two-button set shared by confirm cards.
@@ -144,10 +158,27 @@ func choiceOptions(r agentapi.Raised, bodies map[string]map[string]any) []Option
 	return out
 }
 
+// freeText is the one option whose content comes from the person rather than
+// from this file.
+const freeText = "text"
+
 // Body returns the guest-bound body for a chosen option. Unknown ids are
 // refused: the page picks from a server-authored list and never authors the
 // body, so it cannot grant itself an unbounded standing approval.
-func (p *Pending) Body(option string) (map[string]any, bool) {
+//
+// A typed answer is the single exception, and it is confined to question cards
+// on purpose. The guest reads any non-empty answer as consent (normalise turns
+// a decision-less body with an answer into "allow"), so free text accepted at
+// an APPROVAL id would let a sentence typed into a box approve a gated shell
+// command with no button ever pressed. Empty text is refused for the mirror
+// reason: the guest would read it as a refusal the person never gave.
+func (p *Pending) Body(option, text string) (map[string]any, bool) {
+	if option == freeText {
+		if p.UI.Kind != "text" || text == "" {
+			return nil, false
+		}
+		return map[string]any{"answer": text}, true
+	}
 	b, ok := p.bodies[option]
 	return b, ok
 }

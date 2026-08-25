@@ -248,6 +248,34 @@ func (b *Bridge) onEvent(ev agentapi.Event) {
 	}
 }
 
+// toolBeat narrates one tool call. Only the path reaches the browser, never the
+// input body: a Write input carries the whole file, which for a memory file is
+// kilobytes of JSON per beat.
+func toolBeat(ev agentapi.Event) Frame {
+	label, detail := beatLabel(ev.Tool, ev.Input)
+	return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Tool, Label: label, Detail: detail}
+}
+
+// teamBeat narrates working as a team, which is most of what a boss does and
+// none of which was visible before.
+//
+// The title goes in the LABEL, not in Detail: the page reads only the label on
+// a beat and drops one that is empty, so a detail here would be invisible and a
+// missing label renders as silence.
+func teamBeat(ev agentapi.Event) string {
+	switch {
+	case ev.Type == "delegation":
+		return "Handed " + ev.TaskTitle + " to " + ev.To
+	case ev.Type == "task_start":
+		return "Started: " + ev.TaskTitle
+	case ev.From != "":
+		return "Heard back from " + ev.From
+	case ev.To != "":
+		return "Messaged " + ev.To
+	}
+	return "Talking to the team"
+}
+
 // frameFor translates a guest event. Types not listed are deliberately
 // dropped: thinking especially must never reach the transcript.
 func (b *Bridge) frameFor(ev agentapi.Event) (Frame, bool) {
@@ -257,13 +285,11 @@ func (b *Bridge) frameFor(ev agentapi.Event) (Frame, bool) {
 	case "text":
 		return Frame{ID: ev.ID, Kind: "say", Role: "agent", Text: ev.Text}, true
 	case "tool_use":
-		// Only the path reaches the browser, never the input body: a Write
-		// input carries the whole file, which for a memory file is kilobytes
-		// of JSON per beat.
-		label, detail := beatLabel(ev.Tool, ev.Input)
-		return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Tool, Label: label, Detail: detail}, true
+		return toolBeat(ev), true
 	case "state":
 		return Frame{ID: ev.ID, Kind: "state", State: ev.SessionState}, true
+	case "agent_message", "delegation", "task_start":
+		return Frame{ID: ev.ID, Kind: "beat", Tool: ev.Type, Label: teamBeat(ev)}, true
 	case "turn_complete":
 		return Frame{ID: ev.ID, Kind: "turn", OK: !ev.IsError, DurMS: ev.DurationMS}, true
 	case "error":

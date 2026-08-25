@@ -28,7 +28,7 @@ func TestApprovalOffersBatchForEveryTool(t *testing.T) {
 		if got := ids(p); len(got) != 3 || got[1] != "batch" {
 			t.Fatalf("%s options = %v, want once/batch/deny", tool, got)
 		}
-		body, ok := p.Body("batch")
+		body, ok := p.Body("batch", "")
 		if !ok || body["scope"] != "batch" || body["max_uses"] != batchUses {
 			t.Fatalf("%s batch body = %v", tool, body)
 		}
@@ -50,7 +50,7 @@ func TestCardNamesTheAskingAgent(t *testing.T) {
 func TestUnknownOptionRejected(t *testing.T) {
 	p := buildPending(agentapi.Raised{Kind: "approval_required", ID: "boss.ap_003", Tool: "Bash"})
 	for _, bad := range []string{"", "allow", "../../etc", "BATCH"} {
-		if _, ok := p.Body(bad); ok {
+		if _, ok := p.Body(bad, ""); ok {
 			t.Fatalf("option %q should be unknown", bad)
 		}
 	}
@@ -58,7 +58,7 @@ func TestUnknownOptionRejected(t *testing.T) {
 
 // TestQuestionKinds covers each ask_human rendering.
 func TestQuestionKinds(t *testing.T) {
-	cases := map[string]int{"text": 0, "confirm": 2, "handoff": 2}
+	cases := map[string]int{"text": 2, "confirm": 2, "handoff": 2}
 	for kind, want := range cases {
 		p := buildPending(agentapi.Raised{Kind: "question", ID: "boss.q_1", Question: "?",
 			UI: &agentapi.UI{Kind: kind}})
@@ -81,7 +81,7 @@ func TestChoiceOptionsFromUI(t *testing.T) {
 	if len(p.UI.Options) != 2 || p.UI.Options[1].Label != "United" {
 		t.Fatalf("options = %+v", p.UI.Options)
 	}
-	if body, ok := p.Body("c1"); !ok || body["answer"] != "United" {
+	if body, ok := p.Body("c1", ""); !ok || body["answer"] != "United" {
 		t.Fatalf("c1 body = %v", body)
 	}
 }
@@ -94,7 +94,45 @@ func TestHandoffOpensAndAnswers(t *testing.T) {
 	if !p.UI.Options[0].Opens {
 		t.Fatal("handoff must open the VNC link")
 	}
-	if body, ok := p.Body("done"); !ok || body["answer"] != "done" {
+	if body, ok := p.Body("done", ""); !ok || body["answer"] != "done" {
 		t.Fatalf("done body = %v", body)
+	}
+}
+
+// The important one. The guest reads any non-empty answer as consent, so free
+// text accepted at an APPROVAL id would let a sentence typed into a box approve
+// a gated shell command with no button ever pressed.
+func TestFreeTextRefusedOnApproval(t *testing.T) {
+	p := buildPending(agentapi.Raised{
+		Kind: "approval_required", ID: "cody.ap_001", Tool: "Bash", Preview: "rm -rf /"})
+	if _, ok := p.Body("text", "yes go ahead"); ok {
+		t.Fatal("free text was accepted at an approval; the guest would read it as allow")
+	}
+}
+
+// ask_human defaults to kind text, so this is the most likely question an agent
+// can ask. It used to render as a prompt with no buttons and no answer path at
+// all, while the agent blocked for ten minutes.
+func TestTextQuestionIsAnswerable(t *testing.T) {
+	p := buildPending(agentapi.Raised{
+		Kind: "question", ID: "boss.q_001", Question: "Which city?",
+		UI: &agentapi.UI{Kind: "text"}})
+	body, ok := p.Body("text", "Lisbon")
+	if !ok || body["answer"] != "Lisbon" {
+		t.Fatalf("body = %v, ok = %v; want the typed answer", body, ok)
+	}
+	if _, ok := p.Body("skip", ""); !ok {
+		t.Error("a text question must be declinable, or it blocks for ten minutes")
+	}
+}
+
+// An empty submit must not reach the guest: it reads a blank answer as a
+// refusal, so the agent would be told no by someone who meant to say nothing.
+func TestEmptyTextAnswerRefused(t *testing.T) {
+	p := buildPending(agentapi.Raised{
+		Kind: "question", ID: "boss.q_001", Question: "Which city?",
+		UI: &agentapi.UI{Kind: "text"}})
+	if _, ok := p.Body("text", ""); ok {
+		t.Error("an empty answer was accepted")
 	}
 }

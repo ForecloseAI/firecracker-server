@@ -45,6 +45,8 @@
   .card { align-self:flex-start; max-width:min(680px,92%); background:var(--panel);
     border:1px solid var(--warn); border-radius:6px; padding:11px; }
   .card .who { color:var(--dim); font-size:12px; margin-bottom:4px; }
+  .card .answer { width:100%; margin:6px 0; padding:6px 8px; border-radius:4px;
+    border:1px solid var(--line); background:var(--bg); color:inherit; font:inherit; resize:vertical; }
   .card .prompt { margin-bottom:6px; }
   .card .detail { color:var(--dim); font-size:12px; white-space:pre-wrap;
     overflow-wrap:anywhere; margin-bottom:9px; }
@@ -172,6 +174,10 @@ function renderState(f) {
 
 // A card the person has to answer.
 function renderPending(f) {
+  // The hub replays its whole set on reconnect, so the same card can arrive
+  // again. Appending a second node would leave the older copy with buttons that
+  // look live but answer an id the map no longer points at.
+  if (cards.has(f.pending_id)) return;
   setWorking(false);
   setState("waiting for you", "waiting");
   const el = add("card", "");
@@ -179,15 +185,24 @@ function renderPending(f) {
   el.innerHTML = (f.agent ? "<div class='who'>" + esc(f.agent) + " is asking</div>" : "") +
     "<div class='prompt'>" + esc(f.prompt) + "</div>" +
     (f.detail ? "<div class='detail'>" + esc(f.detail) + "</div>" : "");
+  // A free-text question needs somewhere to type: ask_human defaults to this
+  // kind, so without it the most common question has no answer path at all.
+  let box = null;
+  if (f.ui && f.ui.kind === "text") {
+    box = document.createElement("textarea");
+    box.className = "answer";
+    box.rows = 2;
+    el.appendChild(box);
+  }
   for (const opt of (f.ui && f.ui.options) || []) {
-    el.appendChild(optionButton(f, opt));
+    el.appendChild(optionButton(f, opt, box));
   }
   cards.set(f.pending_id, el);
 }
 
 // One button on a pending card. The page names an option; the server owns the
 // body that actually reaches the agent.
-function optionButton(f, opt) {
+function optionButton(f, opt, box) {
   const b = document.createElement("button");
   b.textContent = opt.label;
   if (opt.tone === "bad") b.className = "bad";
@@ -195,7 +210,9 @@ function optionButton(f, opt) {
   b.onclick = async () => {
     if (opt.opens && f.ui.url) window.open(f.ui.url, "_blank", "noopener");
     if (opt.opens && b.textContent === opt.label) { b.textContent = "done, carry on"; opt.opens = false; return; }
-    await post("/api/pending/" + encodeURIComponent(f.pending_id), { id: VM, option: opt.id });
+    // The page ships the typed content; the server still owns the body shape.
+    await post("/api/pending/" + encodeURIComponent(f.pending_id),
+      { id: VM, option: opt.id, text: box ? box.value : "" });
   };
   return b;
 }

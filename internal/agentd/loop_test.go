@@ -60,7 +60,10 @@ func TestFailedTurnIsStillLogged(t *testing.T) {
 	for _, e := range events {
 		seen[e.Type] = true
 	}
-	for _, want := range []string{"user", "state", "error", "turn_complete"} {
+	// No "user" here: Turn is the one-shot path and does not queue, so the
+	// person's message is logged by Send -- which is what the HTTP surface
+	// calls, and what makes a message sent mid-turn visible immediately.
+	for _, want := range []string{"state", "error", "turn_complete"} {
 		if !seen[want] {
 			t.Errorf("a failed turn logged no %q event; got %v", want, seen)
 		}
@@ -118,4 +121,44 @@ func TestSaveLeavesNoTempFileBehind(t *testing.T) {
 // testProfile is a minimal profile for tests that do not care about the role.
 func testProfile() Profile {
 	return Profile{Key: "test", Model: "claude-haiku-4-5", Prompt: "test"}
+}
+
+// A message must appear in the transcript when it is SENT, not when the turn
+// that runs it begins. Queued behind a long turn it would otherwise be invisible
+// for minutes, which reads to the person as "my message did not send".
+func TestSendLogsTheMessageImmediately(t *testing.T) {
+	a := newTestAgent(t)
+	if err := a.Send("are you there?"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := a.Log().ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == "user" && e.Text == "are you there?" {
+			return
+		}
+	}
+	t.Error("a sent message was not in the log before its turn ran")
+}
+
+// And a message the agent REFUSED must not appear. Logging before the enqueue
+// would show the person their message was accepted when it was dropped.
+func TestRefusedMessageIsNotLogged(t *testing.T) {
+	a := newTestAgent(t)
+	for i := 0; i < inboxDepth; i++ {
+		if err := a.Send("filler"); err != nil {
+			t.Fatalf("filling the inbox failed early: %v", err)
+		}
+	}
+	if err := a.Send("one too many"); err == nil {
+		t.Fatal("a full inbox accepted another message")
+	}
+	events, _ := a.Log().ReadAll()
+	for _, e := range events {
+		if e.Text == "one too many" {
+			t.Error("a refused message was logged as though it had been accepted")
+		}
+	}
 }

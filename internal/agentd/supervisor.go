@@ -176,7 +176,7 @@ func (s *Supervisor) start(rec Record) (*Agent, error) {
 	if existing, ok := s.agents[rec.ID]; ok {
 		return existing.agent, nil // another caller won the race
 	}
-	if err := s.makeRoomLocked(); err != nil {
+	if err := s.makeRoomLocked(rec.ID); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -207,8 +207,13 @@ func (s *Supervisor) profileFor(rec Record) (Profile, error) {
 // Eviction is safe because it loses nothing: the conversation is on disk, and
 // the agent resumes from there. If every live agent is working, there is
 // nothing safe to evict and the caller is told to retry.
-func (s *Supervisor) makeRoomLocked() error {
-	if len(s.agents) < s.maxLive {
+// The boss is exempt from the ceiling, though not from eviction -- it resumes
+// from disk, so losing its slot costs nothing. What it must never hit is the
+// refusal below: it is the agent a person addresses directly, so declining to
+// start it because every specialist is busy would lock them out of their own
+// conversation exactly when the work they asked for is running.
+func (s *Supervisor) makeRoomLocked(want string) error {
+	if len(s.agents) < s.maxLive || want == BossID {
 		return nil
 	}
 	var oldest string

@@ -7,13 +7,17 @@ import (
 	"cracked/internal/agentapi"
 )
 
-// Captured verbatim from a live VM the first time an agent wrote its memory.
+// Captured verbatim from a live VM, from the boss writing its own memory.
 // Keeping the real shape here guards against the guest's event format drifting
 // away from what the bridge expects -- the failure mode is a silent fallback to
 // "Writing a file", which nobody would notice.
-const liveMemoryWrite = `{"id":11,"type":"tool_use","ts":"2026-08-23T22:11:37.235Z",` +
-	`"tool":"Write","input":{"file_path":"/home/agent/agent-state/memory/people/naman.md",` +
-	`"content":"---\ntype: person\ntitle: Naman\n---\n\n# Naman\n"}}`
+//
+// Note the path: memory is per-agent, under agents/<id>/, so matching a fixed
+// location would relabel every agent's memory write but one.
+const liveMemoryWrite = `{"id":31,"agent":"boss","type":"tool_use",` +
+	`"ts":"2026-08-25T21:17:39.345442998Z","tool":"Write","input":{` +
+	`"content":"---\ntype: person\ntitle: Naman\n---\n\n# Naman\n\nThe person this agent works for.\n",` +
+	`"path":"/home/agent/agent-state/agentd/agents/boss/memory/people/naman.md"}}`
 
 // A real memory write must reach the browser as a memory beat carrying only the
 // path -- never the file body, which for a 16k memory file would be kilobytes

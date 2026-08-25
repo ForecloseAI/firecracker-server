@@ -214,7 +214,15 @@ func (a *Agent) runTurn(parent context.Context, in inbound) {
 // A full inbox is reported rather than blocking the HTTP handler on a model
 // call that may take a minute.
 func (a *Agent) Send(text string) error {
-	return a.enqueue(inbound{text: text})
+	if err := a.enqueue(inbound{text: text}); err != nil {
+		return err
+	}
+	// Logged at receipt, not when the turn dequeues it. A message sent while
+	// the agent is busy would otherwise be invisible for however long that turn
+	// runs, which reads as "my message did not send" -- and appending BEFORE the
+	// enqueue would do the opposite, showing a message the agent refused.
+	a.log.Append(Event{Type: "user", Text: text})
+	return nil
 }
 
 // Deliver queues a message from another agent, recording it in this agent's
@@ -387,9 +395,6 @@ func (a *Agent) turn(ctx context.Context, in inbound) error {
 	a.mu.Lock()
 	a.turnStartID, a.lastText = a.log.LastID(), ""
 	a.mu.Unlock()
-	if in.from == "" {
-		a.log.Append(Event{Type: "user", Text: in.text})
-	}
 	a.setState("working")
 	candidate := slices.Clone(a.messages)
 	candidate = append(candidate, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(frame(in))))
