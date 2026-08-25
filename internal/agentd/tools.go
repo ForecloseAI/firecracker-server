@@ -70,7 +70,7 @@ type toolDeps struct {
 	team    *Supervisor
 	self    string
 	browser bool
-	chrome  pageDriver
+	chrome  openBrowser
 	snaps   *snapshotStore
 	log     *Log
 }

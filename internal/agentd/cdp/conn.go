@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -23,6 +24,21 @@ import (
 // base64 payload, so the default 32 KiB would drop exactly the frames we care
 // about most.
 const readLimit = 32 << 20
+
+// callTimeout is a floor under every command, not a considered bound for any of
+// them. Chrome is on loopback in the same guest, so nothing here is slow because
+// of the network -- a call that never answers is a renderer that has stopped
+// answering, which is exactly what an open JavaScript dialog does to everything
+// needing the main thread.
+//
+// It lives in Call because that is the one place it cannot be forgotten, and
+// forgetting is the whole failure: the context a tool handler receives is the
+// agent's Run context, cancelled only on eviction or interrupt, so one
+// unanswered command parks that goroutine for the life of the process and takes
+// Supervisor.Close's wg.Wait() down with it.
+//
+// A var so a test can shrink it, matching how the gate's timeouts are shrunk.
+var callTimeout = 30 * time.Second
 
 // Conn multiplexes every command and event over one WebSocket to Chrome.
 //
@@ -168,6 +184,12 @@ func (c *Conn) failAll(err error) {
 // page; empty addresses the browser itself. out may be nil when the result is
 // not needed.
 func (c *Conn) Call(ctx context.Context, sessionID, method string, params, out any) error {
+	// A caller with a better number wins; this is a floor, not a ceiling.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, callTimeout)
+		defer cancel()
+	}
 	id, ch, err := c.register()
 	if err != nil {
 		return err
@@ -239,6 +261,13 @@ func (c *Conn) await(ctx context.Context, id int, ch chan reply, out any) error 
 		}
 		return json.Unmarshal(r.result, out)
 	}
+}
+
+// isClosed reports whether the read pump has given up on this connection.
+func (c *Conn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // Subscribe returns a channel of params for one CDP event. The buffer is what

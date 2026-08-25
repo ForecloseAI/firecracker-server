@@ -14,7 +14,10 @@ var actionable = map[string]bool{
 	"button": true, "link": true, "textbox": true, "combobox": true,
 	"checkbox": true, "radio": true, "menuitem": true, "menuitemcheckbox": true,
 	"menuitemradio": true, "tab": true, "slider": true, "searchbox": true,
-	"switch": true, "option": true,
+	// spinbutton is <input type=number>. It was missing, so number fields had no
+	// uid at all and could not be filled. There is no "textarea" role to add
+	// beside it -- Chrome reports a <textarea> as textbox.
+	"switch": true, "option": true, "spinbutton": true,
 }
 
 // Roles that tell the model where it is without being targets themselves.
@@ -32,10 +35,17 @@ var noise = map[string]bool{
 
 // axNode is the part of an accessibility node we use.
 type axNode struct {
-	Role             axValue `json:"role"`
-	Name             axValue `json:"name"`
-	BackendDOMNodeID int64   `json:"backendDOMNodeId"`
-	Ignored          bool    `json:"ignored"`
+	Role             axValue      `json:"role"`
+	Name             axValue      `json:"name"`
+	BackendDOMNodeID int64        `json:"backendDOMNodeId"`
+	Ignored          bool         `json:"ignored"`
+	Properties       []axProperty `json:"properties"`
+}
+
+// axProperty is one accessibility state, such as checked or disabled.
+type axProperty struct {
+	Name  string  `json:"name"`
+	Value axValue `json:"value"`
 }
 
 // axValue is CDP's boxed value shape.
@@ -49,6 +59,34 @@ func (v axValue) str() string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// truthy reads a boxed value Chrome types as a bool for some properties and as
+// a string for others -- "checked" arrives as a tristate token, "disabled" as a
+// plain boolean.
+func (v axValue) truthy() bool {
+	switch t := v.Value.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "true"
+	}
+	return false
+}
+
+// Target is one element a uid names: what to act on, and what it is.
+//
+// The role lets fill refuse a button instead of focusing it and typing into
+// nothing. The name is the more valuable half: it lets every result say
+// `clicked link "Sign in"` rather than `clicked uid=3_412`, which is the only
+// thing that would let the model notice it acted on the wrong element.
+type Target struct {
+	NodeID int64
+	Role   string
+	Name   string
+}
+
+// Label renders a target the way the snapshot showed it.
+func (t Target) Label() string { return describe(t.Role, t.Name) }
+
 // Snapshot is one reading of a page and the uid map it produced.
 //
 // The uid is the contract: the model sees "uid=3_412" and hands it back to act
@@ -57,9 +95,9 @@ func (v axValue) str() string {
 // silently acts on the wrong element, which is far worse than a call that fails.
 type Snapshot struct {
 	Gen        int
-	nodes      map[string]int64 // uid -> backendDOMNodeId
-	Actionable []string         // rendered lines, uid-prefixed
-	Context    []string         // orientation and text, no uids
+	nodes      map[string]Target // uid -> what it names
+	Actionable []string          // rendered lines, uid-prefixed
+	Context    []string          // orientation and text, no uids
 }
 
 // Take reads the page's accessibility tree and builds a fresh uid generation.
@@ -80,7 +118,7 @@ func (b *Browser) Take(ctx context.Context) (*Snapshot, error) {
 
 // build turns raw accessibility nodes into one generation of uids and lines.
 func build(gen int, nodes []axNode) *Snapshot {
-	s := &Snapshot{Gen: gen, nodes: map[string]int64{}}
+	s := &Snapshot{Gen: gen, nodes: map[string]Target{}}
 	for _, n := range nodes {
 		role := n.Role.str()
 		if n.Ignored || noise[role] {
@@ -101,8 +139,28 @@ func build(gen int, nodes []axNode) *Snapshot {
 // addActionable records one targetable element and the uid the model will use.
 func (s *Snapshot) addActionable(role string, n axNode) {
 	uid := fmt.Sprintf("%d_%d", s.Gen, n.BackendDOMNodeID)
-	s.nodes[uid] = n.BackendDOMNodeID
-	s.Actionable = append(s.Actionable, "uid="+uid+" "+describe(role, n.Name.str()))
+	name := n.Name.str()
+	s.nodes[uid] = Target{NodeID: n.BackendDOMNodeID, Role: role, Name: name}
+	s.Actionable = append(s.Actionable, "uid="+uid+" "+describe(role, name)+flagsOf(n))
+}
+
+// flagsOf renders the states that change what an action would do.
+//
+// Without [checked] the model cannot tell whether clicking a box ticks it or
+// unticks it, so telling it to use click is a coin flip that silently unticks
+// something the person needed. A [disabled] control accepts the CDP click and
+// does nothing, which is the same silent failure on the other side.
+func flagsOf(n axNode) string {
+	var out string
+	for _, p := range n.Properties {
+		if p.Name == "checked" && p.Value.truthy() {
+			out += " [checked]"
+		}
+		if p.Name == "disabled" && p.Value.truthy() {
+			out += " [disabled]"
+		}
+	}
+	return out
 }
 
 // describe renders a role and its accessible name.
@@ -120,17 +178,29 @@ func describe(role, name string) string {
 // never issued means it invented one. Both come back as text a tool can hand
 // straight to the model, never as an error, so it can recover in one step
 // instead of treating the turn as broken.
-func (b *Browser) Resolve(uid string) (int64, string) {
+func (b *Browser) Resolve(uid string) (Target, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.snap == nil {
-		return 0, "the page has changed since that snapshot - take a new one first"
+		return Target{}, "the page has changed since that snapshot - take a new one first"
 	}
-	id, ok := b.snap.nodes[uid]
+	t, ok := b.snap.nodes[uid]
 	if !ok {
-		return 0, fmt.Sprintf("no element %q on the current snapshot - take a new one first", uid)
+		return Target{}, fmt.Sprintf("no element %q on the current snapshot - take a new one first", uid)
 	}
-	return id, ""
+	return t, ""
+}
+
+// SnapshotGen reports the live uid generation, or 0 when none survives. An
+// action that navigated the page can tell the model so directly instead of
+// letting it discover it as a refusal on the next call.
+func (b *Browser) SnapshotGen() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.snap == nil {
+		return 0
+	}
+	return b.snap.Gen
 }
 
 // Render lays the snapshot out actionable-first.

@@ -19,12 +19,25 @@ const BrowserGuidance = `## Using the browser
 You share one browser with the person, and they can see the screen. It is signed
 in to their accounts, so use it rather than fetching pages another way, and do
 not try to open a separate browser or profile: it would be signed out of
-everything.
+everything. Drive it with these tools only. Do not reach it from the shell, and
+do not start or stop it yourself.
 
 Take a snapshot before you act. Every element you can act on comes back with a
 uid, and a uid is the only way to name something on the page. Never guess one and
-never make one up. After anything that changes the page, take a fresh snapshot:
-uids from before it are gone, and acting on one is refused.
+never make one up. When the page navigates every uid from before it is gone and
+the tools say so; when the page only changes shape, take a fresh snapshot before
+trusting an old uid.
+
+Use fill to type, and click for everything else: buttons, links, checkboxes,
+radio buttons and menu items. A snapshot marks a box [checked] so you can tell
+whether clicking it turns the setting on or off. Filling does not press keys, so
+if a page ignores what you typed, press_key sends real ones.
+
+After you submit something use wait_for rather than snapshotting straight away.
+A snapshot taken too early reads the page you have just left.
+
+If the page opens a dialog, nothing else on that page works until you answer it
+with handle_dialog.
 
 A snapshot of a large page is trimmed, and it tells you where the full version is
 saved. Read that file when you need something the trimmed view left out.

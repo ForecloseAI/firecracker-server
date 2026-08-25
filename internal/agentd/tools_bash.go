@@ -39,6 +39,53 @@ var destructive = []*regexp.Regexp{
 	regexp.MustCompile(`curl[^|]*\|\s*(sh|bash)`),
 }
 
+// browserRoutes are the ways a shell command can reach the machine's Chrome.
+//
+// The hole is real and needs no ingenuity to find: Chrome runs in every VM on
+// 127.0.0.1:9222 as this same user, Node has a global WebSocket, and puppeteer
+// is bundled in the image. Without this an agent drives the browser from Bash
+// with no approval and no trace, and the person watching sees
+// "Bash: node /tmp/x.js" rather than "navigate to bank.com".
+//
+// Redirected rather than gated, which is the opposite of the destructive list
+// and deliberate. Unlike rm -rf there IS a right way to do this, so an approval
+// prompt would ask the person to adjudicate something that has a correct
+// answer. Gating could not be relied on anyway: Gate.consume grants per TOOL,
+// so one batch "allow" on any destructive Bash would cover these too.
+//
+// Note what is NOT here: a bare chrome or chromium word match. It would fire on
+// `grep -r chrome /var/log` and on a researcher writing about browsers. These
+// match invocation, not mention.
+var browserRoutes = []*regexp.Regexp{
+	regexp.MustCompile(`\b9222\b`),
+	regexp.MustCompile(`devtools/(browser|page)/`),
+	regexp.MustCompile(`puppeteer`),
+	regexp.MustCompile(`chrome-devtools-mcp`),
+	regexp.MustCompile(`--(remote-debugging|user-data-dir|headless)`),
+	regexp.MustCompile(`\b(pkill|killall)\b[^|;]*chrom`),
+	regexp.MustCompile(`\bxdotool\b`),
+}
+
+// browserRedirect is what the model is told instead of being asked.
+//
+// The second sentence matters: `puppeteer` also matches a coder legitimately
+// installing it for the person's own project, and without a door left open that
+// task dead-ends in advice about tools the agent does not have.
+const browserRedirect = "Chrome here is driven with the browser tools " +
+	"(navigate_page take_snapshot click fill press_key) rather than from the shell. " +
+	"If you are writing browser automation code for the person's own project instead of " +
+	"driving this machine's browser, ask them first."
+
+// reachesBrowser reports a command that drives Chrome behind the tools' back.
+func reachesBrowser(cmd string) bool {
+	for _, re := range browserRoutes {
+		if re.MatchString(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
 // bashInput is the Bash tool's argument.
 type bashInput struct {
 	Command string `json:"command" jsonschema:"required,description=Shell command to run in the workspace"`
@@ -85,6 +132,9 @@ func bashTool(root string, gate *Gate) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[bashInput](
 		"Bash", "Run a shell command in the workspace and return its output.",
 		func(ctx context.Context, in bashInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
+			if reachesBrowser(in.Command) {
+				return toolText(browserRedirect), nil
+			}
 			if isDestructive(in.Command) {
 				if err := gate.Check(ctx, "Bash", "Run shell command: "+in.Command, in); err != nil {
 					return toolText(err.Error()), nil
