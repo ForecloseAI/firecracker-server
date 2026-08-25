@@ -34,6 +34,8 @@ func newTestSupervisor(t *testing.T) *Supervisor {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close before the enclosing TempDir cleanup runs, and it waits for the
+	// agent goroutines: otherwise RemoveAll races a turn still writing its log.
 	t.Cleanup(sup.Close)
 	return sup
 }

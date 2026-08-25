@@ -35,7 +35,6 @@ var destructive = []*regexp.Regexp{
 	regexp.MustCompile(`\bmkfs`),
 	regexp.MustCompile(`\bshutdown\b`),
 	regexp.MustCompile(`\breboot\b`),
-	regexp.MustCompile(`>\s*/dev/`),
 	regexp.MustCompile(`git\s+push\s+.*--force`),
 	regexp.MustCompile(`curl[^|]*\|\s*(sh|bash)`),
 }
@@ -45,10 +44,36 @@ type bashInput struct {
 	Command string `json:"command" jsonschema:"required,description=Shell command to run in the workspace"`
 }
 
+// devWrite finds a redirect into /dev/. Writing to a real device node can
+// destroy a disk, so it belongs on the list -- but the naive pattern this was
+// inherited with, `>\s*/dev/`, also matches `2>/dev/null`, which is in a large
+// fraction of all shell commands ever written.
+//
+// It was caught by a live run: an agent's `find ... 2>/dev/null` stopped dead
+// waiting for a human. RE2 has no lookahead, so the exception is a lookup
+// rather than a cleverer regexp.
+var devWrite = regexp.MustCompile(`>\s*(/dev/[A-Za-z0-9_]*)`)
+
+// harmlessDevices are the pseudo-devices ordinary commands redirect to.
+var harmlessDevices = map[string]bool{
+	"/dev/null": true, "/dev/stdout": true, "/dev/stderr": true, "/dev/tty": true,
+}
+
 // isDestructive reports whether a command needs a human decision first.
 func isDestructive(cmd string) bool {
 	for _, re := range destructive {
 		if re.MatchString(cmd) {
+			return true
+		}
+	}
+	return writesToADevice(cmd)
+}
+
+// writesToADevice reports a redirect into anything under /dev/ that is not one
+// of the harmless pseudo-devices.
+func writesToADevice(cmd string) bool {
+	for _, m := range devWrite.FindAllStringSubmatch(cmd, -1) {
+		if !harmlessDevices[m[1]] {
 			return true
 		}
 	}

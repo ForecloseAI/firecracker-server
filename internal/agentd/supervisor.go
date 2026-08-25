@@ -37,6 +37,9 @@ type Supervisor struct {
 	roster    *Roster
 	ctx       context.Context
 
+	// wg tracks running agent goroutines so shutdown can wait for them.
+	wg sync.WaitGroup
+
 	mu     sync.Mutex
 	agents map[string]*live
 }
@@ -124,7 +127,7 @@ func (s *Supervisor) start(rec Record) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	agent, err := New(rec.ID, s.dirFor(rec.ID), s.workspace, profile)
+	agent, err := New(rec.ID, s.dirFor(rec.ID), s.workspace, profile, s)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +141,11 @@ func (s *Supervisor) start(rec Record) (*Agent, error) {
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.agents[rec.ID] = &live{agent: agent, cancel: cancel, lastUsed: time.Now()}
-	go agent.Run(ctx)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		agent.Run(ctx)
+	}()
 	return agent, nil
 }
 
@@ -216,13 +223,19 @@ func (s *Supervisor) stopLocked(id string) {
 	delete(s.agents, id)
 }
 
-// Close stops every running agent.
+// Close stops every running agent and waits for them to finish.
+//
+// Waiting matters: a turn that is mid-write when the process exits leaves a
+// truncated log or conversation behind. The lock is released before the wait
+// because a turn winding down can still need it -- reporting back to a
+// delegator goes through Deliver, which takes s.mu.
 func (s *Supervisor) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for id := range s.agents {
 		s.stopLocked(id)
 	}
+	s.mu.Unlock()
+	s.wg.Wait()
 }
 
 // LiveCount is how many agents currently hold a goroutine, for /debug/memstats.
@@ -230,6 +243,100 @@ func (s *Supervisor) LiveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.agents)
+}
+
+// Deliver hands a message from one agent to another, waking the recipient.
+//
+// Delivery starts the recipient if it was not running, which is the point: an
+// agent that has been evicted must still be reachable by a colleague, or work
+// would silently stall depending on what happened to be in memory.
+func (s *Supervisor) Deliver(from, to, text string) error {
+	if from == to {
+		return fmt.Errorf("an agent cannot message itself")
+	}
+	target, err := s.Get(to)
+	if err != nil {
+		return err
+	}
+	return target.Deliver(from, text)
+}
+
+// Delegation is one piece of work handed from the boss to a specialist.
+type Delegation struct {
+	To      string
+	Title   string
+	Task    string
+	TaskDir string
+}
+
+// Delegate hands work to another agent and returns without waiting.
+//
+// Asynchronous by default is what makes parallel work possible: the boss keeps
+// its turn, the specialist starts its own, and the result comes back as a
+// message rather than a return value.
+func (s *Supervisor) Delegate(from string, d Delegation) error {
+	if _, ok := s.roster.Get(d.To); !ok {
+		return fmt.Errorf("no agent %s; create one first or check list_agents", d.To)
+	}
+	target, err := s.Get(d.To)
+	if err != nil {
+		return err
+	}
+	if err := target.DeliverWork(from, delegationBrief(from, d)); err != nil {
+		return err
+	}
+	s.logFor(from, Event{Type: "delegation", To: d.To, TaskTitle: d.Title, TaskDir: d.TaskDir})
+	return nil
+}
+
+// delegationBrief is what the specialist actually receives. It has to carry
+// everything: a worker cannot see the boss's conversation with the person.
+func delegationBrief(from string, d Delegation) string {
+	brief := "You have been given a task: " + d.Title + "\n\n" + d.Task
+	if d.TaskDir != "" {
+		brief += "\n\nWork in this folder, which already exists: " + d.TaskDir +
+			"\nDo not open a folder of your own. Others are working in this one too," +
+			" so keep to your own files and read anything you did not write before changing it."
+	}
+	return brief + "\n\nWhen you are done, use message_agent to tell \"" + from +
+		"\" what you produced, where it is, and anything you could not finish."
+}
+
+// StartTask opens a dated folder for a piece of work and records it on the
+// roster, so a poll can say what an agent is doing rather than just that it is
+// busy.
+func (s *Supervisor) StartTask(agentID, title, taskSlug string) (Task, error) {
+	name := slug(taskSlug)
+	if name == "" {
+		return Task{}, fmt.Errorf("could not make a folder name from %q", taskSlug)
+	}
+	dir := filepath.Join(s.workspace, time.Now().Format("2006-01-02")+"-"+name)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return Task{}, err
+	}
+	task := Task{Slug: name, Title: title, Dir: dir, StartedAt: time.Now().UTC()}
+	s.logFor(agentID, Event{Type: "task_start", TaskSlug: name, TaskTitle: title, TaskDir: dir})
+	return task, s.roster.SetTask(agentID, &task)
+}
+
+// CurrentTask reports what an agent is working on, if anything.
+func (s *Supervisor) CurrentTask(agentID string) *Task {
+	rec, ok := s.roster.Get(agentID)
+	if !ok {
+		return nil
+	}
+	return rec.Task
+}
+
+// logFor appends to a running agent's log, if it is running. Best effort: a
+// missing log line must never fail the operation it was describing.
+func (s *Supervisor) logFor(id string, e Event) {
+	s.mu.Lock()
+	l, ok := s.agents[id]
+	s.mu.Unlock()
+	if ok {
+		l.agent.Log().Append(e)
+	}
 }
 
 // dirFor is where one agent's state lives.

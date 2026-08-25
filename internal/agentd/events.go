@@ -31,6 +31,8 @@ type Event struct {
 	TS    time.Time `json:"ts"`
 
 	Text      string          `json:"text,omitempty"`
+	From      string          `json:"from,omitempty"`
+	To        string          `json:"to,omitempty"`
 	Tool      string          `json:"tool,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	MessageID string          `json:"message_id,omitempty"`
@@ -49,6 +51,11 @@ type Event struct {
 	Kind       string `json:"kind,omitempty"`
 	UI         *UI    `json:"ui,omitempty"`
 	Decision   string `json:"decision,omitempty"`
+
+	// A task folder opened by start_task, or carried by a delegation.
+	TaskSlug  string `json:"task_slug,omitempty"`
+	TaskTitle string `json:"task_title,omitempty"`
+	TaskDir   string `json:"task_dir,omitempty"`
 }
 
 // Log is one agent's append-only event log, durable on disk so a transcript

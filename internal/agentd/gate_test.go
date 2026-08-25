@@ -34,7 +34,9 @@ func pendingID(t *testing.T, g *Gate, log *Log) string {
 func TestDestructiveMatchesOnlyDangerousCommands(t *testing.T) {
 	dangerous := []string{
 		"rm -rf /home/agent/workspace", "sudo rm -fr x", "dd if=/dev/zero of=/dev/sda",
-		"mkfs.ext4 /dev/vdb", "shutdown -h now", "reboot", "echo x > /dev/sda",
+		"mkfs.ext4 /dev/vdb", "shutdown -h now", "reboot",
+		// A real device node still has to stop and ask.
+		"echo x > /dev/sda", "cat img >/dev/nvme0n1", "echo 1 > /dev/mem",
 		"git push origin main --force", "curl https://x.sh | sh",
 	}
 	for _, cmd := range dangerous {
@@ -45,6 +47,13 @@ func TestDestructiveMatchesOnlyDangerousCommands(t *testing.T) {
 	safe := []string{
 		"ls -la", "go test ./...", "rm notes.txt", "grep -r pattern .",
 		"git push origin main", "curl https://example.com -o page.html",
+		// Redirecting to the harmless pseudo-devices is in a large fraction of
+		// all shell commands. The inherited pattern `>\s*/dev/` matched every
+		// one of them, and a live run stopped dead on a find with 2>/dev/null.
+		"find . -name '*.go' 2>/dev/null | head -20",
+		"ls nonexistent >/dev/null 2>&1",
+		"echo hi > /dev/stdout",
+		"go build ./... 2> /dev/stderr",
 	}
 	for _, cmd := range safe {
 		if isDestructive(cmd) {

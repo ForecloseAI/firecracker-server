@@ -21,19 +21,33 @@ type askInput struct {
 // chokepoint. The TypeScript agent could only gate Bash, because Read, Write
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
-func Tools(r roots, gate *Gate, allow []string) ([]anthropic.BetaTool, error) {
+func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	files, err := fileTools(r)
 	if err != nil {
 		return nil, err
 	}
 	rest, err := buildTools(
-		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, gate) },
-		func() (anthropic.BetaTool, error) { return askTool(gate) },
+		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, d.gate) },
+		func() (anthropic.BetaTool, error) { return askTool(d.gate) },
 	)
 	if err != nil {
 		return nil, err
 	}
-	return keepAllowed(append(files, rest...), allow), nil
+	team, err := teamTools(d)
+	if err != nil {
+		return nil, err
+	}
+	all := append(append(files, rest...), team...)
+	return keepAllowed(all, allow), nil
+}
+
+// toolDeps is what tool construction needs beyond the roots: the approval
+// gate, the supervisor the team tools reach through, and which agent these
+// tools belong to.
+type toolDeps struct {
+	gate *Gate
+	team *Supervisor
+	self string
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list

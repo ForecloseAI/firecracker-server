@@ -52,16 +52,19 @@ type Agent struct {
 	tools   []anthropic.BetaTool
 	log     *Log
 	gate    *Gate
-	inbox   chan string
+	team    *Supervisor
+	inbox   chan inbound
 
 	// Guards everything the HTTP surface reads while the agent goroutine
 	// writes it. The SDK runner itself stays confined to that one goroutine,
 	// which is what the SDK requires.
-	mu        sync.Mutex
-	messages  []anthropic.BetaMessageParam
-	state     string
-	cancel    context.CancelFunc
-	convBytes int
+	mu          sync.Mutex
+	lastText    string
+	turnStartID int
+	messages    []anthropic.BetaMessageParam
+	state       string
+	cancel      context.CancelFunc
+	convBytes   int
 }
 
 // New builds an agent rooted at dir, working in workspace, restoring its
@@ -71,7 +74,21 @@ type Agent struct {
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
 // anywhere else just moves the knot.
-func New(id, dir, workspace string, p Profile) (*Agent, error) {
+// inbound is one queued message. From is empty when it came from the person
+// and names the sender when it came from another agent, which decides both how
+// it is logged and how it is framed for the model.
+type inbound struct {
+	text string
+	from string
+	// replyTo is set when this message is delegated work. The delegator is
+	// then told the outcome whatever happens, including when the agent runs
+	// out of iterations mid-task -- otherwise a boss waits forever on a
+	// worker that quietly stopped, which is exactly what happened the first
+	// time this was run end to end.
+	replyTo string
+}
+
+func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
 	log, err := OpenLog(dir, id)
 	if err != nil {
 		return nil, err
@@ -82,15 +99,16 @@ func New(id, dir, workspace string, p Profile) (*Agent, error) {
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
 	gate := NewGate(log)
-	tools, err := Tools(roots{workspace: workspace, own: dir}, gate, p.Tools)
+	tools, err := Tools(roots{workspace: workspace, own: dir},
+		toolDeps{gate: gate, team: team, self: id}, p.Tools)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
 		model: p.Model, system: ComposeSystemPrompt(p, dir),
-		tools: tools, log: log, gate: gate, state: "idle",
-		inbox: make(chan string, inboxDepth),
+		tools: tools, log: log, gate: gate, team: team, state: "idle",
+		inbox: make(chan inbound, inboxDepth),
 	}
 	if err := a.load(); err != nil {
 		return nil, err
@@ -146,29 +164,59 @@ func (a *Agent) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case text := <-a.inbox:
-			a.runTurn(ctx, text)
+		case in := <-a.inbox:
+			a.runTurn(ctx, in)
 		}
 	}
 }
 
 // runTurn executes one turn under a cancellable child context, so Interrupt can
 // stop the turn without tearing down the agent.
-func (a *Agent) runTurn(parent context.Context, text string) {
+func (a *Agent) runTurn(parent context.Context, in inbound) {
 	ctx, cancel := context.WithCancel(parent)
 	a.setCancel(cancel)
 	defer func() {
 		a.setCancel(nil)
 		cancel()
 	}()
-	a.Turn(ctx, text) // errors are already recorded in the event log
+	a.turn(ctx, in) // errors are already recorded in the event log
 }
 
-// Send queues a user message. A full inbox is reported rather than blocking the
-// HTTP handler on a model call that may take a minute.
+// Send queues a message from the person.
+//
+// A full inbox is reported rather than blocking the HTTP handler on a model
+// call that may take a minute.
 func (a *Agent) Send(text string) error {
+	return a.enqueue(inbound{text: text})
+}
+
+// Deliver queues a message from another agent, recording it in this agent's
+// log as well as the sender's. Each per-agent log is the only transcript of
+// that agent, so it has to be self-contained.
+func (a *Agent) Deliver(from, text string) error {
+	return a.deliver(inbound{text: text, from: from})
+}
+
+// DeliverWork queues delegated work, which is reported back on when it ends.
+func (a *Agent) DeliverWork(from, text string) error {
+	return a.deliver(inbound{text: text, from: from, replyTo: from})
+}
+
+// deliver queues a message from another agent and records it in this agent's
+// log as well as the sender's. Each per-agent log is the only transcript of
+// that agent, so it has to be self-contained.
+func (a *Agent) deliver(in inbound) error {
+	if err := a.enqueue(in); err != nil {
+		return err
+	}
+	a.log.Append(Event{Type: "agent_message", From: in.from, Text: in.text})
+	return nil
+}
+
+// enqueue puts one message on the inbox without blocking.
+func (a *Agent) enqueue(in inbound) error {
 	select {
-	case a.inbox <- text:
+	case a.inbox <- in:
 		return nil
 	default:
 		return ErrBusy
@@ -268,20 +316,32 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 // as it was, so the next request is never malformed. See drain for why that
 // matters.
 func (a *Agent) Turn(ctx context.Context, text string) error {
+	return a.turn(ctx, inbound{text: text})
+}
+
+// turn runs one queued message, whoever it came from.
+func (a *Agent) turn(ctx context.Context, in inbound) error {
 	started := time.Now()
-	a.log.Append(Event{Type: "user", Text: text})
+	a.mu.Lock()
+	a.turnStartID, a.lastText = a.log.LastID(), ""
+	a.mu.Unlock()
+	if in.from == "" {
+		a.log.Append(Event{Type: "user", Text: in.text})
+	}
 	a.setState("working")
 	candidate := slices.Clone(a.messages)
-	candidate = append(candidate, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(text)))
+	candidate = append(candidate, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(frame(in))))
 	runner := a.client.Beta.Messages.NewToolRunner(a.tools, a.params(candidate))
 	if err := a.drain(ctx, runner); err != nil {
 		a.finish(started, err)
+		a.report(in, runner, err)
 		return err
 	}
 	a.mu.Lock()
 	a.messages = runner.Messages()
 	a.mu.Unlock()
 	a.finish(started, nil)
+	a.report(in, runner, nil)
 	return a.save()
 }
 
@@ -311,6 +371,9 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.BetaTextBlock:
+			a.mu.Lock()
+			a.lastText = b.Text
+			a.mu.Unlock()
 			a.log.Append(Event{Type: "text", Text: b.Text})
 		case anthropic.BetaToolUseBlock:
 			a.log.Append(Event{Type: "tool_use", Tool: b.Name, Input: encode(b.Input)})
@@ -337,6 +400,46 @@ func (a *Agent) finish(started time.Time, err error) {
 	a.setState("idle")
 }
 
+// report tells the delegator how delegated work ended, unless the agent
+// already messaged them itself during the turn.
+//
+// Without this a worker that stops early -- an error, or simply running out of
+// iterations mid-task -- leaves the delegator waiting on a message that will
+// never come. A turn that ended is news whether or not it went well.
+func (a *Agent) report(in inbound, runner *anthropic.BetaToolRunner, turnErr error) {
+	if in.replyTo == "" || a.team == nil || a.messagedDuring(in.replyTo, a.turnStartID) {
+		return
+	}
+	a.team.Deliver(a.id, in.replyTo, a.outcome(runner, turnErr))
+}
+
+// outcome describes how a turn ended, for the delegator.
+func (a *Agent) outcome(runner *anthropic.BetaToolRunner, turnErr error) string {
+	if turnErr != nil {
+		return "I stopped before finishing: " + turnErr.Error() +
+			". Nothing further will happen unless you ask again."
+	}
+	if runner != nil && runner.IterationCount() >= maxIterations {
+		return "I ran out of steps before finishing, so the work is incomplete. " +
+			"Check what is in the folder and send me a narrower piece if you still need it."
+	}
+	return "I have finished my turn. " + orDefault(a.lastText, "There was nothing to report.")
+}
+
+// messagedDuring reports whether this agent messaged `to` after event id since.
+func (a *Agent) messagedDuring(to string, since int) bool {
+	events, err := a.log.ReadAll()
+	if err != nil {
+		return false
+	}
+	for _, e := range events {
+		if e.ID > since && e.Type == "agent_message" && e.To == to {
+			return true
+		}
+	}
+	return false
+}
+
 // setState records a transition. The old agent flipped this variable silently
 // and only logged it on interrupt, so a streaming client had to infer busy from
 // turn_complete; every transition is an event here.
@@ -349,6 +452,16 @@ func (a *Agent) setState(s string) {
 	a.state = s
 	a.mu.Unlock()
 	a.log.Append(Event{Type: "state", SessionState: s})
+}
+
+// frame renders a queued message for the model. A message from another agent
+// is labelled as such: the limits already say colleagues are not a chain of
+// command, and that rule only works if the model can tell the difference.
+func frame(in inbound) string {
+	if in.from == "" {
+		return in.text
+	}
+	return "Message from the agent \"" + in.from + "\", a colleague on this machine:\n\n" + in.text
 }
 
 // encode renders a tool's input for the log, since Input is an untyped any.
