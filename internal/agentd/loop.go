@@ -28,6 +28,16 @@ var ErrBusy = errors.New("agent queue is full")
 // better told so than silently buffered.
 const inboxDepth = 8
 
+// Context-editing thresholds. Starting values, to be tuned against real usage
+// events from a browsing session: a snapshot costs a few thousand tokens, so
+// the trigger sits well above a couple of them and only fires on a genuinely
+// long conversation. clearAtLeast stops a clear being paid for a trivial saving.
+const (
+	clearTrigger = 30_000
+	clearKeep    = 5
+	clearAtLeast = 5_000
+)
+
 // maxTokens bounds one assistant response.
 const maxTokens = 8192
 
@@ -99,8 +109,16 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
 	gate := NewGate(log)
-	tools, err := Tools(roots{workspace: workspace, own: dir},
-		toolDeps{gate: gate, team: team, self: id}, p.Tools)
+	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser}
+	if p.Browser {
+		// A browser agent that cannot reach Chrome is still worth starting: it
+		// keeps every other tool, and the failure shows up in its log rather
+		// than as a VM that refuses to boot.
+		if err := attachBrowser(&deps, dir, team); err != nil {
+			log.Append(Event{Type: "error", Message: "no browser: " + err.Error()})
+		}
+	}
+	tools, err := Tools(roots{workspace: workspace, own: dir}, deps, p.Tools)
 	if err != nil {
 		return nil, err
 	}
@@ -301,11 +319,46 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 	return anthropic.BetaToolRunnerParams{
 		MaxIterations: maxIterations,
 		BetaMessageNewParams: anthropic.BetaMessageNewParams{
-			Model:     anthropic.Model(a.model),
-			MaxTokens: maxTokens,
-			System:    a.systemBlocks(),
-			Messages:  msgs,
+			Model:             anthropic.Model(a.model),
+			MaxTokens:         maxTokens,
+			System:            a.systemBlocks(),
+			Messages:          msgs,
+			ContextManagement: contextManagement(),
+			Betas:             []anthropic.AnthropicBeta{anthropic.AnthropicBetaContextManagement2025_06_27},
 		},
+	}
+}
+
+// contextManagement drops old tool results out of the request once a
+// conversation gets long.
+//
+// This is available in the Go SDK and was NOT available to the TypeScript
+// agent -- its own commit says context editing is not exposed by the Agent SDK,
+// which is exactly why that agent had to digest snapshots through a PostToolUse
+// hook instead. It is the one thing the rewrite gets for free.
+//
+// Clearing rewrites the prefix below the clear point, which would invalidate a
+// cache breakpoint sitting there. There is exactly one breakpoint here and it
+// is on the last system block, above the messages, so nothing in the history is
+// cached and clearing costs nothing. That is also why it matters: every tool
+// result left in history is re-billed at full uncached price on every turn.
+func contextManagement() anthropic.BetaContextManagementConfigParam {
+	return anthropic.BetaContextManagementConfigParam{
+		Edits: []anthropic.BetaContextManagementConfigEditUnionParam{{
+			OfClearToolUses20250919: &anthropic.BetaClearToolUses20250919EditParam{
+				Trigger: anthropic.BetaClearToolUses20250919EditTriggerUnionParam{
+					OfInputTokens: &anthropic.BetaInputTokensTriggerParam{Value: clearTrigger},
+				},
+				Keep:         anthropic.BetaToolUsesKeepParam{Value: clearKeep},
+				ClearAtLeast: anthropic.BetaInputTokensClearAtLeastParam{Value: clearAtLeast},
+				// A person's answer is the one result that cannot be recovered by
+				// running the tool again: they have walked away, and re-asking
+				// spends them twice. Snapshots are deliberately NOT protected --
+				// they are the fattest thing in history, so excluding them would
+				// defeat the whole point of turning this on.
+				ExcludeTools: []string{"ask_human"},
+			},
+		}},
 	}
 }
 
@@ -379,12 +432,25 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 			a.log.Append(Event{Type: "tool_use", Tool: b.Name, Input: encode(b.Input)})
 		}
 	}
+	cleared, uses := appliedEdits(msg)
 	a.log.Append(Event{Type: "usage", Model: msg.Model, Usage: &Usage{
 		InputTokens:              msg.Usage.InputTokens,
 		OutputTokens:             msg.Usage.OutputTokens,
 		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
 		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+		ClearedInputTokens:       cleared,
+		ClearedToolUses:          uses,
 	}})
+}
+
+// appliedEdits totals what context editing removed from this request, so the
+// event log can show it happening rather than merely being configured.
+func appliedEdits(msg *anthropic.BetaMessage) (tokens, uses int64) {
+	for _, e := range msg.ContextManagement.AppliedEdits {
+		tokens += e.ClearedInputTokens
+		uses += e.ClearedToolUses
+	}
+	return tokens, uses
 }
 
 // finish closes a turn, reporting the error if there was one.

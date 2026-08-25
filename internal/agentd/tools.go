@@ -37,17 +37,42 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := append(append(files, rest...), team...)
-	return keepAllowed(all, allow), nil
+	browser, err := browserTools(d)
+	if err != nil {
+		return nil, err
+	}
+	all := append(append(append(files, rest...), team...), browser...)
+	return keepAllowed(all, withBrowser(allow, d.browser)), nil
+}
+
+// withBrowser adds the browser tools to what a profile allows when it declares
+// browser access.
+//
+// One switch, not two. `browser: true` and a tools: list naming every browser
+// tool would be two gates that can disagree, and the failure is silent in both
+// directions: an unknown name in a profile is dropped without an error, and a
+// profile that sets the flag but forgets a name just quietly loses that tool.
+// The flag is the single source of truth; tools: stays authoritative for
+// everything else.
+func withBrowser(allow []string, browser bool) []string {
+	if !browser || len(allow) == 0 {
+		return allow
+	}
+	return append(append([]string(nil), allow...), browserToolNames...)
 }
 
 // toolDeps is what tool construction needs beyond the roots: the approval
-// gate, the supervisor the team tools reach through, and which agent these
-// tools belong to.
+// gate, the supervisor the team tools reach through, which agent these tools
+// belong to, and the shared browser with the store that keeps its snapshots
+// out of the conversation.
 type toolDeps struct {
-	gate *Gate
-	team *Supervisor
-	self string
+	gate    *Gate
+	team    *Supervisor
+	self    string
+	browser bool
+	chrome  pageDriver
+	snaps   *snapshotStore
+	log     *Log
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list

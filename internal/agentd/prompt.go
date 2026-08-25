@@ -11,12 +11,30 @@ import (
 // crowd out everything else in the prefix.
 const instructionsCap = 16_000
 
+// BrowserGuidance is added only for profiles that declare a browser. The
+// snapshot-then-act rule is the whole contract: without it the model invents
+// uids, and an invented uid is indistinguishable from a stale one -- both come
+// back as the same refusal, so it has no way to tell which mistake it made.
+const BrowserGuidance = `## Using the browser
+You share one browser with the person, and they can see the screen. It is signed
+in to their accounts, so use it rather than fetching pages another way, and do
+not try to open a separate browser or profile: it would be signed out of
+everything.
+
+Take a snapshot before you act. Every element you can act on comes back with a
+uid, and a uid is the only way to name something on the page. Never guess one and
+never make one up. After anything that changes the page, take a fresh snapshot:
+uids from before it are gone, and acting on one is refused.
+
+A snapshot of a large page is trimmed, and it tells you where the full version is
+saved. Read that file when you need something the trimmed view left out.
+
+If a page needs a sign-in, ask with kind "handoff" so the person types it
+themselves on their own screen.`
+
 // BaseIdentity opens every agent's system prompt: what it is, what it may do
 // without asking, and how to talk to the person. The role a profile adds sits
 // after this and before the limits.
-//
-// There is no browser section yet. It comes back with Chrome, in the phase that
-// adds the shared CDP client and its lease.
 const BaseIdentity = `You are an agent working on a computer, on behalf of one person.
 You have a workspace on disk, a shell, and the ability to read, write and search
 files. You are one of several agents that may share this machine.
@@ -82,6 +100,9 @@ Do not try to reach the host machine or any other virtual machine.`
 // from the index.
 func ComposeSystemPrompt(p Profile, agentDir string) string {
 	parts := []string{BaseIdentity}
+	if p.Browser {
+		parts = append(parts, BrowserGuidance)
+	}
 	if role := strings.TrimSpace(p.Prompt); role != "" {
 		parts = append(parts, role)
 	}

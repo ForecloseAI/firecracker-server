@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"cracked/internal/agentd/cdp"
 )
 
 // ErrNoCapacity is returned when the live-agent ceiling is reached and every
@@ -42,6 +44,34 @@ type Supervisor struct {
 
 	mu     sync.Mutex
 	agents map[string]*live
+
+	// One Chrome for the whole machine, connected on first use. Agents share
+	// the browser the person is watching, so this must never become one browser
+	// per agent: a second context is signed out of everything.
+	chromeMu sync.Mutex
+	chrome   *cdp.Browser
+}
+
+// ChromeURL is where the guest's Chrome exposes DevTools. A var so a test can
+// point it at a stub, matching how the gate's timeouts are shrunk.
+var ChromeURL = "http://127.0.0.1:9222"
+
+// Chrome returns the shared browser, connecting on first use.
+//
+// Lazily, because four of the five shipped profiles never open a page and an
+// accountant's first turn must not depend on a service it has no use for.
+func (s *Supervisor) Chrome(ctx context.Context) (*cdp.Browser, error) {
+	s.chromeMu.Lock()
+	defer s.chromeMu.Unlock()
+	if s.chrome != nil {
+		return s.chrome, nil
+	}
+	b, err := cdp.Connect(ctx, ChromeURL)
+	if err != nil {
+		return nil, err
+	}
+	s.chrome = b
+	return b, nil
 }
 
 // NewSupervisor loads the roster and ensures this machine has a boss.

@@ -58,8 +58,8 @@ func TestMissingCustomDirectoryKeepsBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.List()) != 5 {
-		t.Errorf("got %d profiles, want the 5 built-ins", len(c.List()))
+	if len(c.List()) != 6 {
+		t.Errorf("got %d profiles, want the 6 built-ins", len(c.List()))
 	}
 }
 
