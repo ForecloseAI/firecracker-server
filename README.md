@@ -15,7 +15,7 @@ Go 1.27, stdlib only, zero dependencies.
 | `internal/fc` | firecracker API client over its unix socket |
 | `internal/hostnet` | TAP devices and slot→IP/MAC derivation |
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
-| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agent |
+| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd |
 | `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh` |
 | `deploy/` | systemd unit for the control plane |
 
@@ -176,61 +176,40 @@ Delete a VM and recreate it with the same id to get its data back.
 
 ## Memory
 
-Each agent keeps three separate things on the overlay, so all of them survive
-`DELETE` and all of them die on `?purge=true`:
+Every agent gets its own state directory on the overlay, so all of it survives
+`DELETE` and all of it dies on `?purge=true`. `agentd.service` passes
+`-state-dir /home/agent/agent-state/agentd`, and each agent lives under
+`agents/<id>/` inside it:
 
-| Path | Holds |
+| Path (relative to the agent's own directory) | Holds |
 |---|---|
-| `~/agent-state/memory/` | durable facts, as Markdown concept files (OKF v0.1) |
-| `~/agent-state/instructions.md` | standing role and behaviour, spliced into the system prompt |
-| `~/agent-state/events.jsonl` | the event log |
+| `memory/` | durable facts, as Markdown concept files (OKF v0.1) |
+| `instructions.md` | standing role and behaviour, spliced into the system prompt |
+| `events.jsonl` | that agent's event log |
+| `conversation.json` | the wire-format history it resumes from |
 
-`memory/index.md` and `memory/system/definition.md` are injected into the model's
-context whenever a context window is created — at startup, and in principle after
-compaction — each capped at 16k characters.
+The tree is seeded from templates embedded in the binary (`internal/agentd/memtree`),
+written with `O_EXCL` so the check and the write are one syscall: seeding runs on
+every start and an agent's own edits always survive it.
 
-**Caveat on compaction, found while testing this:** `enableCompaction()` in
-`session.ts` appears not to actually drive compaction on SDK 0.3.238. Across
-`autoCompactWindow` values from 6,000 to 990,000 and ~46k of accumulated context,
-compaction never fired and the SDK emitted no `autocompact_state` message, even
-though `applyFlagSettings` accepted the call. That is pre-existing behaviour, not
-caused by memory, but it means mid-session refresh is unverified — memory is
-injected once at session start, and thereafter the agent reads the files on
-demand. `test/compaction-canary.mjs` reproduces it. Everything deeper the agent reads on demand by
-following links from the index. The doctrine in `definition.md` is deliberately
-agent-editable: it is how the agent decides what is worth keeping.
+`memory/index.md` and `memory/system/definition.md` are inlined into the system
+prompt, each capped at 16 kB independently so one runaway file cannot crowd out
+the other. Everything deeper the agent reads on demand by following links from
+the index — the prompt carries a header naming the real paths so it knows where
+to look. A tree that cannot be read at all injects nothing rather than a block
+announcing its own absence, which would spend tokens saying only that there is
+no memory.
 
-Delivery is a `SessionStart` hook passed **inline** to `query()` as `settings`
-(the flag tier), so the registration is compiled into the image rather than
-sitting in a file the agent can rewrite. `buildOptions` pairs it with
-`settingSources: []`.
+Because the whole prompt is composed once when an agent starts, memory is
+refreshed by eviction rather than mid-session: an agent evicted under the live
+ceiling and later re-addressed comes back with a fresh view of its own files.
+That also keeps the cached prefix stable, which is what makes context editing
+free (see `internal/agentd/loop.go`).
 
-That empty array is load-bearing, and not for the reason it looks. **Omitting
-`settingSources` does not mean "load nothing" — it means load user *and* project
-*and* local**, verified against the SDK's own `resolveSettings`. Project and
-local resolve under `/home/agent/workspace`, which the agent writes with
-auto-approved `Write`/`Edit`, so the default would let a prompt injection off a
-web page register a `PreToolUse` command that runs on every later tool call,
-persists on the overlay, and never shows up in `events.jsonl`. **Never put
-`"project"` or `"local"` in that array.**
-
-`src/memory/settings.ts` still holds a settings-file installer, kept as a tested
-fallback; `install()` calls it only to clear entries an earlier build may have
-written.
-
-`test/canary.mjs` proves the whole path against the real API for a few cents,
-without a rootfs build: `npm run build && node test/canary.mjs`.
-
-The system prompt is composed as `BASE_IDENTITY` + `instructions.md` +
-`BASE_LIMITS`. The limits go last on purpose: `instructions.md` is agent-writable,
-so the safety rules have to be the final word.
-
-Env overrides, all optional: `CRACKED_MEMORY=0` disables the subsystem and
-removes its hook, `CRACKED_MEMORY_DIR`, `CRACKED_INSTRUCTIONS_FILE`,
-`CRACKED_MEMORY_FILE_BUDGET`, `CRACKED_COMPACT_WINDOW`.
-
-Did the hook actually fire? `cat ~/agent-state/memory/.last-hook` in the guest,
-or look for a `memory` event in the log.
+The full prompt is `BaseIdentity` + browser guidance (browser profiles only) +
+the profile's role + memory + `instructions.md` + `BaseLimits`. The limits go
+last on purpose: `instructions.md` is agent-writable, so the safety rules have
+to be the final word.
 
 ## Operational notes
 

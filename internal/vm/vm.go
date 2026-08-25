@@ -30,20 +30,6 @@ const (
 	VNCPort   = 6080
 )
 
-// Which agent a guest runs. The default is empty, meaning node: every VM created
-// before this flag existed, and every request that omits it, keeps the behaviour
-// it has today. Only AgentImplGo changes anything.
-const (
-	AgentImplNode = "node"
-	AgentImplGo   = "go"
-)
-
-// ValidAgentImpl reports whether impl names an agent the guest image can boot.
-// Empty is valid and means node.
-func ValidAgentImpl(impl string) bool {
-	return impl == "" || impl == AgentImplNode || impl == AgentImplGo
-}
-
 // VM is one microVM occupying one slot. Mutable fields are guarded by the
 // owning Registry's mutex; cmd/done are written once at spawn.
 type VM struct {
@@ -52,15 +38,10 @@ type VM struct {
 	State     State
 	PID       int
 	CreatedAt time.Time
-	// AgentImpl picks the guest agent via the kernel command line. It is set at
-	// create time and is NOT stored with the workspace, so a delete-and-recreate
-	// must pass it again or the VM comes back on the default.
-	AgentImpl string
-
-	Tap     string
-	HostIP  string
-	GuestIP string
-	MAC     string
+	Tap       string
+	HostIP    string
+	GuestIP   string
+	MAC       string
 
 	cmd            *exec.Cmd
 	done           chan struct{}
@@ -89,7 +70,6 @@ type View struct {
 	WorkspaceNew  bool      `json:"workspace_new"`
 	VNCURL        string    `json:"vnc_url"`
 	AgentURL      string    `json:"agent_url"`
-	AgentImpl     string    `json:"agent_impl,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 

@@ -89,7 +89,7 @@ const TOKEN = (() => {
 const LIST_MS = 3000, DETAIL_MS = 5000;
 const DESTRUCTIVE = new Set(["delete", "purge"]);
 const SNAPSHOT_CMD = "uptime; echo; free -m; echo; df -h /; echo; ps aux --sort=-%cpu | head -15";
-const AGENTLOG_CMD = "journalctl -u agent -n 100 --no-pager";
+const AGENTLOG_CMD = "journalctl -u agentd -n 100 --no-pager";
 
 let armed = null;   // "act:id" waiting on a second click, survives re-render
 let timer = null;

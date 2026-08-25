@@ -17,29 +17,25 @@ func postCreate(t *testing.T, h http.Handler, body string) *httptest.ResponseRec
 	return w
 }
 
-// An unknown agent implementation must be rejected before a slot is allocated.
-// The value reaches the guest on the kernel command line, where nothing
-// validates it: a typo would boot a VM whose units both decline to start, and
-// the only symptom would be a 504 sixty seconds later.
-func TestCreateRejectsUnknownAgent(t *testing.T) {
+// A caller still sending the retired `agent` field must not break. Nothing in
+// the guest can act on it any more, and rejecting it would turn a harmless stale
+// client into a hard failure for no gain -- encoding/json drops unknown fields,
+// and this pins that it stays that way.
+func TestCreateIgnoresTheRetiredAgentField(t *testing.T) {
 	_, h := newTestServer(t)
-	w := postCreate(t, h, `{"id":"alice","agent":"rust"}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "bad_request") {
-		t.Errorf("body should carry the bad_request error: %s", w.Body.String())
+	w := postCreate(t, h, `{"id":"alice","agent":"go"}`)
+	// Booting fails in a temp dir with no kernel or rootfs, but it must fail
+	// LATER than validation: a 400 here would mean the field became meaningful.
+	if w.Code == http.StatusBadRequest {
+		t.Errorf("a stale agent field must not be a bad request: %s", w.Body.String())
 	}
 }
 
-// A body with no agent field must stay valid, so every client written before the
-// field existed keeps working and keeps getting node.
+// A body carrying nothing but an id is now the only shape there is.
 func TestCreateAcceptsBodyWithoutAgent(t *testing.T) {
 	_, h := newTestServer(t)
 	w := postCreate(t, h, `{"id":"alice"}`)
-	// Booting fails in a temp dir with no kernel or rootfs, but it must fail
-	// LATER than validation: a 400 here would mean the field became required.
 	if w.Code == http.StatusBadRequest {
-		t.Errorf("omitting agent must not be a bad request: %s", w.Body.String())
+		t.Errorf("an id-only body must not be a bad request: %s", w.Body.String())
 	}
 }

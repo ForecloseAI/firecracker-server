@@ -1,9 +1,9 @@
 // Package agentd is the in-guest multi-agent daemon: one process running
 // several named agents, each with its own tools, memory and event log.
 //
-// It replaces nothing yet. The TypeScript agent in rootfs/files/agent keeps
-// running in every VM; this is built alongside it and switched on only after
-// it has proven itself.
+// It is the only agent a guest runs. The TypeScript agent it replaced is gone
+// from the image entirely; what remains of it here is the measurements its
+// behaviour produced, kept where they justify a decision.
 package agentd
 
 import (
@@ -77,13 +77,6 @@ type Agent struct {
 	convBytes   int
 }
 
-// New builds an agent rooted at dir, working in workspace, restoring its
-// conversation and log from disk. The client reads ANTHROPIC_API_KEY from the
-// environment.
-//
-// The agent owns its log, gate and tools rather than being handed them: the
-// gate records into the log and the tools call the gate, so assembling them
-// anywhere else just moves the knot.
 // inbound is one queued message. From is empty when it came from the person
 // and names the sender when it came from another agent, which decides both how
 // it is logged and how it is framed for the model.
@@ -98,6 +91,13 @@ type inbound struct {
 	replyTo string
 }
 
+// New builds an agent rooted at dir, working in workspace, restoring its
+// conversation and log from disk. The client reads ANTHROPIC_API_KEY from the
+// environment.
+//
+// The agent owns its log, gate and tools rather than being handed them: the
+// gate records into the log and the tools call the gate, so assembling them
+// anywhere else just moves the knot.
 func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
 	log, err := OpenLog(dir, id)
 	if err != nil {

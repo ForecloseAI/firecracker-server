@@ -1,8 +1,9 @@
-// Command agentd runs the Go multi-agent daemon.
+// Command agentd runs the Go multi-agent daemon: a roster of agents sharing one
+// workspace, each with its own durable event log, conversation and memory, an
+// HTTP surface with SSE and interrupt, and a browser driven through
+// chrome-devtools-mcp.
 //
-// Phase 3: one agent, one tool, a durable event log, a conversation that
-// survives a restart, and an HTTP surface with SSE and interrupt. Not deployed
-// anywhere yet -- the TypeScript agent still runs in every VM.
+// It is the only agent a guest runs.
 package main
 
 import (

@@ -38,8 +38,8 @@ func TestDebugExecReturnsExitCodeAndStreams(t *testing.T) {
 	}
 }
 
-// An empty command is a client mistake, not a shell no-op, and mirrors the
-// TypeScript agent so the dashboard sees one shape from either implementation.
+// An empty command is a client mistake, not a shell no-op. The dashboard's exec
+// box posts whatever is typed, and a blank box must not run a successful nothing.
 func TestDebugExecRejectsEmptyCommand(t *testing.T) {
 	s := NewServer(newTestSupervisor(t))
 	if w := do(t, s, "POST", "/debug/exec", `{"cmd":""}`); w.Code != http.StatusBadRequest {

@@ -39,8 +39,7 @@ func NewServer(sup *Supervisor) *Server {
 	return &Server{sup: sup, started: time.Now(), seen: map[string]string{}}
 }
 
-// apiError is the error shape every endpoint uses, matching the control plane
-// and the TypeScript agent it will eventually replace.
+// apiError is the error shape every endpoint uses, matching the control plane.
 type apiError struct {
 	Error    string `json:"error"`
 	Message  string `json:"message"`

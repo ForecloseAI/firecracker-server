@@ -7,13 +7,6 @@ After=resolvconf.service network.target
 Requires=resolvconf.service
 
 [Service]
-# Node's agent.service and this one both want :8080; agent-impl-is reads the
-# kernel command line and lets exactly one of them through. It is an
-# ExecCondition rather than ConditionKernelCommandLine because systemd cannot
-# read the kernel command line in this image -- see the script for why. A failed
-# ExecCondition marks the unit skipped, not failed, so Restart=always never fires
-# on the loser and nothing ever races for the port.
-ExecCondition=/usr/local/bin/agent-impl-is go
 User=agent
 Environment=HOME=/home/agent
 # A 4096 MiB guest that also runs Chrome. A soft limit makes the collector work

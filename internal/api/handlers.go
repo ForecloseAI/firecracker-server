@@ -13,14 +13,10 @@ import (
 	"cracked/internal/vm"
 )
 
-// createReq is the POST /vms body. Sizing is fixed in v1, so the only choices
-// are the id and which guest agent to boot.
+// createReq is the POST /vms body. Sizing is fixed in v1, so the id is the only
+// choice a caller has.
 type createReq struct {
 	ID string `json:"id"`
-	// Agent picks the guest agent: "" or "node" for the default, "go" for
-	// agentd. It rides the kernel command line, so it is fixed for the life of
-	// the VM and must be passed again when recreating one.
-	Agent string `json:"agent"`
 }
 
 // handleHealth reports liveness and slot usage without requiring a token.
@@ -61,17 +57,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			apiError{"bad_request", "id must match ^[a-z0-9][a-z0-9-]{0,31}$", ""})
 		return
 	}
-	if !vm.ValidAgentImpl(req.Agent) {
-		writeErr(w, http.StatusBadRequest,
-			apiError{"bad_request", `agent must be "node" or "go"`, ""})
-		return
-	}
-	s.create(w, req.ID, req.Agent)
+	s.create(w, req.ID)
 }
 
 // create runs the boot and maps its failure modes onto status codes.
-func (s *Server) create(w http.ResponseWriter, id, impl string) {
-	v, err := s.reg.Create(id, impl)
+func (s *Server) create(w http.ResponseWriter, id string) {
+	v, err := s.reg.Create(id)
 	if err == nil {
 		writeJSON(w, http.StatusCreated, s.reg.View(v))
 		return

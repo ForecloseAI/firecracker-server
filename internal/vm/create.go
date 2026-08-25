@@ -29,15 +29,11 @@ var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 func ValidID(id string) bool { return idRe.MatchString(id) }
 
 // Create allocates a slot and boots a microVM, rolling back on any failure.
-// impl selects the guest agent ("" or "node" for the default, "go" for agentd);
-// it must be set before boot, because it reaches the guest on the kernel
-// command line, which is fixed once firecracker starts.
-func (r *Registry) Create(id, impl string) (*VM, error) {
+func (r *Registry) Create(id string) (*VM, error) {
 	v, err := r.Allocate(id)
 	if err != nil {
 		return nil, err
 	}
-	v.AgentImpl = impl
 	if err := r.boot(v); err != nil {
 		r.cleanup(v, v.workspaceIsNew)
 		return nil, err

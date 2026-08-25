@@ -22,7 +22,7 @@ var (
 
 	// MCPNodePath is absolute rather than bare "node": under systemd this
 	// process inherits the default PATH, and depending on that is a boot-order
-	// failure waiting to happen. agent.service names the same path.
+	// failure waiting to happen. The image installs Node solely for this.
 	MCPNodePath = "/usr/bin/node"
 
 	// MCPServerArgs are the flags beyond the browser URL. The three categories

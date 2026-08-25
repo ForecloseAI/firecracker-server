@@ -56,15 +56,15 @@ docker rm "$CID" >/dev/null
 
 # The docker daemon creates /.dockerenv inside every container, and `docker
 # export` faithfully carries it into the rootfs. systemd-detect-virt then reports
-# "docker" INSIDE THE MICROVM and systemd runs in container mode, which is wrong
-# in two load-bearing ways:
+# "docker" INSIDE THE MICROVM and systemd runs in container mode, where it
+# installs no ctrl-alt-del handler: firecracker's SendCtrlAltDel is accepted with
+# a 204 and then ignored. Every teardown therefore degrades to SIGTERM and
+# SIGKILL with no filesystem sync, and ANY guest write since the last flush is
+# lost -- agent memory and Chrome's profile LevelDB alike.
 #
-#   - it reads /proc/1/cmdline ("/sbin/init") instead of the kernel command line,
-#     so every ConditionKernelCommandLine silently evaluates false;
-#   - it installs no ctrl-alt-del handler, so firecracker's SendCtrlAltDel is
-#     accepted with a 204 and then ignored. Every teardown therefore degrades to
-#     SIGTERM and SIGKILL with no filesystem sync, and ANY guest write since the
-#     last flush is lost -- agent memory and Chrome's profile LevelDB alike.
+# Container mode also makes systemd read /proc/1/cmdline instead of the kernel
+# command line, so every ConditionKernelCommandLine silently evaluates false. No
+# unit relies on that today, but it is the other half of the same trap.
 #
 # bootArgs() already omits i8042.nopnp specifically to keep SendCtrlAltDel
 # working; this is the other half of that promise.

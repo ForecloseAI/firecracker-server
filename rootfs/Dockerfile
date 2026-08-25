@@ -4,7 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv udev dbus dbus-x11 ca-certificates curl wget gnupg \
       xvfb x11vnc novnc websockify openbox x11-utils x11-xserver-utils xdg-utils \
-      fonts-liberation fonts-dejavu-core libnss3 libxss1 libasound2t64 \
+      fonts-liberation fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji \
+      libnss3 libxss1 libasound2t64 \
       python3 python3-venv python3-pip e2fsprogs iproute2 iputils-ping procps \
  && rm -rf /var/lib/apt/lists/*
 
@@ -14,8 +15,12 @@ RUN wget -q -O /tmp/chrome.deb \
  && apt-get update && apt-get install -y /tmp/chrome.deb \
  && rm -f /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
 
-# Node 22. Ubuntu 24.04's apt `nodejs` is 18, which is too old for the Agent SDK.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node 26. Ubuntu 24.04's apt `nodejs` is 18 and its engines field rules it out.
+# The only thing in this image that needs Node is chrome-devtools-mcp, which asks
+# for `^20.19.0 || ^22.12.0 || >=23`; the old pin to 22 was the Agent SDK's, and
+# the Agent SDK is gone. 26 is Current until October 2026 and becomes LTS then,
+# so taking the LTS of today (24) would only mean bumping again in six weeks.
+RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
  && node --version
@@ -35,36 +40,24 @@ RUN mkdir -p /overlay /rom
 COPY files/overlay-init /sbin/overlay-init
 COPY files/resolvconf.service files/xvfb.service files/x11vnc.service \
      files/novnc.service files/openbox.service files/chrome.service \
-     files/agent.service files/agentd.service /etc/systemd/system/
+     files/agentd.service /etc/systemd/system/
 RUN chmod 0755 /sbin/overlay-init
 
-# The Agent SDK ships one native binary per platform as optionalDependencies.
-# npm installs BOTH linux-x64 and linux-x64-musl because both match this
-# platform, and the musl one is 318MB of dead weight on glibc Ubuntu.
+# The one Node package left in the image. agentd drives Chrome through it as a
+# stdio subprocess; nothing else here runs Node at all.
 #
 # chrome-devtools-mcp runs on puppeteer-core, which downloads no browser, so the
 # image keeps exactly one Chrome (the .deb above). This env var is the guard: if
 # a future version switches to full puppeteer it fails here instead of silently
-# adding a ~170MB second browser. --omit=dev keeps devDependencies out too.
+# adding a ~170MB second browser.
 ENV PUPPETEER_SKIP_DOWNLOAD=true
-COPY files/agent/package.json files/agent/package-lock.json files/agent/tsconfig.json /opt/agent/
-COPY files/agent/src /opt/agent/src
-# `npm run build` is tsc plus a copy of src/memory/templates into dist: tsc
-# emits only .js, so without that copy import.meta.url resolves next to a dist
-# that holds no markdown and every VM boots healthy with no memory. The test -f
-# turns that silent degradation into a build failure here, in seconds, instead
-# of after the multi-GB ext4 pipeline in build-rootfs.sh.
-#
-# The second test -f is the same class of guard for the browser: agentd spawns
-# chrome-devtools-mcp as a subprocess, so a missing entrypoint would give every
-# VM a researcher with no browser tools and no complaint from anywhere.
+COPY files/mcp/package.json files/mcp/package-lock.json /opt/agent/
+# The test -f is the guard that matters now: agentd spawns this entrypoint by
+# absolute path, so a missing or moved file would give every VM a researcher
+# with no browser tools and no complaint from anywhere. It is checked here, in
+# seconds, rather than after the multi-GB ext4 pipeline in build-rootfs.sh.
 RUN cd /opt/agent \
  && npm ci --omit=dev --no-audit --no-fund \
- && npm install --no-save --no-audit --no-fund typescript @types/node \
- && npm run build \
- && test -f /opt/agent/dist/memory/templates/system/definition.md \
- && rm -rf /opt/agent/node_modules/typescript /opt/agent/node_modules/@types \
- && rm -rf /opt/agent/node_modules/@anthropic-ai/*-musl \
  && test -f /opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
@@ -72,12 +65,11 @@ RUN cd /opt/agent \
 # agentd is compiled on the host by scripts/build-rootfs.sh, because its Go
 # source lives OUTSIDE this build context. Running it here is the guard: it
 # proves the file is present, executable, the right architecture and not
-# truncated. Same class of check as the definition.md test above, and it exists
-# for the same reason -- a silently missing artifact boots a VM that passes every
-# health check and does nothing. `-h` exits 0, so this needs no special flag.
+# truncated. Same class of check as the test -f above, and it exists for the same
+# reason -- a silently missing artifact boots a VM that passes every health check
+# and does nothing. `-h` exits 0, so this needs no special flag.
 COPY files/agentd /usr/local/bin/agentd
-COPY files/agent-impl-is /usr/local/bin/agent-impl-is
-RUN chmod 0755 /usr/local/bin/agentd /usr/local/bin/agent-impl-is \
+RUN chmod 0755 /usr/local/bin/agentd \
  && /usr/local/bin/agentd -h
 
 # Masking the network managers is load-bearing: the guest IP comes from the
@@ -85,8 +77,7 @@ RUN chmod 0755 /usr/local/bin/agentd /usr/local/bin/agent-impl-is \
 # deliberately left alone -- masking it makes SendCtrlAltDel a silent no-op.
 RUN systemctl set-default multi-user.target \
  && systemctl enable resolvconf.service xvfb.service x11vnc.service \
-      novnc.service openbox.service chrome.service agent.service \
-      agentd.service \
+      novnc.service openbox.service chrome.service agentd.service \
  && systemctl mask systemd-networkd.service systemd-networkd-wait-online.service \
       systemd-resolved.service NetworkManager.service snapd.service \
       apparmor.service systemd-timesyncd.service systemd-random-seed.service \
