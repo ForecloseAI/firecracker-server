@@ -4,6 +4,10 @@ After=chrome.service
 Requires=xvfb.service
 
 [Service]
+# The twin of the condition on agentd.service, which wants the same port. Absent
+# the flag agent-impl-is answers "node", so a VM created the way every VM is
+# created today boots exactly as it did before.
+ExecCondition=/usr/local/bin/agent-impl-is node
 User=agent
 Environment=DISPLAY=:0
 Environment=HOME=/home/agent

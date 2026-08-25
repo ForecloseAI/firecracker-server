@@ -22,6 +22,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agents/{id}/approvals/{apid}", s.withAgent(s.handleApproval))
 	mux.HandleFunc("GET /agents/{id}/events", s.withAgent(s.handleEvents))
 	mux.HandleFunc("GET /debug/memstats", s.handleMemstats)
+	mux.HandleFunc("POST /debug/exec", s.handleDebugExec)
 	return mux
 }
 
@@ -95,7 +96,13 @@ func (s *Server) handleTypes(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, s.sup.Catalog().List())
 }
 
-// handleHealth is what the control plane's boot probe will read.
+// handleHealth is what the control plane's boot probe reads, and what the
+// dashboard's agent column renders.
+//
+// session_state mirrors the TypeScript agent's field so internal/agent.Health
+// decodes it unchanged. It is computed from List(), never Get(): Get STARTS an
+// agent, and a dashboard polling every few seconds must not be able to spawn the
+// whole roster into memory.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	statuses := s.sup.List()
 	working := 0
@@ -104,9 +111,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			working++
 		}
 	}
+	state := "idle"
+	if working > 0 {
+		state = "working"
+	}
 	reply(w, http.StatusOK, map[string]any{
 		"ok": true, "ready": true, "agents": len(statuses),
-		"live": s.sup.LiveCount(), "working": working,
+		"live": s.sup.LiveCount(), "working": working, "session_state": state,
 	})
 }
 

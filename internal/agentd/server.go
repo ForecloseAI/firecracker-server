@@ -3,9 +3,12 @@ package agentd
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 	"time"
+
+	"cracked/internal/hoststat"
 )
 
 // beat is how often an idle SSE connection emits a comment, so a proxy in
@@ -97,6 +100,19 @@ type memReport struct {
 	AgentsTotal    int            `json:"agents_total"`
 	AgentsLive     int            `json:"agents_live"`
 	Conversations  map[string]int `json:"conversation_bytes"`
+	RSSBytes       int64          `json:"rss_bytes"`
+}
+
+// selfRSS is the process's resident set size, which is the number that matters
+// in a 4 GiB guest: the Go heap is only part of what the kernel is holding.
+// Zero wherever there is no /proc, so polling this from a mac degrades to a
+// missing number rather than an error.
+func selfRSS() int64 {
+	rss, err := hoststat.ProcRSSBytes(os.Getpid())
+	if err != nil {
+		return 0
+	}
+	return rss
 }
 
 // handleMemstats reports memory, per the plan's per-phase tracking.
@@ -113,6 +129,6 @@ func (s *Server) handleMemstats(w http.ResponseWriter, r *http.Request) {
 		Goroutines:    runtime.NumGoroutine(),
 		UptimeSeconds: int64(time.Since(s.started).Seconds()),
 		AgentsTotal:   len(statuses), AgentsLive: s.sup.LiveCount(),
-		Conversations: conv,
+		Conversations: conv, RSSBytes: selfRSS(),
 	})
 }

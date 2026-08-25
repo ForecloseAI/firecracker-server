@@ -1,0 +1,18 @@
+#!/bin/sh
+# Exit 0 when $1 names the agent this VM is supposed to run. Used as the
+# ExecCondition of both agent.service and agentd.service, which want the same
+# port, so exactly one of them starts.
+#
+# This reads /proc/cmdline itself rather than using systemd's own
+# ConditionKernelCommandLine, which CANNOT WORK in this image: `docker export`
+# carries /.dockerenv into the rootfs, so systemd-detect-virt reports "docker"
+# and systemd runs in container mode -- where it reads /proc/1/cmdline (just
+# "/sbin/init") instead of the kernel command line. Every
+# ConditionKernelCommandLine then silently evaluates false, including a negated
+# one, which is how you end up with both units making the wrong choice at once.
+#
+# An ExecCondition failure marks a unit skipped rather than failed, so
+# Restart=always on the loser never fires.
+want=node
+grep -qF 'cracked.agent=go' /proc/cmdline && want=go
+[ "$1" = "$want" ]

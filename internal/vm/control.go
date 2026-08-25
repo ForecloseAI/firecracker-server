@@ -69,6 +69,7 @@ func (r *Registry) View(v *VM) View {
 		WorkspacePath: r.dirs.Workspace(v.ID), WorkspaceNew: v.workspaceIsNew,
 		VNCURL:    fmt.Sprintf("/vms/%s/vnc/vnc.html?path=vms/%s/vnc/websockify", v.ID, v.ID),
 		AgentURL:  fmt.Sprintf("/vms/%s/agent/", v.ID),
+		AgentImpl: v.AgentImpl,
 		CreatedAt: v.CreatedAt,
 	}
 }

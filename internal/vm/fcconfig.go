@@ -61,7 +61,20 @@ type netIface struct {
 func bootArgs(v *VM) string {
 	ip := fmt.Sprintf("ip=%s::%s:%s::eth0:off", v.GuestIP, v.HostIP, hostnet.Mask)
 	return "console=ttyS0 reboot=k panic=1 i8042.noaux i8042.nomux " +
-		"random.trust_cpu=on " + ip + " init=/sbin/overlay-init overlay_root=vdb"
+		"random.trust_cpu=on " + ip + " init=/sbin/overlay-init overlay_root=vdb" +
+		agentArg(v.AgentImpl)
+}
+
+// agentArg selects the guest agent. The kernel command line is the only per-VM
+// host-to-guest channel there is -- no vsock, no metadata service -- and the two
+// units pick themselves up off it with ConditionKernelCommandLine. Anything but
+// "go" appends nothing, so an unflagged VM boots the node agent exactly as it
+// did before this existed.
+func agentArg(impl string) string {
+	if impl == AgentImplGo {
+		return " cracked.agent=go"
+	}
+	return ""
 }
 
 // buildConfig assembles the two-drive config: shared read-only root on vda,

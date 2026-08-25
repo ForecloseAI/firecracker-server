@@ -3,6 +3,7 @@ package agentd
 import (
 	"bufio"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +15,13 @@ import (
 // TypeScript agent logged came from the Claude Code CLI's own pricing table.
 // Events carry tokens plus the model id, and pricing is applied host-side.
 type Usage struct {
+	// ClearedInputTokens and ClearedToolUses report what context editing
+	// actually removed. They are the only evidence it is doing anything: a
+	// clear_tool_uses edit that is configured but never fires looks exactly like
+	// one that works, right up until the bill arrives.
+	ClearedInputTokens int64 `json:"cleared_input_tokens,omitempty"`
+	ClearedToolUses    int64 `json:"cleared_tool_uses,omitempty"`
+
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
@@ -111,17 +119,27 @@ func (l *Log) Append(e Event) Event {
 }
 
 // write appends one JSON line. Caller holds l.mu.
+//
+// The failures here are reported and then swallowed: a log that cannot be
+// written must not take the agent down. But they must not be SILENT either --
+// this file is the only durable diagnostic an agent has, so a full or read-only
+// overlay would otherwise lose every event while /health still answers ok.
+// stderr is the one channel left, and under systemd it reaches the journal.
 func (l *Log) write(e Event) {
 	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
 	if err != nil {
+		log.Printf("agentd: cannot open event log %s: %v", l.path, err)
 		return
 	}
 	defer f.Close()
 	buf, err := json.Marshal(e)
 	if err != nil {
+		log.Printf("agentd: cannot encode %s event: %v", e.Type, err)
 		return
 	}
-	f.Write(append(buf, '\n'))
+	if _, err := f.Write(append(buf, '\n')); err != nil {
+		log.Printf("agentd: cannot append to %s: %v", l.path, err)
+	}
 }
 
 // ReadAll returns every persisted event, skipping any line that will not

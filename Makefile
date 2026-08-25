@@ -1,7 +1,7 @@
 BIN := cracked
 GOFLAGS := CGO_ENABLED=0
 
-.PHONY: build build-cracked build-chat test vet fmt install install-chat hashpw clean
+.PHONY: build build-cracked build-chat build-agentd test vet fmt install install-chat hashpw clean
 
 build: build-cracked build-chat
 
@@ -10,6 +10,13 @@ build-cracked:
 
 build-chat:
 	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -o bin/$(BIN)-chat ./cmd/chat
+
+# agentd ships INSIDE the guest image, so it is built into the Docker build
+# context (rootfs/) rather than bin/. Deliberately not part of `build`, which is
+# the "ship a control-plane binary to EC2" path. build-rootfs.sh calls this on
+# every run, because anything conditional is how a stale binary ships.
+build-agentd:
+	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -o rootfs/files/agentd ./cmd/agentd
 
 test:
 	$(GOFLAGS) go test ./...

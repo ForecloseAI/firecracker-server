@@ -4,3 +4,4 @@ __pycache__/
 rootfs/files/agent/node_modules/
 rootfs/files/agent/dist/
 rootfs/files/agent/.testbuild/
+rootfs/files/agentd

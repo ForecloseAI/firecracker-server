@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv udev dbus dbus-x11 ca-certificates curl wget gnupg \
       xvfb x11vnc novnc websockify openbox x11-utils x11-xserver-utils xdg-utils \
       fonts-liberation fonts-dejavu-core libnss3 libxss1 libasound2t64 \
-      python3 python3-venv python3-pip e2fsprogs iproute2 iputils-ping \
+      python3 python3-venv python3-pip e2fsprogs iproute2 iputils-ping procps \
  && rm -rf /var/lib/apt/lists/*
 
 # Chrome stable; apt resolves the .deb's own dependencies.
@@ -35,7 +35,7 @@ RUN mkdir -p /overlay /rom
 COPY files/overlay-init /sbin/overlay-init
 COPY files/resolvconf.service files/xvfb.service files/x11vnc.service \
      files/novnc.service files/openbox.service files/chrome.service \
-     files/agent.service /etc/systemd/system/
+     files/agent.service files/agentd.service /etc/systemd/system/
 RUN chmod 0755 /sbin/overlay-init
 
 # The Agent SDK ships one native binary per platform as optionalDependencies.
@@ -64,12 +64,24 @@ RUN cd /opt/agent \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
 
+# agentd is compiled on the host by scripts/build-rootfs.sh, because its Go
+# source lives OUTSIDE this build context. Running it here is the guard: it
+# proves the file is present, executable, the right architecture and not
+# truncated. Same class of check as the definition.md test above, and it exists
+# for the same reason -- a silently missing artifact boots a VM that passes every
+# health check and does nothing. `-h` exits 0, so this needs no special flag.
+COPY files/agentd /usr/local/bin/agentd
+COPY files/agent-impl-is /usr/local/bin/agent-impl-is
+RUN chmod 0755 /usr/local/bin/agentd /usr/local/bin/agent-impl-is \
+ && /usr/local/bin/agentd -h
+
 # Masking the network managers is load-bearing: the guest IP comes from the
 # kernel ip= boot arg and any of them would clobber it. ctrl-alt-del.target is
 # deliberately left alone -- masking it makes SendCtrlAltDel a silent no-op.
 RUN systemctl set-default multi-user.target \
  && systemctl enable resolvconf.service xvfb.service x11vnc.service \
       novnc.service openbox.service chrome.service agent.service \
+      agentd.service \
  && systemctl mask systemd-networkd.service systemd-networkd-wait-online.service \
       systemd-resolved.service NetworkManager.service snapd.service \
       apparmor.service systemd-timesyncd.service systemd-random-seed.service \

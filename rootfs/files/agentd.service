@@ -1,0 +1,42 @@
+[Unit]
+Description=Go agent daemon
+# resolvconf.service writes /etc/resolv.conf and /etc/hosts at boot, because
+# Docker bind-mounts both during the build and the image ships them as 0-byte
+# files. Without it api.anthropic.com does not resolve and every turn fails.
+After=resolvconf.service network.target
+Requires=resolvconf.service
+
+[Service]
+# Node's agent.service and this one both want :8080; agent-impl-is reads the
+# kernel command line and lets exactly one of them through. It is an
+# ExecCondition rather than ConditionKernelCommandLine because systemd cannot
+# read the kernel command line in this image -- see the script for why. A failed
+# ExecCondition marks the unit skipped, not failed, so Restart=always never fires
+# on the loser and nothing ever races for the port.
+ExecCondition=/usr/local/bin/agent-impl-is go
+User=agent
+Environment=HOME=/home/agent
+# A 4096 MiB guest that also runs Chrome. A soft limit makes the collector work
+# harder as it approaches the ceiling rather than letting the kernel's OOM killer
+# pick a victim -- and with swap off on the host, that reaps the whole VM.
+Environment=GOMEMLIMIT=2GiB
+EnvironmentFile=-/etc/cracked-agent.env
+WorkingDirectory=/home/agent
+# Both paths absolute, deliberately. Under systemd the working directory is /,
+# so a relative -workspace would make the file tools reject every path while Glob
+# and Grep walked the real root, /proc and /sys included. The state dir is nested
+# under agent-state/ so node's files and this daemon's coexist on one overlay and
+# a VM can be flipped between them without either losing anything.
+ExecStart=/usr/local/bin/agentd \
+  -addr 0.0.0.0:8080 \
+  -workspace /home/agent/workspace \
+  -state-dir /home/agent/agent-state/agentd
+# A failed boot is only visible off-VM through the serial console, which the host
+# captures into run/<vm>/console.log. The journal alone would die with the guest.
+StandardOutput=journal+console
+StandardError=journal+console
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

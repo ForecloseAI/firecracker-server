@@ -106,3 +106,49 @@ func hasToken(args, prefix string) bool {
 	}
 	return false
 }
+
+// TestBootArgsDefaultsToNode guards the switchover's blast radius. A VM created
+// the way every VM is created today must produce a command line with no trace of
+// the agent flag, so the node path cannot regress while the go path is proven.
+func TestBootArgsDefaultsToNode(t *testing.T) {
+	for _, impl := range []string{"", AgentImplNode} {
+		v := newVM("alice", 0)
+		v.AgentImpl = impl
+		args := bootArgs(v)
+		if strings.Contains(args, "cracked.agent") {
+			t.Errorf("impl %q must not appear on the command line: %s", impl, args)
+		}
+	}
+}
+
+// TestBootArgsCarriesGoFlag pins the one token agentd.service conditions on.
+// ConditionKernelCommandLine matches /proc/cmdline literally, so a rename here
+// silently boots node forever with no error anywhere.
+func TestBootArgsCarriesGoFlag(t *testing.T) {
+	v := newVM("alice", 0)
+	v.AgentImpl = AgentImplGo
+	args := bootArgs(v)
+	if !hasToken(args, "cracked.agent=go") {
+		t.Errorf("go VM must carry cracked.agent=go: %s", args)
+	}
+	// The flag rides after overlay_root, which init consumes; a trailing space or
+	// a merge with the previous token would make the kernel see one bad arg.
+	if !strings.Contains(args, "overlay_root=vdb cracked.agent=go") {
+		t.Errorf("flag must be its own token after overlay_root: %s", args)
+	}
+}
+
+// TestValidAgentImpl pins what the API will accept. Empty means node, so that a
+// request body written before this field existed stays valid.
+func TestValidAgentImpl(t *testing.T) {
+	for _, ok := range []string{"", "node", "go"} {
+		if !ValidAgentImpl(ok) {
+			t.Errorf("%q should be accepted", ok)
+		}
+	}
+	for _, bad := range []string{"rust", "Go", "node ", "python"} {
+		if ValidAgentImpl(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}

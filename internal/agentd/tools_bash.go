@@ -102,10 +102,18 @@ func bashTool(root string, gate *Gate) (anthropic.BetaTool, error) {
 func runCommand(ctx context.Context, root, command string) anthropic.BetaToolResultBlockParamContentUnion {
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	// bash, not sh. In the guest /bin/sh is dash, while on a developer's mac it
+	// is bash in POSIX mode -- so every [[ ]], array and pipefail the model
+	// learned to write in dev would start failing only in production.
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", command)
 	cmd.Dir = root
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
+	// Without this, a command that backgrounds a process leaves a grandchild
+	// holding the output pipe, and Run blocks past the timeout AND past ctx
+	// cancellation -- wedging the agent goroutine, and with it the supervisor's
+	// shutdown wait, until systemd resorts to SIGKILL.
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
 	return toolText(describeRun(out.String(), err, ctx.Err()))
 }

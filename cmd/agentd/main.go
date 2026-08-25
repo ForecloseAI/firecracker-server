@@ -54,17 +54,39 @@ func run(once, profile, model, workspace, stateDir, addr string, maxLive int) er
 		return err
 	}
 	defer sup.Close()
+	warnMissingKey()
 	if once != "" {
 		return runOnce(sup, profile, once)
 	}
 	return serve(ctx, sup, addr)
 }
 
+// warnMissingKey reports a missing credential at startup instead of leaving it
+// to be discovered one turn at a time.
+//
+// anthropic.NewClient() cannot fail, and each agent builds its own client only
+// when it first runs -- so without this a keyless daemon boots clean, answers
+// /health with ok:true, accepts messages with 202, and buries the real error in
+// one agent's event log. It is a warning and not fatal on purpose: Restart=always
+// would turn a config typo into a crash loop that still satisfies the control
+// plane's TCP boot probe, which is strictly harder to diagnose than this line.
+func warnMissingKey() {
+	if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
+		log.Printf("agentd: WARNING no ANTHROPIC_API_KEY in the environment; every turn will fail")
+	}
+}
+
 // serve runs the HTTP surface until interrupted.
 func serve(ctx context.Context, sup *agentd.Supervisor, addr string) error {
-	srv := &http.Server{Addr: addr, Handler: agentd.NewServer(sup).Routes()}
-	// No WriteTimeout: it is an absolute deadline and would cut every SSE
-	// stream at the same age, however active the client is.
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: agentd.NewServer(sup).Routes(),
+		// No WriteTimeout: it is an absolute deadline and would cut every SSE
+		// stream at the same age, however active the client is. ReadHeaderTimeout
+		// is safe alongside it and is what keeps a stalled client from holding a
+		// connection open forever once this binds something other than loopback.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
