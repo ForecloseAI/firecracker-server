@@ -8,63 +8,26 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
-// Usage mirrors the SDK's usage block. There is deliberately no cost field:
-// the Messages API returns token counts only, and the dollar figure the old
-// TypeScript agent logged came from the Claude Code CLI's own pricing table.
-// Events carry tokens plus the model id, and pricing is applied host-side.
-type Usage struct {
-	// ClearedInputTokens and ClearedToolUses report what context editing
-	// actually removed. They are the only evidence it is doing anything: a
-	// clear_tool_uses edit that is configured but never fires looks exactly like
-	// one that works, right up until the bill arrives.
-	ClearedInputTokens int64 `json:"cleared_input_tokens,omitempty"`
-	ClearedToolUses    int64 `json:"cleared_tool_uses,omitempty"`
-
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-}
-
-// Event is one entry in an agent's log. The field set is the union of what
-// every event type needs, only the relevant ones being set -- the same shape
-// internal/agent/client.go already decodes, so the host side can consume these
-// unchanged when it is wired up.
-type Event struct {
-	ID    int       `json:"id"`
-	Agent string    `json:"agent"`
-	Type  string    `json:"type"`
-	TS    time.Time `json:"ts"`
-
-	Text      string          `json:"text,omitempty"`
-	From      string          `json:"from,omitempty"`
-	To        string          `json:"to,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	MessageID string          `json:"message_id,omitempty"`
-
-	Model        string `json:"model,omitempty"`
-	Usage        *Usage `json:"usage,omitempty"`
-	DurationMS   int64  `json:"duration_ms,omitempty"`
-	SessionState string `json:"session_state,omitempty"`
-	Message      string `json:"message,omitempty"`
-	IsError      bool   `json:"is_error,omitempty"`
-
-	// A pending interaction waiting on a human, and its resolution.
-	ApprovalID string `json:"approval_id,omitempty"`
-	Preview    string `json:"preview,omitempty"`
-	Question   string `json:"question,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	UI         *UI    `json:"ui,omitempty"`
-	Decision   string `json:"decision,omitempty"`
-
-	// A task folder opened by start_task, or carried by a delegation.
-	TaskSlug  string `json:"task_slug,omitempty"`
-	TaskTitle string `json:"task_title,omitempty"`
-	TaskDir   string `json:"task_dir,omitempty"`
-}
+// The wire format lives in internal/agentapi so the host and this daemon cannot
+// declare it twice and drift apart, which is exactly what happened before: the
+// host's copy of Event had no Model or Agent field, so both were dropped on
+// decode and nothing anywhere reported a problem. These are aliases, not new
+// types, so the two sides are the same type to the compiler.
+type (
+	Event      = agentapi.Event
+	Usage      = agentapi.Usage
+	UI         = agentapi.UI
+	Decision   = agentapi.Decision
+	Task       = agentapi.Task
+	Record     = agentapi.Record
+	Status     = agentapi.Status
+	EventsPage = agentapi.EventsPage
+	Health     = agentapi.Health
+)
 
 // Log is one agent's append-only event log, durable on disk so a transcript
 // survives a restart. One per agent, not a package global: from Phase 6 there

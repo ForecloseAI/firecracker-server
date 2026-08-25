@@ -3,6 +3,8 @@ package agent
 import (
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // recentCap is how many trailing events the detail view keeps per VM.
@@ -34,7 +36,7 @@ type entry struct {
 	mu        sync.Mutex
 	watermark int
 	totals    Totals
-	recent    []Event
+	recent    []agentapi.Event
 }
 
 // Accumulator folds guest usage events into per-VM totals, polling each guest
@@ -73,11 +75,16 @@ func (a *Accumulator) Forget(id string) {
 // Update pulls any new events from a guest and returns its totals plus the
 // trailing event window. The whole fetch-and-advance holds the VM's lock, so
 // two concurrent dashboard polls cannot both consume the same batch.
-func (a *Accumulator) Update(id, guestIP string, port int) (Totals, []Event, error) {
+//
+// This reads the BOSS only, so a delegated worker's spend is not yet counted.
+// That is deliberate and temporary: the daemon is about to report its own
+// totals across the whole roster, at which point this watermark machinery goes
+// away rather than growing a fan-out it would only keep for one phase.
+func (a *Accumulator) Update(id, guestIP string, port int) (Totals, []agentapi.Event, error) {
 	e := a.entryFor(id)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	events, last, err := New(guestIP, port).EventsSince(e.watermark)
+	events, last, err := New(guestIP, port).EventsSince(agentapi.BossID, e.watermark)
 	if err != nil {
 		return e.totals, e.recent, err
 	}
@@ -86,7 +93,7 @@ func (a *Accumulator) Update(id, guestIP string, port int) (Totals, []Event, err
 }
 
 // absorb folds a fresh batch in and advances the watermark. Caller holds e.mu.
-func (e *entry) absorb(events []Event, last int) {
+func (e *entry) absorb(events []agentapi.Event, last int) {
 	for _, ev := range events {
 		if ev.Type == "usage" {
 			foldUsage(&e.totals, ev)
@@ -101,12 +108,17 @@ func (e *entry) absorb(events []Event, last int) {
 }
 
 // foldUsage adds one usage event to a VM's running totals.
-func foldUsage(t *Totals, e Event) {
-	t.CostUSD += e.CostUSD
+//
+// Cost is not folded here: the daemon reports tokens and a model id and nothing
+// else, so there is no dollar figure to add until the host learns to price
+// them. Tokens and turns are correct in the meantime; cost reads zero, which is
+// why the caller now surfaces a usage error rather than letting a clean $0.00
+// stand in for "nobody looked".
+func foldUsage(t *Totals, e agentapi.Event) {
 	t.Turns++
-	t.LastCostUSD, t.LastDurationMS = e.CostUSD, e.DurationMS
-	if ts, err := time.Parse(time.RFC3339, e.TS); err == nil {
-		t.LastActivity = ts
+	t.LastDurationMS = e.DurationMS
+	if !e.TS.IsZero() {
+		t.LastActivity = e.TS
 	}
 	if e.Usage == nil {
 		return
@@ -118,10 +130,10 @@ func foldUsage(t *Totals, e Event) {
 }
 
 // appendRecent keeps the newest recentCap events, oldest first.
-func appendRecent(recent, fresh []Event) []Event {
+func appendRecent(recent, fresh []agentapi.Event) []agentapi.Event {
 	out := append(recent, fresh...)
 	if len(out) > recentCap {
-		out = append([]Event(nil), out[len(out)-recentCap:]...)
+		out = append([]agentapi.Event(nil), out[len(out)-recentCap:]...)
 	}
 	return out
 }
@@ -129,7 +141,7 @@ func appendRecent(recent, fresh []Event) []Event {
 // Snapshot returns a VM's last known totals and event window without touching
 // the guest. Used for VMs that are not running, where a poll would only buy a
 // timeout, and for the detail view once Update has already run.
-func (a *Accumulator) Snapshot(id string) (Totals, []Event) {
+func (a *Accumulator) Snapshot(id string) (Totals, []agentapi.Event) {
 	e := a.entryFor(id)
 	e.mu.Lock()
 	defer e.mu.Unlock()

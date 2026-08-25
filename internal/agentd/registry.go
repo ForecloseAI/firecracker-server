@@ -11,35 +11,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // BossID is the agent the person talks to first. Created on first boot, and
 // the only one that cannot be deleted: something has to be accountable for the
 // whole result, and a machine with no boss has nobody to ask.
-const BossID = "boss"
+const BossID = agentapi.BossID
 
 // validID is the same shape the control plane already requires of a VM id, so
 // agent ids are safe in a path and in a URL without further escaping.
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-
-// Task is what an agent is currently working on. Nil when idle.
-type Task struct {
-	Slug      string    `json:"slug"`
-	Title     string    `json:"title"`
-	Dir       string    `json:"dir"`
-	StartedAt time.Time `json:"started_at"`
-}
-
-// Record is one agent's durable identity: who it is, not whether it is running.
-// The distinction matters -- a roster entry costs a few hundred bytes on disk,
-// while a running agent costs a goroutine and a conversation in memory.
-type Record struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	CreatedAt time.Time `json:"created_at"`
-	Task      *Task     `json:"task,omitempty"`
-}
 
 // Roster is the persisted set of agents on this machine.
 type Roster struct {

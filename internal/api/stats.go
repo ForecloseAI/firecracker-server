@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 	"cracked/internal/fc"
 	"cracked/internal/hoststat"
 	"cracked/internal/vm"
@@ -51,7 +52,7 @@ type vmDetail struct {
 	vmStats
 	Firecracker *fc.InstanceInfo `json:"firecracker,omitempty"`
 	ConsoleTail string           `json:"console_tail"`
-	Events      []agent.Event    `json:"events"`
+	Events      []agentapi.Event `json:"events"`
 }
 
 // collect gathers one snapshot of the whole host. Every read surface renders

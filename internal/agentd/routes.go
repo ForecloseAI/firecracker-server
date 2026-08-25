@@ -115,9 +115,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if working > 0 {
 		state = "working"
 	}
-	reply(w, http.StatusOK, map[string]any{
-		"ok": true, "ready": true, "agents": len(statuses),
-		"live": s.sup.LiveCount(), "working": working, "session_state": state,
+	reply(w, http.StatusOK, Health{
+		OK: true, Ready: true, Agents: len(statuses),
+		Live: s.sup.LiveCount(), Working: working, SessionState: state,
 	})
 }
 
@@ -206,9 +206,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *Agent) 
 			fail(w, http.StatusInternalServerError, "internal", err.Error(), "")
 			return
 		}
-		reply(w, http.StatusOK, map[string]any{
-			"events": events, "last_event_id": a.Log().LastID(),
-		})
+		reply(w, http.StatusOK, EventsPage{Events: events, LastEventID: a.Log().LastID()})
 		return
 	}
 	s.stream(w, r, a, since)

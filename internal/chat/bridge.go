@@ -9,8 +9,19 @@ import (
 	"time"
 
 	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 	"cracked/internal/vm"
 )
+
+// chatAgent is who the chat page is talking to. The daemon runs a whole roster,
+// but the person addresses the boss: it is the agent that delegates, and its log
+// records both the handing out of work and the answers coming back. Workers'
+// own transcripts stay on their own logs, which is where they belong.
+//
+// A worker that needs the PERSON is the case this does not cover, and it is why
+// pending interactions are about to stop being reconstructed from one agent's
+// event log at all.
+const chatAgent = agentapi.BossID
 
 const (
 	guestPort   = 8080
@@ -98,7 +109,7 @@ func (b *Bridge) consume(ctx context.Context) error {
 		return err
 	}
 	cl := agent.New(view.GuestIP, guestPort)
-	return cl.Stream(ctx, b.since(), b.onEvent)
+	return cl.Stream(ctx, chatAgent, b.since(), b.onEvent)
 }
 
 // since reports the last event id seen, so a reconnect resumes without gaps.
@@ -109,7 +120,7 @@ func (b *Bridge) since() int {
 }
 
 // onEvent maps one guest event onto a frame and publishes it.
-func (b *Bridge) onEvent(ev agent.Event) {
+func (b *Bridge) onEvent(ev agentapi.Event) {
 	b.mu.Lock()
 	if ev.ID > b.last {
 		b.last = ev.ID
@@ -122,7 +133,7 @@ func (b *Bridge) onEvent(ev agent.Event) {
 
 // frameFor translates a guest event. Types not listed are deliberately
 // dropped: thinking especially must never reach the transcript.
-func (b *Bridge) frameFor(ev agent.Event) (Frame, bool) {
+func (b *Bridge) frameFor(ev agentapi.Event) (Frame, bool) {
 	switch ev.Type {
 	case "user":
 		return Frame{ID: ev.ID, Kind: "say", Role: "user", Text: ev.Text}, true
@@ -150,7 +161,7 @@ func (b *Bridge) frameFor(ev agent.Event) (Frame, bool) {
 }
 
 // pendingFrame registers a pending interaction and renders its card.
-func (b *Bridge) pendingFrame(ev agent.Event) Frame {
+func (b *Bridge) pendingFrame(ev agentapi.Event) Frame {
 	p := buildPending(ev)
 	if p.UI.Kind == "handoff" {
 		p.UI.URL = b.caps.Mint(b.id)
@@ -218,7 +229,7 @@ func (b *Bridge) history(since int) []Frame {
 		log.Printf("chat bridge %s: history resolve: %v", b.id, err)
 		return nil
 	}
-	evs, _, err := agent.New(view.GuestIP, guestPort).EventsSince(since)
+	evs, _, err := agent.New(view.GuestIP, guestPort).EventsSince(chatAgent, since)
 	if err != nil {
 		log.Printf("chat bridge %s: history fetch: %v", b.id, err)
 		return nil
@@ -227,7 +238,7 @@ func (b *Bridge) history(since int) []Frame {
 }
 
 // replay converts a batch of events, keeping only the newest ringSize frames.
-func (b *Bridge) replay(evs []agent.Event) []Frame {
+func (b *Bridge) replay(evs []agentapi.Event) []Frame {
 	out := make([]Frame, 0, len(evs))
 	for _, ev := range evs {
 		if f, ok := b.frameFor(ev); ok {

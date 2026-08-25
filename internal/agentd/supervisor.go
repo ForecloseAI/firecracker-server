@@ -84,19 +84,6 @@ func (s *Supervisor) Roster() *Roster { return s.roster }
 // Catalog exposes the profile catalog.
 func (s *Supervisor) Catalog() *Catalog { return s.catalog }
 
-// Status is one agent's row in the API: identity from the roster, state from
-// whether it is running and what it is doing.
-type Status struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	State        string `json:"state"`
-	Live         bool   `json:"live"`
-	Task         *Task  `json:"task,omitempty"`
-	LastEventID  int    `json:"last_event_id"`
-	Conversation int    `json:"conversation_bytes"`
-}
-
 // List reports every agent without starting any of them. A poll must not be
 // able to spawn work, or a dashboard refreshing every few seconds would hold
 // the whole roster in memory forever.

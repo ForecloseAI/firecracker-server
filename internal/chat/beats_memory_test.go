@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // Captured verbatim from a live VM the first time an agent wrote its memory.
@@ -19,7 +19,7 @@ const liveMemoryWrite = `{"id":11,"type":"tool_use","ts":"2026-08-23T22:11:37.23
 // path -- never the file body, which for a 16k memory file would be kilobytes
 // of JSON on every keystroke of the agent's work.
 func TestFrameForRealMemoryWrite(t *testing.T) {
-	var ev agent.Event
+	var ev agentapi.Event
 	if err := json.Unmarshal([]byte(liveMemoryWrite), &ev); err != nil {
 		t.Fatalf("decode live event: %v", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // stallAfter bounds silence on a stream. The guest heartbeats every 15s, so a
@@ -21,8 +23,8 @@ var streamClient = &http.Client{Timeout: 0}
 
 // Stream consumes the guest's SSE event log from after id, calling fn for each
 // event. It returns when ctx ends, the guest closes, or the stream stalls.
-func (c *Client) Stream(ctx context.Context, since int, fn func(Event)) error {
-	req, err := c.streamRequest(ctx, since)
+func (c *Client) Stream(ctx context.Context, agentID string, since int, fn func(agentapi.Event)) error {
+	req, err := c.streamRequest(ctx, agentID, since)
 	if err != nil {
 		return err
 	}
@@ -38,8 +40,8 @@ func (c *Client) Stream(ctx context.Context, since int, fn func(Event)) error {
 }
 
 // streamRequest builds the SSE request, resuming from the given event id.
-func (c *Client) streamRequest(ctx context.Context, since int) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/session/events", nil)
+func (c *Client) streamRequest(ctx context.Context, agentID string, since int) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+agentID+"/events", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +53,7 @@ func (c *Client) streamRequest(ctx context.Context, since int) (*http.Request, e
 }
 
 // consume reads SSE frames until the stream ends or goes quiet.
-func (c *Client) consume(ctx context.Context, resp *http.Response, fn func(Event)) error {
+func (c *Client) consume(ctx context.Context, resp *http.Response, fn func(agentapi.Event)) error {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	stall := time.AfterFunc(stallAfter, func() { resp.Body.Close() })
@@ -70,14 +72,14 @@ func (c *Client) consume(ctx context.Context, resp *http.Response, fn func(Event
 
 // decodeLine turns one "data:" line into an Event. Other SSE fields and the
 // heartbeat comments carry nothing we need: the id is inside the JSON too.
-func decodeLine(line string) (Event, bool) {
+func decodeLine(line string) (agentapi.Event, bool) {
 	payload, found := strings.CutPrefix(line, "data:")
 	if !found {
-		return Event{}, false
+		return agentapi.Event{}, false
 	}
-	var ev Event
+	var ev agentapi.Event
 	if json.Unmarshal([]byte(strings.TrimSpace(payload)), &ev) != nil {
-		return Event{}, false
+		return agentapi.Event{}, false
 	}
 	return ev, ev.ID > 0
 }

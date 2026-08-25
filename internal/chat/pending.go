@@ -1,10 +1,9 @@
 package chat
 
 import (
-	"encoding/json"
 	"fmt"
 
-	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // Option is one button on a pending card. The body that actually goes to the
@@ -37,7 +36,7 @@ type Pending struct {
 const batchUses = 10
 
 // buildPending turns a guest approval or question into a renderable card.
-func buildPending(ev agent.Event) *Pending {
+func buildPending(ev agentapi.Event) *Pending {
 	if ev.Type == "approval_required" {
 		return confirmPending(ev)
 	}
@@ -46,7 +45,7 @@ func buildPending(ev agent.Event) *Pending {
 
 // confirmPending renders a gated tool call. The batch option is offered only
 // for Bash, because gate.applyScope hardcodes a Bash grant.
-func confirmPending(ev agent.Event) *Pending {
+func confirmPending(ev agentapi.Event) *Pending {
 	p := &Pending{
 		ID: ev.ApprovalID, Prompt: promptFor(ev), Detail: ev.Preview,
 		bodies: map[string]map[string]any{
@@ -68,7 +67,7 @@ func confirmPending(ev agent.Event) *Pending {
 }
 
 // promptFor gives a gated call a one-line human title.
-func promptFor(ev agent.Event) string {
+func promptFor(ev agentapi.Event) string {
 	if ev.Tool == "Bash" {
 		return "Run a shell command?"
 	}
@@ -76,7 +75,7 @@ func promptFor(ev agent.Event) string {
 }
 
 // questionPending renders an ask_human call by its declared kind.
-func questionPending(ev agent.Event) *Pending {
+func questionPending(ev agentapi.Event) *Pending {
 	p := &Pending{ID: ev.ApprovalID, Prompt: ev.Question, bodies: map[string]map[string]any{}}
 	switch ev.Kind {
 	case "confirm":
@@ -109,15 +108,13 @@ func handoffOptions() []Option {
 }
 
 // choiceOptions turns the tool's labels into buttons and their answer bodies.
-func choiceOptions(ev agent.Event, bodies map[string]map[string]any) []Option {
+func choiceOptions(ev agentapi.Event, bodies map[string]map[string]any) []Option {
+	// The daemon sends UI as a typed block, so the options arrive already
+	// parsed. This used to hand-unmarshal a raw blob, because the host kept its
+	// own copy of the event shape and had typed the field json.RawMessage.
 	var labels []string
-	if len(ev.UI) > 0 {
-		var ui struct {
-			Options []string `json:"options"`
-		}
-		if json.Unmarshal(ev.UI, &ui) == nil {
-			labels = ui.Options
-		}
+	if ev.UI != nil {
+		labels = ev.UI.Options
 	}
 	out := make([]Option, 0, len(labels))
 	for i, label := range labels {

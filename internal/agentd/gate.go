@@ -18,23 +18,6 @@ var (
 	questionTimeout = 10 * time.Minute
 )
 
-// UI tells a client how to render a pending interaction.
-type UI struct {
-	Kind    string   `json:"kind"` // text | confirm | choice | handoff
-	Options []string `json:"options,omitempty"`
-}
-
-// Decision is a human's answer to a pending interaction. Scope, MaxUses and
-// TTLSeconds turn a single approval into a batch consent.
-type Decision struct {
-	Decision   string `json:"decision"`
-	Reason     string `json:"reason,omitempty"`
-	Answer     string `json:"answer,omitempty"`
-	Scope      string `json:"scope,omitempty"`
-	MaxUses    int    `json:"max_uses,omitempty"`
-	TTLSeconds int    `json:"ttl_seconds,omitempty"`
-}
-
 // pending is one interaction blocking a tool handler.
 type pending struct {
 	answer chan Decision

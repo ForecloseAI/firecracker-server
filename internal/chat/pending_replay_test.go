@@ -4,20 +4,20 @@ import (
 	"fmt"
 	"testing"
 
-	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // approvalEvent is a guest approval waiting on a human decision.
-func approvalEvent(id int, approvalID string) agent.Event {
-	return agent.Event{ID: id, Type: "approval_required", ApprovalID: approvalID,
+func approvalEvent(id int, approvalID string) agentapi.Event {
+	return agentapi.Event{ID: id, Type: "approval_required", ApprovalID: approvalID,
 		Tool: "Bash", Preview: "Run shell command: rm -rf /tmp/x"}
 }
 
 // noisyLog is `n` ordinary frames, enough to blow past the replay window.
-func noisyLog(from, n int) []agent.Event {
-	out := make([]agent.Event, 0, n)
+func noisyLog(from, n int) []agentapi.Event {
+	out := make([]agentapi.Event, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, agent.Event{ID: from + i, Type: "text", Text: fmt.Sprintf("line %d", i)})
+		out = append(out, agentapi.Event{ID: from + i, Type: "text", Text: fmt.Sprintf("line %d", i)})
 	}
 	return out
 }
@@ -38,7 +38,7 @@ func pendingFrames(frames []Frame) []Frame {
 // question nobody can see until the gate times out half an hour later.
 func TestPendingSurvivesTruncation(t *testing.T) {
 	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agent.Event{approvalEvent(1, "ap_001")}, noisyLog(2, ringSize+50)...)
+	evs := append([]agentapi.Event{approvalEvent(1, "ap_001")}, noisyLog(2, ringSize+50)...)
 
 	frames := b.replay(evs)
 
@@ -64,7 +64,7 @@ func TestPendingSurvivesTruncation(t *testing.T) {
 func TestPendingNotDuplicatedWhenInWindow(t *testing.T) {
 	b := &Bridge{pending: map[string]*Pending{}}
 
-	frames := b.replay([]agent.Event{approvalEvent(1, "ap_001"), {ID: 2, Type: "text", Text: "hi"}})
+	frames := b.replay([]agentapi.Event{approvalEvent(1, "ap_001"), {ID: 2, Type: "text", Text: "hi"}})
 
 	if got := len(pendingFrames(frames)); got != 1 {
 		t.Fatalf("got %d cards, want exactly 1", got)
@@ -74,7 +74,7 @@ func TestPendingNotDuplicatedWhenInWindow(t *testing.T) {
 // An answered card must not come back on the next page load.
 func TestResolvedPendingNotReemitted(t *testing.T) {
 	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agent.Event{
+	evs := append([]agentapi.Event{
 		approvalEvent(1, "ap_001"),
 		{ID: 2, Type: "decision", ApprovalID: "ap_001", Decision: "allow"},
 	}, noisyLog(3, ringSize+50)...)
@@ -89,7 +89,7 @@ func TestResolvedPendingNotReemitted(t *testing.T) {
 // Several stranded cards must come back in a stable order, not map order.
 func TestUnshownPendingIsOrdered(t *testing.T) {
 	b := &Bridge{pending: map[string]*Pending{}}
-	evs := append([]agent.Event{
+	evs := append([]agentapi.Event{
 		approvalEvent(1, "ap_003"), approvalEvent(2, "ap_001"), approvalEvent(3, "ap_002"),
 	}, noisyLog(4, ringSize+50)...)
 

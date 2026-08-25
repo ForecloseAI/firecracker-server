@@ -42,17 +42,20 @@ func TestHealth(t *testing.T) {
 // compile or test failure elsewhere.
 func TestEventsSinceDecodesEveryRenderedField(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/agents/coder/events" {
+			t.Errorf("path = %q; events are per-agent now", got)
+		}
 		if got := r.URL.Query().Get("since"); got != "12" {
 			t.Errorf("since = %q, want 12", got)
 		}
 		w.Write([]byte(`{"events":[
-			{"id":13,"type":"tool_use","ts":"2026-08-22T10:00:00Z","tool":"Bash","input":{"command":"ls -la"}},
-			{"id":14,"type":"approval_required","approval_id":"ap_001","preview":"Run shell command: rm -rf /tmp"},
-			{"id":15,"type":"usage","cost_usd":0.0382,"duration_ms":4210,
+			{"id":13,"agent":"coder","type":"tool_use","ts":"2026-08-22T10:00:00Z","tool":"Bash","input":{"command":"ls -la"}},
+			{"id":14,"agent":"coder","type":"approval_required","approval_id":"ap_001","preview":"Run shell command: rm -rf /tmp"},
+			{"id":15,"agent":"coder","type":"usage","model":"claude-sonnet-5","duration_ms":4210,
 			 "usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}
 		],"last_event_id":15}`))
 	})
-	events, last, err := c.EventsSince(12)
+	events, last, err := c.EventsSince("coder", 12)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +68,11 @@ func TestEventsSinceDecodesEveryRenderedField(t *testing.T) {
 	if events[1].Preview == "" || events[1].ApprovalID != "ap_001" {
 		t.Errorf("approval event lost fields: %+v", events[1])
 	}
-	if events[2].Usage.CacheReadInputTokens != 3 || events[2].CostUSD != 0.0382 {
+	if events[2].Usage.CacheReadInputTokens != 3 || events[2].Model != "claude-sonnet-5" {
 		t.Errorf("usage event = %+v", events[2])
+	}
+	if events[0].Agent != "coder" {
+		t.Errorf("attribution lost: %+v", events[0])
 	}
 }
 
@@ -75,7 +81,7 @@ func TestEventsSinceError(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 	})
-	if _, _, err := c.EventsSince(0); err == nil {
+	if _, _, err := c.EventsSince("boss", 0); err == nil {
 		t.Error("want an error from a 404")
 	}
 }

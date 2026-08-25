@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // deadControl stands in for the control plane, 404ing so consume() returns
@@ -46,7 +46,7 @@ func TestBridgeRevivesAfterIdleStop(t *testing.T) {
 func TestBridgeKeepsLastAcrossRestart(t *testing.T) {
 	b := newBridge("alice", deadControl(t), nil)
 	defer b.stop()
-	b.onEvent(agent.Event{ID: 42, Type: "text", Text: "hello"})
+	b.onEvent(agentapi.Event{ID: 42, Type: "text", Text: "hello"})
 	b.stopIfEmpty()
 	b.Subscribe()
 	if got := b.since(); got != 42 {
