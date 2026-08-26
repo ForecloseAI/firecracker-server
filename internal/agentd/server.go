@@ -58,6 +58,16 @@ func fail(w http.ResponseWriter, status int, code, msg, resource string) {
 	reply(w, status, apiError{Error: code, Message: msg, Resource: resource})
 }
 
+// decode reads a JSON body under a byte cap, reporting whether it worked. It
+// writes its own 400, so a caller that gets false must simply return.
+func decode(w http.ResponseWriter, r *http.Request, cap int64, out any) bool {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, cap)).Decode(out) != nil {
+		fail(w, http.StatusBadRequest, "bad_request", "could not read the body", "")
+		return false
+	}
+	return true
+}
+
 // nextMessageID mints an id for a queued message, or replays the one a
 // previous send with the same idempotency key was given.
 func (s *Server) nextMessageID(key string) (string, bool) {

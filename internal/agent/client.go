@@ -9,22 +9,33 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"cracked/internal/agentapi"
 )
 
-// timeout bounds every guest call. A wedged guest must never stall a dashboard
-// poll, so this is short and failures degrade to "unreachable".
+// timeout bounds a read of guest state. A wedged guest must never stall a
+// dashboard poll, so this is short and failures degrade to "unreachable".
 const timeout = 2 * time.Second
+
+// writeTimeout bounds a call that CHANGES something. Sending a message resolves
+// the agent through Supervisor.Get, which cold-starts it -- reading its
+// conversation, seeding memory, building tools, possibly evicting another agent
+// first. That runs well past 2s, and the failure would be the worst kind: the
+// caller is told the send failed while the guest has already started the turn,
+// so the person retries and the agent hears it twice.
+const writeTimeout = 30 * time.Second
 
 // Client talks to one guest agent.
 type Client struct {
 	base string
 	http *http.Client
+	slow *http.Client
 }
 
 // New builds a client for the agent listening on a guest's port.
@@ -32,6 +43,7 @@ func New(guestIP string, port int) *Client {
 	return &Client{
 		base: "http://" + net.JoinHostPort(guestIP, strconv.Itoa(port)),
 		http: &http.Client{Timeout: timeout},
+		slow: &http.Client{Timeout: writeTimeout},
 	}
 }
 
@@ -58,6 +70,15 @@ func (c *Client) Agents() ([]agentapi.Status, error) {
 	return out, err
 }
 
+// AgentTypes lists the profiles this machine can create agents from. It carries
+// the display metadata -- title and description -- that a roster row needs and
+// that Status does not have.
+func (c *Client) AgentTypes() ([]agentapi.Profile, error) {
+	var out []agentapi.Profile
+	err := c.get("/agent-types", &out)
+	return out, err
+}
+
 // EventsSince fetches every event of one agent after id, using the poll form
 // rather than SSE because this is a one-shot read, not a subscription.
 func (c *Client) EventsSince(agentID string, id int) ([]agentapi.Event, int, error) {
@@ -74,7 +95,8 @@ func (c *Client) get(path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("agent %s: %s", path, resp.Status)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return &StatusError{Code: resp.StatusCode, Path: path}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -94,6 +116,52 @@ func (c *Client) post(path string, body any, hdr map[string]string) error {
 		req.Header.Set(k, v)
 	}
 	return c.send(req)
+}
+
+// StatusError is a guest refusal that the caller must be able to tell apart.
+// A plain error would flatten "the agent is busy, retry in 5s" and "the guest is
+// unreachable" into one 502, and a client cannot act on that.
+type StatusError struct {
+	Code int
+	Path string
+}
+
+// Error renders the refusal.
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("agent %s: %d", e.Path, e.Code)
+}
+
+// write posts a JSON body on the longer timeout and decodes the reply. Used for
+// calls that change something, where losing the response loses the id or the
+// reason it was refused.
+func (c *Client) write(method, path string, body, out any) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(method, c.base+path, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.decode(req, path, out)
+}
+
+// decode runs a write request and reads its reply, or reports the refusal.
+func (c *Client) decode(req *http.Request, path string, out any) error {
+	resp, err := c.slow.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return &StatusError{Code: resp.StatusCode, Path: path}
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // send executes a request and turns a non-2xx into an error.
@@ -120,6 +188,58 @@ func (c *Client) SendMessage(agentID, text, idempotencyKey string) error {
 	return c.post("/agents/"+agentID+"/messages", map[string]string{"text": text}, hdr)
 }
 
+// Sent is what the guest reports back about a queued message. LastEventID is
+// the id of the `user` event Send appended, which is the message's own id: the
+// daemon reads it AFTER appending, so no second call is needed to learn it.
+type Sent struct {
+	MessageID   string `json:"message_id"`
+	State       string `json:"session_state"`
+	LastEventID int    `json:"last_event_id"`
+}
+
+// Post queues a user turn and reports what the guest recorded.
+//
+// No idempotency key: the header exists, but keying on the text collapses a
+// deliberate repeat into silence, and a duplicate message is a far better
+// failure than one that vanishes with no error.
+func (c *Client) Post(agentID, text string) (Sent, error) {
+	return c.PostFile(agentID, text, nil)
+}
+
+// PostFile sends a message with a file the person attached.
+func (c *Client) PostFile(agentID, text string, file *agentapi.File) (Sent, error) {
+	var out Sent
+	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages",
+		sendBody{Text: text, File: file}, &out)
+	return out, err
+}
+
+// sendBody is what the daemon reads on POST /agents/{id}/messages.
+type sendBody struct {
+	Text string         `json:"text"`
+	File *agentapi.File `json:"file,omitempty"`
+}
+
+// CreateAgent adds an agent of the given type to the roster. It does not start
+// it -- an agent runs when it is first addressed.
+//
+// The name is passed explicitly because the daemon falls back to the TYPE KEY
+// when it is empty, which is lowercase: the roster card would read "researcher"
+// where the gallery card the person tapped said "Researcher".
+func (c *Client) CreateAgent(typeKey, name string) (agentapi.Record, error) {
+	var out agentapi.Record
+	body := map[string]string{"type": typeKey, "name": name}
+	err := c.write(http.MethodPost, "/agents", body, &out)
+	return out, err
+}
+
+// DeleteAgent retires an agent, keeping its state so re-adding the same id gets
+// its history back. Purging is deliberately not offered here: the app calls this
+// "retire", and erasing a transcript should never be the quiet default.
+func (c *Client) DeleteAgent(agentID string) error {
+	return c.write(http.MethodDelete, "/agents/"+agentID, nil, nil)
+}
+
 // Pending is every agent currently waiting on a person: the team's raised
 // hands. Machine-wide, because a person answers the team rather than polling
 // each specialist to find out which one has its hand up.
@@ -134,11 +254,68 @@ func (c *Client) Pending() ([]agentapi.Raised, error) {
 // No agent argument: the id names the agent that raised it, so there is no way
 // to deliver an answer to the wrong one, and no way for a worker's approval to
 // be routed through the boss.
+// The write client is used so a refusal comes back TYPED: the guest answers 404
+// when an interaction is already settled -- answered elsewhere, timed out, or
+// revoked by an interrupt -- and a caller has to be able to tell that from an
+// unreachable guest.
 func (c *Client) Resolve(approvalID string, body map[string]any) error {
-	return c.post("/approvals/"+approvalID, body, nil)
+	return c.write(http.MethodPost, "/approvals/"+approvalID, body, nil)
 }
 
 // Interrupt stops one agent's turn and revokes its outstanding consent grants.
 func (c *Client) Interrupt(agentID string) error {
 	return c.post("/agents/"+agentID+"/interrupt", map[string]string{}, nil)
+}
+
+// Person reports what the machine knows about whoever it works for.
+func (c *Client) Person() (agentapi.Person, error) {
+	var p agentapi.Person
+	return p, c.get("/person", &p)
+}
+
+// SetPerson replaces that profile with what onboarding collected.
+func (c *Client) SetPerson(p agentapi.Person) error {
+	return c.write(http.MethodPut, "/person", p, nil)
+}
+
+// Upload streams a file into the guest's uploads folder and says where it landed.
+//
+// Streamed rather than buffered: 20 MB held in the gateway per upload is 20 MB
+// the host cannot use for a VM, and this process runs beside five of them.
+func (c *Client) Upload(name string, body io.Reader) (agentapi.File, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() { pw.CloseWithError(writePart(mw, name, body)) }()
+	req, err := http.NewRequest(http.MethodPost, c.base+"/files", pr)
+	if err != nil {
+		return agentapi.File{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	var out agentapi.File
+	return out, c.decode(req, "/files", &out)
+}
+
+// writePart copies the body into one multipart field and closes the writer.
+func writePart(mw *multipart.Writer, name string, body io.Reader) error {
+	part, err := mw.CreateFormFile("file", name)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, body); err != nil {
+		return err
+	}
+	return mw.Close()
+}
+
+// Shot fetches a handoff screenshot. The caller closes the body.
+func (c *Client) Shot(agentID, name string) (io.ReadCloser, error) {
+	resp, err := c.http.Get(c.base + "/agents/" + agentID + "/shots/" + url.PathEscape(name))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, &StatusError{Code: resp.StatusCode, Path: "/shots"}
+	}
+	return resp.Body, nil
 }

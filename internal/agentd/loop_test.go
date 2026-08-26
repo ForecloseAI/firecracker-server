@@ -94,12 +94,17 @@ func TestConversationSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(reopened.Messages()); got != 2 {
-		t.Fatalf("restored %d messages, want 2", got)
+	// Three, not two: this fixture ends on a tool_use nothing answered, which is
+	// the shape that used to 400 every later turn, so load now heals it.
+	if got := len(reopened.Messages()); got != 3 {
+		t.Fatalf("restored %d messages, want 3", got)
 	}
 	block := reopened.Messages()[1].Content[1].OfToolUse
 	if block == nil || block.Name != "Read" {
 		t.Errorf("tool_use block did not survive the round trip: %+v", reopened.Messages()[1])
+	}
+	if ids := resultIDs(reopened.Messages()[2]); len(ids) != 1 || ids[0] != "tu_1" {
+		t.Errorf("restored history answers %v, want the tu_1 call", ids)
 	}
 }
 

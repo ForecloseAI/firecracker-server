@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"cracked/internal/agentapi"
 )
 
 //go:embed profiles/*.md
@@ -15,16 +17,9 @@ var builtinProfiles embed.FS
 
 // Profile is one kind of agent: its role prompt, its model, and what it may do.
 // Shipped as markdown with a small front matter block, so adding a specialist
-// is writing a file rather than changing code.
-type Profile struct {
-	Key         string   `json:"key"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Model       string   `json:"model"`
-	Browser     bool     `json:"browser"`
-	Tools       []string `json:"tools"`
-	Prompt      string   `json:"-"`
-}
+// is writing a file rather than changing code. The shape lives in agentapi
+// because the host renders a roster from it.
+type Profile = agentapi.Profile
 
 // Catalog is the set of profiles an agent can be created from: the built-in
 // ones compiled into the binary, plus any written to disk, which override a

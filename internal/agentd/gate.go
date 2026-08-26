@@ -41,6 +41,13 @@ type grant struct {
 type Gate struct {
 	log *Log
 	hub *Interactions
+	// dir is the agent's own directory, where a handoff's screenshot is kept.
+	dir string
+
+	// onWait moves the agent's count of people it is blocked on, by +1 and -1.
+	// Set by the agent once it exists; nil in a test, and in the moment between
+	// the gate being built and the agent being assembled around it.
+	onWait func(int)
 
 	mu      sync.Mutex
 	pending map[string]*pending
@@ -50,8 +57,24 @@ type Gate struct {
 
 // NewGate builds a gate that records its decisions in log and raises its
 // pending interactions on hub, which may be nil in a test.
-func NewGate(log *Log, hub *Interactions) *Gate {
-	return &Gate{log: log, hub: hub, pending: map[string]*pending{}}
+// Seeded from the event log rather than from zero. seq only ever lived in
+// memory, so every restart began at ap_001 again and handed a fresh ask the same
+// id as one already answered before the restart -- which made history stamp the
+// old verdict onto the new card. The person then saw a question that said it was
+// already answered, could not answer it, and the agent stayed blocked on them
+// until it timed out. Log ids are monotonic and survive a restart, so starting
+// there cannot repeat.
+func NewGate(log *Log, hub *Interactions, dir string) *Gate {
+	return &Gate{log: log, hub: hub, dir: dir, seq: log.LastID(), pending: map[string]*pending{}}
+}
+
+// shotName is a unique file name for the next handoff capture. Uses the gate's
+// own sequence rather than a timestamp so two handoffs in the same second cannot
+// overwrite each other.
+func (g *Gate) shotName() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return "handoff-" + pad(g.seq+1) + ".png"
 }
 
 // Check blocks until a human allows or denies a gated call.
@@ -78,12 +101,17 @@ func (g *Gate) Check(ctx context.Context, tool, preview string, input any) error
 // Ask puts a question to the person and waits for their answer.
 func (g *Gate) Ask(ctx context.Context, question string, ui UI) (string, error) {
 	timeout := questionTimeout
+	ev := Event{Type: "question", Question: question, Kind: ui.Kind, UI: &ui}
 	if ui.Kind == "handoff" {
 		timeout = approvalTimeout // they have to go and do something
+		// A handoff asks the person to take over this machine's screen. Showing
+		// them what is on it is the difference between "sign in to something" and
+		// a page they recognise, so the card carries a picture of where they will
+		// land -- taken now, because by the time they open it the agent may have
+		// moved on.
+		ev.Shot = captureScreen(g.dir, g.shotName())
 	}
-	d, err := g.await(ctx, timeout, "", Event{
-		Type: "question", Question: question, Kind: ui.Kind, UI: &ui,
-	})
+	d, err := g.await(ctx, timeout, "", ev)
 	if err != nil {
 		return "", err
 	}
@@ -99,6 +127,10 @@ func (g *Gate) await(ctx context.Context, timeout time.Duration, tool string, ev
 	// is what a person is shown and answers.
 	g.log.Append(ev)
 	g.hub.Raise(raisedFrom(id, g.log.agent, ev))
+	// After the ask is on the log, so a client reads "here is a question" and then
+	// "I am not typing", rather than the other way round.
+	g.wait(1)
+	defer g.wait(-1)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -110,6 +142,13 @@ func (g *Gate) await(ctx context.Context, timeout time.Duration, tool string, ev
 	case <-ctx.Done():
 		g.forget(id)
 		return Decision{}, ctx.Err()
+	}
+}
+
+// wait reports that one more, or one fewer, person is blocking this agent.
+func (g *Gate) wait(delta int) {
+	if g.onWait != nil {
+		g.onWait(delta)
 	}
 }
 
@@ -166,7 +205,7 @@ func (g *Gate) Resolve(id string, d Decision) bool {
 func raisedFrom(id, agent string, ev Event) agentapi.Raised {
 	return agentapi.Raised{
 		ID: id, Agent: agent, Kind: ev.Type, Tool: ev.Tool, Preview: ev.Preview,
-		Input: ev.Input, Question: ev.Question, UI: ev.UI,
+		Input: ev.Input, Question: ev.Question, UI: ev.UI, Shot: ev.Shot,
 	}
 }
 
@@ -209,6 +248,11 @@ func (g *Gate) consume(tool string) bool {
 // RevokeAll clears every grant and denies everything pending, returning the
 // number of grants dropped. Called on interrupt: consent given for one piece of
 // work must not carry into whatever the person asks for next.
+//
+// The hub is cleared alongside, which every other exit from a wait already does
+// -- forget on timeout or cancel, Resolve on an answer. Without it an interrupt
+// left the raised hand up FOREVER: /pending kept advertising a card whose gate
+// no longer existed, so it could never be answered and never went away.
 func (g *Gate) RevokeAll() int {
 	g.mu.Lock()
 	n := len(g.grants)
@@ -216,7 +260,8 @@ func (g *Gate) RevokeAll() int {
 	waiting := g.pending
 	g.pending = map[string]*pending{}
 	g.mu.Unlock()
-	for _, p := range waiting {
+	for id, p := range waiting {
+		g.hub.Clear(id)
 		p.answer <- Decision{Decision: "deny", Reason: "the person interrupted"}
 	}
 	return n

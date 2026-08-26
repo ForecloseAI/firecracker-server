@@ -137,6 +137,46 @@ func scanEvents(f *os.File) ([]Event, error) {
 	return out, sc.Err()
 }
 
+// ReadLogSince reads one agent's log straight off disk, without any running
+// agent behind it.
+//
+// The events are a file; only the LIVE stream needs a subscription, and a
+// snapshot that started an agent would mean a client drawing a conversation
+// spawned the whole roster into memory to do it.
+func ReadLogSince(dir string, id int) ([]Event, int, error) {
+	f, err := os.Open(filepath.Join(dir, "events.jsonl"))
+	if os.IsNotExist(err) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	all, err := scanEvents(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	return after(all, id), lastID(all), nil
+}
+
+// after is every event newer than id.
+func after(all []Event, id int) []Event {
+	for i, e := range all {
+		if e.ID > id {
+			return all[i:]
+		}
+	}
+	return nil
+}
+
+// lastID is the id of the final entry, or 0 for an empty log.
+func lastID(all []Event) int {
+	if len(all) == 0 {
+		return 0
+	}
+	return all[len(all)-1].ID
+}
+
 // Since returns every event after id, for Last-Event-ID replay in Phase 3.
 func (l *Log) Since(id int) ([]Event, error) {
 	all, err := l.ReadAll()

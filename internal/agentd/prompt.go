@@ -30,11 +30,18 @@ uid, and a uid is the only way to name something on the page. Never guess one an
 never make one up. After anything that changes the page, take a fresh snapshot:
 uids from the old one may no longer mean what they did.
 
-Use fill to type and click for everything else: buttons, links, checkboxes,
-radio buttons and menu items. When you are filling in several fields at once,
-fill_form is faster and more reliable than a run of separate calls. After you
-submit something, use wait_for rather than snapshotting straight away -- a
-snapshot taken too early reads the page you have just left.
+Use fill for form fields, and click for everything else: buttons, links,
+checkboxes, radio buttons and menu items. When you are filling in several fields
+at once, fill_form is faster and more reliable than a run of separate calls.
+After you submit something, use wait_for rather than snapshotting straight away
+-- a snapshot taken too early reads the page you have just left.
+
+Message boxes are not form fields. A chat composer, a comment box, a rich-text
+editor: click it to put the cursor in, then use type_text. fill will tell you it
+succeeded on one of these and leave the box empty, because it writes the text
+straight into the page and the editor puts it back the way it was. type_text
+types for real, and its submitKey sends in the same call, so typing a message and
+pressing Enter is one step. Never send a message one key at a time.
 
 Prefer reading the page structure to taking screenshots. Screenshots are slow
 and cost a lot, so take one when the page does not match what you expect, or
@@ -63,8 +70,14 @@ files. You are one of several agents that may share this machine.
 
 ## What you can do
 Read, write and edit files in your workspace, search them, and run commands.
-Install what you need. Work through problems yourself before asking for help.
-Prefer doing the work to describing how the work could be done.
+Install what you need: you have passwordless sudo on this machine, so apt-get,
+pip and systemctl are all yours. Work through problems yourself before asking for
+help. Prefer doing the work to describing how the work could be done.
+
+## Files the person sends you
+Anything they attach in the app is saved to /home/agent/workspace/uploads and
+named in the message. It is the shared workspace, so a file sent to any of us is
+readable by all of us. Read it before you answer questions about it.
 
 ## Approvals
 Reading, writing, searching and running ordinary commands are yours to do
@@ -120,13 +133,22 @@ Do not try to reach the host machine or any other virtual machine.`
 // the cached prefix stable, and why an evicted agent comes back with a fresh
 // view of its own memory. Anything deeper it reads on demand by following links
 // from the index.
-func ComposeSystemPrompt(p Profile, agentDir string) string {
+// The stateDir is the machine's, not the agent's: what we know about the person
+// is one file everyone shares, so a fact learned by the boss is not missing from
+// the accountant. It is composed here with everything else, which means an edit
+// reaches a running agent on its next start rather than mid-session -- the same
+// refresh-by-eviction rule memory already has, and what keeps the cached prefix
+// stable.
+func ComposeSystemPrompt(p Profile, agentDir, stateDir string) string {
 	parts := []string{BaseIdentity}
 	if p.Browser {
 		parts = append(parts, BrowserGuidance)
 	}
 	if role := strings.TrimSpace(p.Prompt); role != "" {
 		parts = append(parts, role)
+	}
+	if person := RenderPersonSection(stateDir); person != "" {
+		parts = append(parts, person)
 	}
 	if mem := RenderMemorySection(agentDir); mem != "" {
 		parts = append(parts, mem)

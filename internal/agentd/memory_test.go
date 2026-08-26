@@ -116,7 +116,7 @@ func TestMemoryLandsInThePromptBeforeTheLimits(t *testing.T) {
 	dir := t.TempDir()
 	EnsureMemory(dir)
 
-	got := ComposeSystemPrompt(Profile{Prompt: "role"}, dir)
+	got := ComposeSystemPrompt(Profile{Prompt: "role"}, dir, "")
 	mem := strings.Index(got, "## Memory")
 	limits := strings.Index(got, BaseLimits)
 	if mem < 0 {

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // Routes builds the handler. Method+wildcard patterns, like internal/api.
@@ -23,7 +25,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /approvals/{apid}", s.handleResolve)
 	mux.HandleFunc("POST /agents/{id}/messages", s.withAgent(s.handleMessage))
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
-	mux.HandleFunc("GET /agents/{id}/events", s.withAgent(s.handleEvents))
+	mux.HandleFunc("GET /agents/{id}/events", s.handleEvents)
+	mux.HandleFunc("GET /agents/{id}/shots/{name}", s.handleShot)
+	mux.HandleFunc("GET /person", s.handleGetPerson)
+	mux.HandleFunc("PUT /person", s.handlePutPerson)
+	mux.HandleFunc("POST /files", s.handleUpload)
 	mux.HandleFunc("GET /debug/memstats", s.handleMemstats)
 	mux.HandleFunc("POST /debug/exec", s.handleDebugExec)
 	return mux
@@ -35,19 +41,26 @@ type agentHandler func(http.ResponseWriter, *http.Request, *Agent)
 // withAgent resolves {id} to an agent, 404ing when there is no such one.
 func (s *Server) withAgent(next agentHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		a, err := s.sup.Get(id)
-		if errors.Is(err, ErrNoCapacity) {
-			w.Header().Set("Retry-After", "10")
-			fail(w, http.StatusServiceUnavailable, "capacity_exhausted", err.Error(), "agents")
-			return
+		if a, ok := s.resolveAgent(w, r); ok {
+			next(w, r, a)
 		}
-		if err != nil {
-			fail(w, http.StatusNotFound, "not_found", err.Error(), "agent")
-			return
-		}
-		next(w, r, a)
 	}
+}
+
+// resolveAgent starts the agent for {id} and reports whether it answered. It
+// writes its own failure, so a caller that gets false must simply return.
+func (s *Server) resolveAgent(w http.ResponseWriter, r *http.Request) (*Agent, bool) {
+	a, err := s.sup.Get(r.PathValue("id"))
+	if errors.Is(err, ErrNoCapacity) {
+		w.Header().Set("Retry-After", "10")
+		fail(w, http.StatusServiceUnavailable, "capacity_exhausted", err.Error(), "agents")
+		return nil, false
+	}
+	if err != nil {
+		fail(w, http.StatusNotFound, "not_found", err.Error(), "agent")
+		return nil, false
+	}
+	return a, true
 }
 
 // handleList reports every agent and what it is doing. This is the poll a
@@ -133,14 +146,15 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 // sendReq is the body of POST /agents/{id}/messages.
 type sendReq struct {
-	Text string `json:"text"`
+	Text string         `json:"text"`
+	File *agentapi.File `json:"file,omitempty"`
 }
 
 // handleMessage queues a user turn and returns immediately. The turn itself can
 // take minutes, so the HTTP request must not wait on it.
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent) {
 	var req sendReq
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Text == "" {
+	if json.NewDecoder(r.Body).Decode(&req) != nil || (req.Text == "" && req.File == nil) {
 		fail(w, http.StatusBadRequest, "bad_request", "text is required", "")
 		return
 	}
@@ -149,7 +163,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 		reply(w, http.StatusOK, map[string]any{"message_id": id, "replayed": true})
 		return
 	}
-	if err := a.Send(req.Text); err != nil {
+	if err := a.SendFile(req.Text, req.File); err != nil {
 		s.sendFailed(w, err)
 		return
 	}
@@ -189,18 +203,32 @@ func (s *Server) handleInterrupt(w http.ResponseWriter, r *http.Request, a *Agen
 
 // handleEvents streams the agent's log as SSE, or returns a snapshot when
 // ?poll= is set, for a client that cannot hold a connection open.
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *Agent) {
+//
+// Deliberately NOT wrapped in withAgent. Only the SSE branch needs a running
+// agent, because it subscribes to one; a snapshot is a file on disk. Wrapping
+// the whole route made the cheap branch pay for a cold start, so a client
+// drawing every thread spawned the whole roster into memory to do it.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	since := watermark(r)
 	if r.URL.Query().Has("poll") {
-		events, err := a.Log().Since(since)
-		if err != nil {
-			fail(w, http.StatusInternalServerError, "internal", err.Error(), "")
-			return
-		}
-		reply(w, http.StatusOK, EventsPage{Events: events, LastEventID: a.Log().LastID()})
+		s.pollEvents(w, r, since)
+		return
+	}
+	a, ok := s.resolveAgent(w, r)
+	if !ok {
 		return
 	}
 	s.stream(w, r, a, since)
+}
+
+// pollEvents answers a snapshot from disk, starting nothing.
+func (s *Server) pollEvents(w http.ResponseWriter, r *http.Request, since int) {
+	events, last, err := s.sup.History(r.PathValue("id"), since)
+	if err != nil {
+		fail(w, http.StatusNotFound, "not_found", err.Error(), "agent")
+		return
+	}
+	reply(w, http.StatusOK, EventsPage{Events: events, LastEventID: last})
 }
 
 // watermark reads the resume point from the header EventSource sends on its own

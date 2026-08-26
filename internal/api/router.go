@@ -36,6 +36,7 @@ func (s *Server) Routes() http.Handler {
 	// a header and so does Prometheus.
 	mux.HandleFunc("GET /stats", s.authNoCookie(s.handleStats))
 	mux.HandleFunc("GET /metrics", s.authNoCookie(s.handleMetrics))
+	mux.HandleFunc("GET /logs", s.authNoCookie(s.handleLogs))
 	mux.HandleFunc("GET /capacity", s.auth(s.handleCapacity))
 	mux.HandleFunc("POST /vms", s.auth(s.handleCreate))
 	mux.HandleFunc("GET /vms", s.auth(s.handleList))

@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"cracked/internal/util"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -43,11 +47,21 @@ var (
 // evaluate_script is in node's list and deliberately absent from this one: the
 // agent browses untrusted pages, the API key is in the guest, and arbitrary
 // page-driven JS is the sharpest edge of the standing exfiltration TODO.
+// type_text is here for the editors fill cannot drive. fill on a contenteditable
+// sets innerText and dispatches a bare synthetic input event; a rich-text editor
+// like the one behind WhatsApp's message box ignores that and reconciles the DOM
+// straight back to its own empty state. The tool then reports "Successfully
+// filled out the element" and nothing was typed, which is the worst shape a
+// failure can take: the first live run had an agent fall back to pressing keys
+// one character at a time, 60 of them, to send a single message. type_text goes
+// through keyboard.type, so the page sees real key events, and its submitKey
+// sends in the same call.
 var browserAllowed = map[string]bool{
 	"navigate_page": true, "take_snapshot": true, "click": true, "fill": true,
-	"fill_form": true, "press_key": true, "wait_for": true, "take_screenshot": true,
-	"list_pages": true, "handle_dialog": true, "new_page": true, "select_page": true,
-	"close_page": true, "drag": true, "upload_file": true, "hover": true,
+	"fill_form": true, "type_text": true, "press_key": true, "wait_for": true,
+	"take_screenshot": true, "list_pages": true, "handle_dialog": true,
+	"new_page": true, "select_page": true, "close_page": true, "drag": true,
+	"upload_file": true, "hover": true,
 }
 
 // browserListTimeout bounds the one-off spawn and tools/list an agent pays for
@@ -63,6 +77,10 @@ const browserListTimeout = 30 * time.Second
 type browserServer struct {
 	url string
 
+	// Where the server's own stderr goes. Empty in a test, which keeps it on
+	// /dev/null exactly as before.
+	logPath string
+
 	// dial is how a session is obtained. A field so a test can stand a real MCP
 	// server up in-process rather than forking node, which also makes the
 	// respawn path testable -- it is the one that would otherwise only fail in
@@ -75,8 +93,8 @@ type browserServer struct {
 }
 
 // newBrowserServer prepares the manager. It starts nothing.
-func newBrowserServer(chromeURL string) *browserServer {
-	s := &browserServer{url: chromeURL}
+func newBrowserServer(chromeURL, stateDir string) *browserServer {
+	s := &browserServer{url: chromeURL, logPath: mcpLogPath(stateDir)}
 	s.dial = s.spawn
 	return s
 }
@@ -125,11 +143,50 @@ func (s *browserServer) sessionLocked(ctx context.Context) (*mcpsdk.ClientSessio
 	return sess, nil
 }
 
+// mcpLogPath is where the browser server's stderr is kept, or "" for nowhere.
+func mcpLogPath(stateDir string) string {
+	if stateDir == "" {
+		return ""
+	}
+	return filepath.Join(stateDir, "mcp.log")
+}
+
+// mcpLogCap bounds the browser server's log. The guest writes to a 5 GiB overlay
+// it shares with the person's Chrome profile and downloads, so nothing here is
+// allowed to grow without a limit.
+const mcpLogCap = 8 << 20
+
+// stderrTo opens the server's log, or nil to leave stderr on /dev/null.
+//
+// The old log is dropped rather than appended to: a respawn is what you are
+// debugging, and the previous boot's noise only makes it harder to find. Best
+// effort throughout -- a browser that runs unlogged beats one that will not start
+// because a log file could not be opened.
+func (s *browserServer) stderrTo() io.Writer {
+	if s.logPath == "" {
+		return nil
+	}
+	_ = os.Remove(s.logPath)
+	w, err := util.NewCappedWriter(s.logPath, mcpLogCap)
+	if err != nil {
+		return nil
+	}
+	return w
+}
+
 // spawn starts the server and completes the MCP handshake.
+//
+// Wiring stderr is not cosmetic. os/exec sends a nil Stderr to /dev/null, so
+// until this the server's own diagnostics -- the only account of why a click or
+// a fill did not take -- existed nowhere at all, and a browser failure could be
+// seen but never explained.
 func (s *browserServer) spawn(ctx context.Context) (*mcpsdk.ClientSession, error) {
 	cmd := exec.Command(MCPNodePath, append([]string{MCPServerPath, "--browserUrl", s.url},
 		MCPServerArgs...)...)
 	cmd.Env = serverEnv()
+	if f := s.stderrTo(); f != nil {
+		cmd.Stderr = f
+	}
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "agentd", Version: "1"}, nil)
 	sess, err := client.Connect(ctx, &mcpsdk.CommandTransport{Command: cmd}, nil)
 	if err != nil {

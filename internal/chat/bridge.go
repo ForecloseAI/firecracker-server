@@ -23,8 +23,11 @@ import (
 // event log at all.
 const chatAgent = agentapi.BossID
 
+// guestPort is where agentd listens inside every VM. A var, not a const, so a
+// test can point it at a stub, matching how idleGrace is shrunk below.
+var guestPort = 8080
+
 const (
-	guestPort   = 8080
 	ringSize    = 200
 	backoffMax  = 15 * time.Second
 	backoffBase = time.Second

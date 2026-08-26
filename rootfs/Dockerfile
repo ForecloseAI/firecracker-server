@@ -2,8 +2,9 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      systemd systemd-sysv udev dbus dbus-x11 ca-certificates curl wget gnupg \
+      systemd systemd-sysv udev dbus dbus-x11 ca-certificates curl wget gnupg sudo \
       xvfb x11vnc novnc websockify openbox x11-utils x11-xserver-utils xdg-utils \
+      scrot \
       fonts-liberation fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji \
       libnss3 libxss1 libasound2t64 \
       python3 python3-venv python3-pip e2fsprogs iproute2 iputils-ping procps \
@@ -26,9 +27,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
  && node --version
 
 # ubuntu:24.04 already owns uid 1000, so useradd fails without removing it first.
+#
+# The agent gets passwordless root. It was told it has a computer and is asked to
+# install what it needs, and without this it cannot: apt, pip and systemctl all
+# refuse, and the failure reads to the model as the task being impossible rather
+# than as a missing privilege. The blast radius is one guest -- a microVM already
+# firewalled off from IMDS, the VPC, the host and every other VM, whose whole disk
+# is a per-user overlay that `DELETE ?purge=true` throws away.
+#
+# uploads/ is where files sent from the app land, inside the shared workspace so
+# every agent can reach one the person sent to any of them.
 RUN userdel -r ubuntu 2>/dev/null || true \
  && useradd -m -u 1000 -s /bin/bash agent \
- && mkdir -p /home/agent/Downloads /home/agent/workspace /home/agent/.config \
+ && usermod -aG sudo agent \
+ && printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/agent \
+ && chmod 0440 /etc/sudoers.d/agent \
+ && visudo -cf /etc/sudoers.d/agent \
+ && mkdir -p /home/agent/Downloads /home/agent/workspace/uploads /home/agent/.config \
  && chown -R agent:agent /home/agent
 
 # overlay-init mounts /dev/vdb on /overlay and pivots with the old root at /rom.

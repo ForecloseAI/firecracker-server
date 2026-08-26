@@ -50,7 +50,7 @@ func workspace(t *testing.T) (string, []anthropic.BetaTool) {
 	write("src/main.go", "package main\n\nfunc main() {}\n")
 	write("src/util.go", "package main\n\n// beta helper\n")
 	write(".hidden/secret.go", "package hidden\n")
-	tools, err := Tools(roots{workspace: root}, toolDeps{gate: NewGate(mustLog(t), NewInteractions())}, nil)
+	tools, err := Tools(roots{workspace: root}, toolDeps{gate: NewGate(mustLog(t), NewInteractions(), t.TempDir())}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

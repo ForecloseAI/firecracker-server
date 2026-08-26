@@ -29,7 +29,7 @@ type (
 	}
 	createAgentInput struct {
 		Type string `json:"type" jsonschema:"required,description=Profile key from list_agent_types"`
-		Name string `json:"name" jsonschema:"description=What to call them - defaults to the profile name"`
+		Name string `json:"name" jsonschema:"required,description=A human first name for them such as Maya or Tom - never a job description"`
 	}
 	deleteAgentInput struct {
 		ID string `json:"id" jsonschema:"required,description=Id of the agent to remove"`
@@ -149,7 +149,9 @@ func listTypesTool(d toolDeps) (anthropic.BetaTool, error) {
 func createAgentTool(d toolDeps) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[createAgentInput](
 		"create_agent",
-		"Create a new specialist. It costs nothing until you give it work.",
+		"Create a new specialist. It costs nothing until you give it work. "+
+			"Give them a human first name: the person sees this name at the top of a "+
+			"conversation and says it back, and \"whatsapp-researcher\" is not a name.",
 		func(ctx context.Context, in createAgentInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
 			rec, err := d.team.Create(in.Type, in.Name)
 			if err != nil {

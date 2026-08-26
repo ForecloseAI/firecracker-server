@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"context"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/toolrunner"
@@ -29,6 +30,7 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	rest, err := buildTools(
 		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, d.gate) },
 		func() (anthropic.BetaTool, error) { return askTool(d.gate) },
+		func() (anthropic.BetaTool, error) { return rememberPersonTool(d) },
 	)
 	if err != nil {
 		return nil, err
@@ -42,26 +44,35 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 		return nil, err
 	}
 	all := append(append(append(files, rest...), team...), browser...)
-	return keepAllowed(all, withBrowser(allow, d.browser)), nil
+	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
 
-// withBrowser adds the browser tools to what a profile allows when it declares
-// browser access.
+// alwaysAllowed are the tools every profile gets whether or not it names them.
+// Anything about the person belongs to all of them equally, and requiring six
+// profile files -- and every future one -- to remember a name is how a tool ends
+// up missing from exactly the agent that needed it.
+var alwaysAllowed = []string{"remember_about_person"}
+
+// permitted expands what a profile allows with the tools it does not have to ask
+// for: the always-on ones, and the browser surface when it declares a browser.
 //
-// One switch, not two. `browser: true` and a tools: list naming every browser
-// tool would be two gates that can disagree, and the failure is silent in both
-// directions: an unknown name in a profile is dropped without an error, and a
-// profile that sets the flag but forgets a name just quietly loses that tool.
-// The flag is the single source of truth; tools: stays authoritative for
-// everything else.
+// One switch for the browser, not two. `browser: true` and a tools: list naming
+// every browser tool would be two gates that can disagree, and the failure is
+// silent in both directions: an unknown name in a profile is dropped without an
+// error, and a profile that sets the flag but forgets a name just quietly loses
+// that tool. The flag is the single source of truth; tools: stays authoritative
+// for everything else.
 //
 // The names come straight from browserAllowed, which is also what filters the
 // server's tools/list -- so the allow list and the surface cannot drift apart.
-func withBrowser(allow []string, browser bool) []string {
-	if !browser || len(allow) == 0 {
-		return allow
+func permitted(allow []string, browser bool) []string {
+	if len(allow) == 0 {
+		return allow // an empty list already means everything
 	}
-	out := append([]string(nil), allow...)
+	out := append(append([]string(nil), allow...), alwaysAllowed...)
+	if !browser {
+		return out
+	}
 	for name := range browserAllowed {
 		out = append(out, name)
 	}
@@ -77,9 +88,12 @@ type toolDeps struct {
 	team    *Supervisor
 	self    string
 	browser bool
-	chrome  *browserServer
-	snaps   *snapshotStore
-	log     *Log
+	// stateDir is the machine's, for the one file about the person that every
+	// agent here reads and writes.
+	stateDir string
+	chrome   *browserServer
+	snaps    *snapshotStore
+	log      *Log
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list
@@ -118,6 +132,34 @@ func askTool(gate *Gate) (anthropic.BetaTool, error) {
 				return toolText(err.Error()), nil
 			}
 			return toolText(orDefault(answer, "(no answer)")), nil
+		})
+}
+
+// rememberInput is the remember_about_person tool's argument.
+type rememberInput struct {
+	Fact string `json:"fact" jsonschema:"required,description=One sentence about the person that will still be true next month"`
+}
+
+// rememberPersonTool records something durable about the person.
+//
+// Every agent gets this and they all write the same file, because they all work
+// for the same person: a name learned in one conversation should not be missing
+// from the next. It appends rather than rewrites, so two agents recording
+// something at once cannot lose each other's line.
+func rememberPersonTool(d toolDeps) (anthropic.BetaTool, error) {
+	return toolrunner.NewBetaToolFromJSONSchema[rememberInput](
+		"remember_about_person",
+		"Record something durable you have learned about the person, so every agent "+
+			"here knows it from their next conversation on. Their name, their work, how "+
+			"they like things done. Not what they asked for today.",
+		func(ctx context.Context, in rememberInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
+			if d.stateDir == "" {
+				return toolText("there is nowhere to record that on this machine"), nil
+			}
+			if err := AppendAboutPerson(d.stateDir, in.Fact, d.self, time.Now().UTC()); err != nil {
+				return toolText("could not record that: " + err.Error()), nil
+			}
+			return toolText("Recorded. Every agent here will have it from their next start."), nil
 		})
 }
 

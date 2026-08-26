@@ -85,7 +85,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	return &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
-		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL),
+		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
 		meter: OpenMeter(stateDir), hub: NewInteractions(),
 	}, nil
 }
@@ -132,17 +132,45 @@ func (s *Supervisor) List() []Status {
 }
 
 // statusFor builds one row, reading live state only if the agent is running.
+//
+// A non-live agent still reports its real LastEventID, read off disk. Returning
+// 0 -- as this used to -- tells a client that every idle agent has an empty
+// history, which is exactly wrong: an evicted agent is the one most likely to
+// have a long one.
 func (s *Supervisor) statusFor(rec Record) Status {
 	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task}
-	s.mu.Lock()
-	l, ok := s.agents[rec.ID]
-	s.mu.Unlock()
+	l, ok := s.liveAgent(rec.ID)
 	if !ok {
+		_, last, _ := ReadLogSince(s.dirFor(rec.ID), 0)
+		st.LastEventID = last
 		return st
 	}
 	st.Live, st.State = true, l.agent.State()
 	st.LastEventID, st.Conversation = l.agent.Log().LastID(), l.agent.ConversationBytes()
 	return st
+}
+
+// liveAgent returns the running agent for an id, if there is one.
+func (s *Supervisor) liveAgent(id string) (*live, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.agents[id]
+	return l, ok
+}
+
+// History is one agent's log, WITHOUT starting it. A running agent's log is read
+// in memory; otherwise the file is read directly. Only the live SSE stream needs
+// a subscription, and paying a cold start for a snapshot would mean the app
+// drawing six conversations spawned six agents to do it.
+func (s *Supervisor) History(id string, since int) ([]Event, int, error) {
+	if _, ok := s.roster.Get(id); !ok {
+		return nil, 0, fmt.Errorf("no agent %s", id)
+	}
+	if l, ok := s.liveAgent(id); ok {
+		events, err := l.agent.Log().Since(since)
+		return events, l.agent.Log().LastID(), err
+	}
+	return ReadLogSince(s.dirFor(id), since)
 }
 
 // Get returns a running agent, starting it if it is not already running.
@@ -283,6 +311,25 @@ func (s *Supervisor) Close() {
 	s.wg.Wait()
 	// After the agents, not before: one of them may be mid-action on the page.
 	s.browser.Close()
+}
+
+// EvictIdle stops every agent that is not mid-turn, so the next message to one
+// rebuilds it.
+//
+// A prompt is composed once when an agent starts and then frozen, which is what
+// keeps the cached prefix stable. So a change to what the machine knows about the
+// person reaches nobody until they are recycled -- and onboarding that only takes
+// effect on some later restart is onboarding that looks broken. A working agent
+// is left alone: interrupting a turn to refresh a prompt would cost the person
+// the work they are waiting on.
+func (s *Supervisor) EvictIdle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, l := range s.agents {
+		if l.agent.State() == "idle" {
+			s.stopLocked(id)
+		}
+	}
 }
 
 // LiveCount is how many agents currently hold a goroutine, for /debug/memstats.

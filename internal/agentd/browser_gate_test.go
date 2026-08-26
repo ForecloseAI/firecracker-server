@@ -1,8 +1,12 @@
 package agentd
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The snapshot-then-act contract is only stated in the prompt. Without it the
@@ -10,8 +14,8 @@ import (
 // -- both come back as the same refusal, so it cannot tell which it made.
 func TestBrowserProfilesGetTheSnapshotRuleInTheirPrompt(t *testing.T) {
 	dir := t.TempDir()
-	with := ComposeSystemPrompt(Profile{Browser: true}, dir)
-	without := ComposeSystemPrompt(Profile{Browser: false}, dir)
+	with := ComposeSystemPrompt(Profile{Browser: true}, dir, "")
+	without := ComposeSystemPrompt(Profile{Browser: false}, dir, "")
 	if !strings.Contains(with, "Take a snapshot before you act") {
 		t.Error("a browser profile was not told the snapshot rule")
 	}
@@ -63,7 +67,7 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 // half matters too -- `puppeteer` also matches a coder installing it for the
 // person's own project, and that task must not dead-end.
 func TestTheBrowserRedirectNamesTheToolsAndLeavesADoorOpen(t *testing.T) {
-	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t), NewInteractions())}, nil)
+	tools, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: NewGate(mustLog(t), NewInteractions(), t.TempDir())}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +85,7 @@ func TestTheBrowserRedirectNamesTheToolsAndLeavesADoorOpen(t *testing.T) {
 // second way to grant something the flag is supposed to control.
 func TestNamingBrowserToolsWithoutTheFlagGrantsNothing(t *testing.T) {
 	tools, err := Tools(roots{workspace: t.TempDir()},
-		toolDeps{gate: NewGate(mustLog(t), NewInteractions()), browser: false},
+		toolDeps{gate: NewGate(mustLog(t), NewInteractions(), t.TempDir()), browser: false},
 		[]string{"Read", "take_snapshot", "click", "fill"})
 	if err != nil {
 		t.Fatal(err)
@@ -93,17 +97,17 @@ func TestNamingBrowserToolsWithoutTheFlagGrantsNothing(t *testing.T) {
 	}
 }
 
-// withBrowser and the tools/list filter must read the same list, or a name in
+// permitted and the tools/list filter must read the same list, or a name in
 // one and not the other is a tool that reaches nobody with nothing erroring.
 // That drift is why this is one map rather than two slices.
 func TestTheAllowListIsTheOnlySourceOfBrowserToolNames(t *testing.T) {
-	got := withBrowser([]string{"Read"}, true)
+	got := permitted([]string{"Read"}, true)
 	for name := range browserAllowed {
 		if !contains(got, name) {
 			t.Errorf("%s is allowed by the filter but never reaches keepAllowed", name)
 		}
 	}
-	if contains(withBrowser([]string{"Read"}, false), "click") {
+	if contains(permitted([]string{"Read"}, false), "click") {
 		t.Error("a browserless profile had browser names added to its allow list")
 	}
 }
@@ -112,6 +116,47 @@ func TestTheAllowListIsTheOnlySourceOfBrowserToolNames(t *testing.T) {
 func contains(all []string, want string) bool {
 	for _, s := range all {
 		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A browser that will not answer must cost an agent its browser tools, not its
+// existence. agentd is not ordered after chrome.service and Chrome restarts on
+// its own, so this is a routine boot race -- and since the boss became a browser
+// profile it would otherwise stop the one agent that cannot be deleted.
+func TestABrowserThatWillNotStartStillLeavesAWorkingAgent(t *testing.T) {
+	dead := newBrowserServer("http://127.0.0.1:9222", "")
+	dead.dial = func(context.Context) (*mcpsdk.ClientSession, error) {
+		return nil, errors.New("connection refused")
+	}
+	log, err := OpenLog(t.TempDir(), "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := toolDeps{browser: true, chrome: dead, log: log}
+	tools, err := browserTools(d)
+	if err != nil {
+		t.Fatalf("a dead browser failed tool construction: %v; the agent would not start", err)
+	}
+	if len(tools) != 0 {
+		t.Fatalf("got %d tools from a dead browser", len(tools))
+	}
+	if !loggedContains(t, log, "no browser tools") {
+		t.Error("the agent lost its browser with nothing in the log to say why")
+	}
+}
+
+// loggedContains reports whether any event message holds want.
+func loggedContains(t *testing.T, log *Log, want string) bool {
+	t.Helper()
+	events, err := log.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if strings.Contains(e.Message, want) {
 			return true
 		}
 	}

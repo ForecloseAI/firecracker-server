@@ -19,9 +19,6 @@ import (
 // log is capped at 4 MiB on disk, which is far more than anyone reads.
 const consoleTailBytes = 8 << 10
 
-// detailEvents is how many trailing events the peek-inside view shows.
-const detailEvents = 50
-
 //go:embed static/dashboard.html
 var dashboardHTML []byte
 
@@ -57,7 +54,11 @@ type vmDetail struct {
 	vmStats
 	Firecracker *fc.InstanceInfo `json:"firecracker,omitempty"`
 	ConsoleTail string           `json:"console_tail"`
-	Events      []agentapi.Event `json:"events"`
+	// Agents is the roster, not one agent's events. The peek-inside view used to
+	// show the BOSS's log and nothing else, so a specialist doing the actual work
+	// was invisible. The client picks an agent and reads its log through the
+	// guest proxy, which no longer starts anything to serve a poll.
+	Agents []agentapi.Status `json:"agents"`
 }
 
 // collect gathers one snapshot of the whole host. Every read surface renders
@@ -106,17 +107,19 @@ func (s *Server) probeGuest(row *vmStats, id string) {
 	}
 }
 
-// recentEvents fetches the boss's tail for the detail view, on demand.
+// roster is who lives on this machine, fetched on demand.
 //
-// These used to be accumulated into memory on every fleet poll, for every VM,
-// so that opening one detail view could show fifty lines. Fetching them only
-// when someone actually looks costs one request and holds nothing.
-func recentEvents(v *vm.VM) []agentapi.Event {
-	evs, _, err := agent.New(v.GuestIP, vm.AgentPort).EventsSince(agentapi.BossID, 0)
-	if err != nil || len(evs) <= detailEvents {
-		return evs
+// This used to return the BOSS's event tail and nothing else, so a specialist
+// doing the actual work was invisible in the peek-inside view. The client now
+// picks an agent and reads its log through the guest proxy, which no longer
+// starts an agent to serve a poll. Errors degrade to an empty list: an
+// unreachable guest is already reported by the agent column.
+func roster(v *vm.VM) []agentapi.Status {
+	out, err := agent.New(v.GuestIP, vm.AgentPort).Agents()
+	if err != nil {
+		return nil
 	}
-	return evs[len(evs)-detailEvents:]
+	return out
 }
 
 // sumUsage adds every VM's spend into one fleet total.
@@ -152,7 +155,7 @@ func (s *Server) handleVMStats(w http.ResponseWriter, r *http.Request) {
 	info, _ := s.reg.Inspect(v)
 	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}, Firecracker: info}
 	s.probeGuest(&d.vmStats, v.ID)
-	d.Events = recentEvents(v)
+	d.Agents = roster(v)
 	d.ConsoleTail = tailFile(s.reg.Layout().Console(v.ID), consoleTailBytes)
 	writeJSON(w, http.StatusOK, d)
 }

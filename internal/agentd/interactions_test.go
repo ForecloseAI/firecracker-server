@@ -18,7 +18,7 @@ func gateFor(t *testing.T, hub *Interactions, agent string) *Gate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewGate(log, hub)
+	return NewGate(log, hub, t.TempDir())
 }
 
 // raiseOne asks something and returns the id it was given, without waiting for

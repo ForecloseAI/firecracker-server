@@ -13,8 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -75,6 +78,11 @@ type Agent struct {
 	state       string
 	cancel      context.CancelFunc
 	convBytes   int
+
+	// How many people this agent is currently blocked on. A count rather than a
+	// flag because the runner calls tool handlers concurrently, so two questions
+	// can be open at once.
+	waiting int
 }
 
 // inbound is one queued message. From is empty when it came from the person
@@ -83,6 +91,10 @@ type Agent struct {
 type inbound struct {
 	text string
 	from string
+	// file is something the person attached. Kept beside the text rather than
+	// pasted into it: the model needs to be told the path, and the transcript
+	// needs to show what they actually typed.
+	file *agentapi.File
 	// replyTo is set when this message is delegated work. The delegator is
 	// then told the outcome whatever happens, including when the agent runs
 	// out of iterations mid-task -- otherwise a boss waits forever on a
@@ -108,8 +120,9 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		// "an agent that did not start".
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
-	gate := NewGate(log, hubOf(team))
-	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser}
+	gate := NewGate(log, hubOf(team), dir)
+	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
+		stateDir: stateDirOf(team)}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
 		// keeps every other tool, and the failure shows up in its log rather
@@ -124,10 +137,13 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
-		model: p.Model, system: ComposeSystemPrompt(p, dir),
+		model: p.Model, system: ComposeSystemPrompt(p, dir, stateDirOf(team)),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth),
 	}
+	// Wired after the agent exists, because the gate is built before it and the
+	// gate is what knows when a person has become the thing this agent is doing.
+	gate.onWait = a.addWait
 	if err := a.load(); err != nil {
 		return nil, err
 	}
@@ -142,6 +158,15 @@ func hubOf(team *Supervisor) *Interactions {
 		return nil
 	}
 	return team.Interactions()
+}
+
+// stateDirOf is where the machine keeps what it knows about the person, or ""
+// when this agent has no team -- which is only ever the case in a unit test.
+func stateDirOf(team *Supervisor) string {
+	if team == nil {
+		return ""
+	}
+	return team.stateDir
 }
 
 // Log exposes the event log, for the HTTP surface.
@@ -213,15 +238,18 @@ func (a *Agent) runTurn(parent context.Context, in inbound) {
 //
 // A full inbox is reported rather than blocking the HTTP handler on a model
 // call that may take a minute.
-func (a *Agent) Send(text string) error {
-	if err := a.enqueue(inbound{text: text}); err != nil {
+func (a *Agent) Send(text string) error { return a.SendFile(text, nil) }
+
+// SendFile queues a message from the person with a file attached to it.
+func (a *Agent) SendFile(text string, file *agentapi.File) error {
+	if err := a.enqueue(inbound{text: text, file: file}); err != nil {
 		return err
 	}
 	// Logged at receipt, not when the turn dequeues it. A message sent while
 	// the agent is busy would otherwise be invisible for however long that turn
 	// runs, which reads as "my message did not send" -- and appending BEFORE the
 	// enqueue would do the opposite, showing a message the agent refused.
-	a.log.Append(Event{Type: "user", Text: text})
+	a.log.Append(Event{Type: "user", Text: text, File: file})
 	return nil
 }
 
@@ -298,7 +326,14 @@ func (a *Agent) load() error {
 		return err
 	}
 	a.convBytes = len(buf)
-	return json.Unmarshal(buf, &a.messages)
+	if err := json.Unmarshal(buf, &a.messages); err != nil {
+		return err
+	}
+	// A history written before repairTail existed can end in an orphan tool_use,
+	// which 400s every turn from then on. Healing here is what unwedges an agent
+	// that has already stopped taking input.
+	a.messages = repairTail(a.messages)
+	return nil
 }
 
 // save persists the conversation, writing to a temp file and renaming so a
@@ -399,17 +434,41 @@ func (a *Agent) turn(ctx context.Context, in inbound) error {
 	candidate := slices.Clone(a.messages)
 	candidate = append(candidate, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(frame(in))))
 	runner := a.client.Beta.Messages.NewToolRunner(a.tools, a.params(candidate))
-	if err := a.drain(ctx, runner); err != nil {
+	// The watermark starts at the restored history, not at zero: everything below
+	// it already has its results, and re-reading them would append the whole of a
+	// long conversation's tool output to the log on every single turn.
+	if err := a.drain(ctx, runner, len(candidate)); err != nil {
 		a.finish(started, err)
 		a.report(in, runner, err)
 		return err
 	}
-	a.mu.Lock()
-	a.messages = runner.Messages()
-	a.mu.Unlock()
+	a.adopt(runner)
 	a.finish(started, nil)
 	a.report(in, runner, nil)
 	return a.save()
+}
+
+// adopt takes the runner's history as the agent's own, answering any tool call
+// the turn stopped before running.
+func (a *Agent) adopt(runner *anthropic.BetaToolRunner) {
+	msgs := runner.Messages()
+	fixed := repairTail(msgs)
+	a.mu.Lock()
+	a.messages = fixed
+	a.mu.Unlock()
+	a.noteStop(runner, len(fixed) != len(msgs))
+}
+
+// noteStop records a turn that ended at a ceiling rather than because the model
+// was finished. Only a delegator heard about this before, so a person reading the
+// log saw a turn that looked complete and a task that silently was not.
+func (a *Agent) noteStop(runner *anthropic.BetaToolRunner, repaired bool) {
+	if runner.IterationCount() >= maxIterations {
+		a.log.Append(Event{Type: "error", Message: "stopped at the step limit for one turn"})
+	}
+	if repaired {
+		a.log.Append(Event{Type: "error", Message: "answered a tool call the turn never ran"})
+	}
 }
 
 // drain pumps the runner one turn at a time, recording each message.
@@ -420,9 +479,12 @@ func (a *Agent) turn(ctx context.Context, in inbound) error {
 // message immediately but appends the matching tool_result only at the START of
 // the next call, so mid-loop the history ends with an orphan tool_use that
 // would make the next request malformed.
-func (a *Agent) drain(ctx context.Context, runner *anthropic.BetaToolRunner) error {
+func (a *Agent) drain(ctx context.Context, runner *anthropic.BetaToolRunner, seen int) error {
 	for {
 		msg, err := runner.NextMessage(ctx)
+		// Before the error check: a call that failed may still have executed its
+		// tools, and the result is what says why.
+		seen = a.recordResults(runner.Messages(), seen)
 		if err != nil {
 			return err
 		}
@@ -431,6 +493,47 @@ func (a *Agent) drain(ctx context.Context, runner *anthropic.BetaToolRunner) err
 		}
 		a.record(msg)
 	}
+}
+
+// resultCap bounds one logged tool result. A page snapshot is thousands of
+// tokens and the log is read line by line by a person.
+const resultCap = 2_000
+
+// recordResults logs the tool results appended since the last pass, returning
+// the new watermark.
+//
+// The SDK produces these inside NextMessage and they never reach record, which
+// walks assistant messages only. That left the log able to show that fill was
+// called and what the model said next, but never what the browser answered --
+// the one line that explains a failure.
+func (a *Agent) recordResults(msgs []anthropic.BetaMessageParam, from int) int {
+	for _, msg := range msgs[min(from, len(msgs)):] {
+		for _, block := range msg.Content {
+			if block.OfToolResult == nil {
+				continue
+			}
+			a.log.Append(Event{Type: "tool_result", Text: resultBlockText(*block.OfToolResult),
+				IsError: block.OfToolResult.IsError.Or(false)})
+		}
+	}
+	return len(msgs)
+}
+
+// resultBlockText renders a tool result for the log, capped, naming any part that
+// is not text rather than dropping it silently.
+func resultBlockText(res anthropic.BetaToolResultBlockParam) string {
+	var out strings.Builder
+	for _, c := range res.Content {
+		if c.OfText != nil {
+			out.WriteString(c.OfText.Text)
+			continue
+		}
+		out.WriteString("[non-text result]")
+	}
+	if out.Len() <= resultCap {
+		return out.String()
+	}
+	return out.String()[:resultCap] + "\n[truncated]"
 }
 
 // record turns one assistant message into events.
@@ -536,6 +639,26 @@ func (a *Agent) messagedDuring(to string, since int) bool {
 	return false
 }
 
+// addWait moves the count of people blocking this agent, and publishes the state
+// that follows from it.
+//
+// Waiting is not working, and the difference is visible to a person: the app
+// draws its typing animation from the working state, so an agent parked on a
+// question showed one for however long they took to answer. It looked like an
+// agent busy composing a reply when it was in fact waiting on them, and the one
+// thing it could not do was type.
+func (a *Agent) addWait(delta int) {
+	a.mu.Lock()
+	a.waiting += delta
+	blocked := a.waiting > 0
+	a.mu.Unlock()
+	if blocked {
+		a.setState("waiting")
+		return
+	}
+	a.setState("working")
+}
+
 // setState records a transition. The old agent flipped this variable silently
 // and only logged it on interrupt, so a streaming client had to infer busy from
 // turn_complete; every transition is an event here.
@@ -554,10 +677,24 @@ func (a *Agent) setState(s string) {
 // is labelled as such: the limits already say colleagues are not a chain of
 // command, and that rule only works if the model can tell the difference.
 func frame(in inbound) string {
+	if in.file != nil {
+		return withFile(in.text, in.file)
+	}
 	if in.from == "" {
 		return in.text
 	}
 	return "Message from the agent \"" + in.from + "\", a colleague on this machine:\n\n" + in.text
+}
+
+// withFile tells the model where an attachment landed. The path is the only part
+// of an attachment it can act on, and it is added here rather than to the message
+// itself so the transcript still shows what the person actually typed.
+func withFile(text string, f *agentapi.File) string {
+	note := "The person attached a file: " + f.Path
+	if text == "" {
+		return note
+	}
+	return text + "\n\n" + note
 }
 
 // encode renders a tool's input for the log, since Input is an untyped any.

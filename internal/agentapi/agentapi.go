@@ -75,7 +75,9 @@ type Raised struct {
 	Input    json.RawMessage `json:"input,omitempty"`
 	Question string          `json:"question,omitempty"`
 	UI       *UI             `json:"ui,omitempty"`
-	Since    time.Time       `json:"since"`
+	// Shot names a screenshot of the machine's display, for a handoff.
+	Shot  string    `json:"shot,omitempty"`
+	Since time.Time `json:"since"`
 }
 
 // PendingChange is one hub event: a hand raised, or one lowered.
@@ -97,6 +99,8 @@ type Event struct {
 	To    string          `json:"to,omitempty"`
 	Tool  string          `json:"tool,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
+	// File is what the person attached to this message, if anything.
+	File *File `json:"file,omitempty"`
 
 	Model        string `json:"model,omitempty"`
 	Usage        *Usage `json:"usage,omitempty"`
@@ -111,12 +115,31 @@ type Event struct {
 	Question   string `json:"question,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	UI         *UI    `json:"ui,omitempty"`
+	Shot       string `json:"shot,omitempty"`
 	Decision   string `json:"decision,omitempty"`
 
 	// A task folder opened by start_task, or carried by a delegation.
 	TaskSlug  string `json:"task_slug,omitempty"`
 	TaskTitle string `json:"task_title,omitempty"`
 	TaskDir   string `json:"task_dir,omitempty"`
+}
+
+// File is something the person sent from the app, once it is on the guest's
+// disk. Path is absolute because agents are given it to read.
+type File struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+// Person is what the machine knows about whoever it works for. Collected at
+// onboarding and added to over time; it is rendered into a Markdown file the
+// agents read, so Notes is prose rather than a structure.
+type Person struct {
+	Name      string `json:"name"`
+	Work      string `json:"work"`
+	Notes     string `json:"notes,omitempty"`
+	Onboarded bool   `json:"onboarded"`
 }
 
 // EventsPage is the body of GET /agents/{id}/events?poll=1.
@@ -142,6 +165,20 @@ type UsageReport struct {
 	Turns          int64        `json:"turns"`
 	LastDurationMS int64        `json:"last_duration_ms,omitempty"`
 	LastActivity   time.Time    `json:"last_activity,omitzero"`
+}
+
+// Profile is one kind of agent: its role prompt, its model, and what it may do.
+// Here rather than in agentd because the host renders a roster from it and must
+// not import the daemon, which would pull the model SDK into the host binary.
+// Prompt never crosses the wire; it is the one field a client has no use for.
+type Profile struct {
+	Key         string   `json:"key"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Model       string   `json:"model"`
+	Browser     bool     `json:"browser"`
+	Tools       []string `json:"tools"`
+	Prompt      string   `json:"-"`
 }
 
 // Task is a piece of work an agent has open.

@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"github.com/anthropics/anthropic-sdk-go"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,7 @@ func TestParseProfileRejectsMissingFrontMatter(t *testing.T) {
 // name is never sent to the model, so it cannot be called at all. This is what
 // will make boss-only powers structural.
 func TestProfileToolListNarrowsTheSurface(t *testing.T) {
-	gate := NewGate(mustLog(t), NewInteractions())
+	gate := NewGate(mustLog(t), NewInteractions(), t.TempDir())
 	all, err := Tools(roots{workspace: t.TempDir()}, toolDeps{gate: gate}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -109,8 +110,25 @@ func TestProfileToolListNarrowsTheSurface(t *testing.T) {
 		t.Fatalf("narrowing did not reduce the surface: %d vs %d", len(all), len(narrow))
 	}
 	for _, tool := range narrow {
-		if tool.Name() != "Read" && tool.Name() != "Grep" {
+		// alwaysAllowed is the deliberate exception: those tools belong to every
+		// agent whatever its profile says, so a narrowed set still carries them.
+		if tool.Name() != "Read" && tool.Name() != "Grep" && !contains(alwaysAllowed, tool.Name()) {
 			t.Errorf("narrowed set contains %q", tool.Name())
 		}
 	}
+	for _, name := range alwaysAllowed {
+		if !hasTool(narrow, name) {
+			t.Errorf("%s is always allowed but a narrow profile did not get it", name)
+		}
+	}
+}
+
+// hasTool reports whether a surface offers a tool by name.
+func hasTool(tools []anthropic.BetaTool, want string) bool {
+	for _, t := range tools {
+		if t.Name() == want {
+			return true
+		}
+	}
+	return false
 }

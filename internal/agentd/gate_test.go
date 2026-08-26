@@ -3,6 +3,7 @@ package agentd
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -10,7 +11,7 @@ import (
 // newTestGate builds a gate over a throwaway log.
 func newTestGate(t *testing.T) *Gate {
 	t.Helper()
-	return NewGate(mustLog(t), NewInteractions())
+	return NewGate(mustLog(t), NewInteractions(), t.TempDir())
 }
 
 // pendingID waits for the gate to register an interaction and returns its id.
@@ -188,4 +189,116 @@ func TestSecondAnswerFindsNothingPending(t *testing.T) {
 		t.Error("the same interaction was answered twice")
 	}
 	<-done
+}
+
+// An agent parked on a question is waiting, not working. The app draws its
+// typing animation from the working state, so getting this wrong showed a person
+// an agent apparently typing for the entire time it was blocked on them.
+func TestAnAskReportsWaitingRatherThanWorking(t *testing.T) {
+	g := newTestGate(t)
+	states := make(chan string, 4)
+	g.onWait = func(delta int) {
+		if delta > 0 {
+			states <- "waiting"
+			return
+		}
+		states <- "working"
+	}
+	go g.Ask(context.Background(), "which city?", UI{Kind: "text"})
+
+	if got := <-states; got != "waiting" {
+		t.Fatalf("an open ask reported %q", got)
+	}
+	g.Resolve(pendingID(t, g, g.log), Decision{Answer: "Lisbon"})
+	if got := <-states; got != "working" {
+		t.Fatalf("an answered ask reported %q", got)
+	}
+}
+
+// Two questions open at once, and the first answer must not report the agent
+// back to work while the second is still blocked. The runner calls tool handlers
+// concurrently, so this is reachable whenever the model asks twice in one turn.
+func TestTwoOpenAsksKeepTheAgentWaitingUntilBothAreAnswered(t *testing.T) {
+	g := newTestGate(t)
+	var depth atomicInt
+	g.onWait = func(delta int) { depth.add(delta) }
+
+	go g.Ask(context.Background(), "first?", UI{Kind: "text"})
+	first := pendingID(t, g, g.log)
+	go g.Ask(context.Background(), "second?", UI{Kind: "text"})
+	second := waitForOther(t, g, g.log, first)
+
+	g.Resolve(first, Decision{Answer: "one"})
+	waitForDepth(t, &depth, 1)
+	g.Resolve(second, Decision{Answer: "two"})
+	waitForDepth(t, &depth, 0)
+}
+
+// atomicInt is a counter the gate's callback writes and the test reads.
+type atomicInt struct{ n atomic.Int64 }
+
+// add moves the counter by delta.
+func (a *atomicInt) add(delta int) { a.n.Add(int64(delta)) }
+
+// waitForDepth blocks until the wait counter settles on want.
+func waitForDepth(t *testing.T, depth *atomicInt, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := depth.n.Load(); got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("wait depth stayed at %d, want %d", depth.n.Load(), want)
+}
+
+// waitForOther returns the pending id that is not the one already known.
+func waitForOther(t *testing.T, g *Gate, log *Log, known string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events, _ := log.ReadAll()
+		for _, e := range events {
+			if e.ApprovalID != "" && e.ApprovalID != known && g.IsPending(e.ApprovalID) {
+				return e.ApprovalID
+			}
+		}
+	}
+	t.Fatal("a second pending interaction never appeared")
+	return ""
+}
+
+// Approval ids must not repeat after a restart. They used to be a counter that
+// began at one every time the daemon started, so a new question inherited the id
+// of one answered before the restart, and history stamped that old verdict onto
+// the new card: a question the person was shown as already answered, could not
+// answer, and which left the agent blocked until it timed out.
+func TestApprovalIDsDoNotRepeatAfterARestart(t *testing.T) {
+	dir := t.TempDir()
+	log, err := OpenLog(dir, "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := idFromOneAsk(t, NewGate(log, NewInteractions(), dir))
+
+	// Reopen the log the way a restarted daemon does, and ask again.
+	reopened, err := OpenLog(dir, "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := idFromOneAsk(t, NewGate(reopened, NewInteractions(), dir))
+
+	if before == after {
+		t.Fatalf("both asks got id %q; the second would inherit the first's verdict", before)
+	}
+}
+
+// idFromOneAsk raises one question and returns the id it was given.
+func idFromOneAsk(t *testing.T, g *Gate) string {
+	t.Helper()
+	go g.Ask(context.Background(), "which city?", UI{Kind: "text"})
+	id := pendingID(t, g, g.log)
+	g.Resolve(id, Decision{Answer: "Lisbon"})
+	return id
 }

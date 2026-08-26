@@ -17,7 +17,6 @@ var loginPage []byte
 // Server is the browser-facing half of the chat service.
 type Server struct {
 	cfg     Config
-	auth    *Auth
 	control *Control
 	caps    *Caps
 
@@ -26,9 +25,8 @@ type Server struct {
 }
 
 // NewServer wires the chat service together.
-func NewServer(cfg Config, auth *Auth, control *Control, caps *Caps) *Server {
-	return &Server{cfg: cfg, auth: auth, control: control, caps: caps,
-		bridges: map[string]*Bridge{}}
+func NewServer(cfg Config, control *Control, caps *Caps) *Server {
+	return &Server{cfg: cfg, control: control, caps: caps, bridges: map[string]*Bridge{}}
 }
 
 // Routes builds the handler, wrapped in stdlib CSRF protection.
@@ -46,9 +44,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/interrupt", s.guard(s.interrupt))
 	mux.HandleFunc("POST /api/resume", s.guard(s.resume))
 	mux.HandleFunc("POST /api/pending/{id}", s.guard(s.resolvePending))
+	s.v1Routes(mux)
 	cop := http.NewCrossOriginProtection()
 	cop.AddTrustedOrigin(s.cfg.Origin)
-	return cop.Handler(mux)
+	return logged(cop.Handler(mux), s.cfg.LogBodies)
 }
 
 // bridge returns the consumer for a VM, starting one on first use. A cached
@@ -69,7 +68,7 @@ func (s *Server) bridge(id string) *Bridge {
 // guard requires a session, redirecting pages and 401ing API calls.
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.auth.User(r); ok {
+		if _, ok := userFor(r); ok {
 			next(w, r)
 			return
 		}
@@ -100,7 +99,7 @@ func (s *Server) redirectHome(w http.ResponseWriter, r *http.Request) {
 
 // loginPage serves the form, or skips it if already signed in.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth.User(r); ok {
+	if _, ok := userFor(r); ok {
 		http.Redirect(w, r, "/chat", http.StatusFound)
 		return
 	}
@@ -113,7 +112,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?e=1", http.StatusSeeOther)
 		return
 	}
-	tok, ok := s.auth.Login(r.FormValue("user"), r.FormValue("password"))
+	tok, ok := login(r.FormValue("user"), r.FormValue("password"))
 	if !ok {
 		http.Redirect(w, r, "/login?e=1", http.StatusSeeOther)
 		return
@@ -132,7 +131,6 @@ func nextPath(next string) string {
 
 // logout ends the session both server-side and in the browser.
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	s.auth.Logout(r)
 	clearSession(w)
 	http.Redirect(w, r, "/login", http.StatusFound)
 }

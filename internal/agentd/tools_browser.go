@@ -47,7 +47,27 @@ func browserTools(d toolDeps) ([]anthropic.BetaTool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), browserListTimeout)
 	defer cancel()
-	return d.chrome.Tools(ctx, d)
+	tools, err := d.chrome.Tools(ctx, d)
+	if err != nil {
+		// Degrade to an agent with no browser, never to an agent that refuses to
+		// start -- which is what this did, despite New saying otherwise. agentd is
+		// deliberately not ordered after chrome.service and Chrome restarts on its
+		// own, so a server that is not up yet is a normal race. It stopped being
+		// survivable the moment the boss became a browser profile: the one agent
+		// that cannot be deleted, and the first one a person talks to, would have
+		// been taken down by it. The failure is not cached, so the next agent
+		// built tries again.
+		logTo(d, "no browser tools: "+err.Error())
+		return nil, nil
+	}
+	return tools, nil
+}
+
+// logTo records a line in the agent's log when it has one.
+func logTo(d toolDeps, message string) {
+	if d.log != nil {
+		d.log.Append(Event{Type: "error", Message: message})
+	}
 }
 
 // emptyToNote keeps a blank page from reading to the model as a failed call.

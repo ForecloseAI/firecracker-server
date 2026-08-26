@@ -23,7 +23,7 @@ func fakeServer(t *testing.T, pageSize int, tools ...*mcpsdk.Tool) *browserServe
 	for _, tool := range tools {
 		srv.AddTool(tool, cannedResult(tool))
 	}
-	b := newBrowserServer("http://127.0.0.1:9222")
+	b := newBrowserServer("http://127.0.0.1:9222", "")
 	b.dial = func(ctx context.Context) (*mcpsdk.ClientSession, error) {
 		client, server := mcpsdk.NewInMemoryTransports()
 		if _, err := srv.Connect(ctx, server, nil); err != nil {
@@ -238,7 +238,7 @@ func TestTheWholeSchemaReachesTheModel(t *testing.T) {
 // chrome.service, so that window is real -- the tools must exist and the
 // failure must be text the model can retry.
 func TestBrowserToolsSurviveTheServerBeingDown(t *testing.T) {
-	srv := newBrowserServer("http://127.0.0.1:9222")
+	srv := newBrowserServer("http://127.0.0.1:9222", "")
 	srv.dial = func(context.Context) (*mcpsdk.ClientSession, error) {
 		return nil, context.DeadlineExceeded
 	}
