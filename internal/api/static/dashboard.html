@@ -41,6 +41,8 @@
   button { font: inherit; background: #232838; color: var(--fg); cursor: pointer;
     border: 1px solid var(--line); border-radius: 4px; padding: 3px 9px; }
   button:hover { border-color: var(--accent); color: var(--accent); }
+  button.on { background: var(--fg); border-color: var(--fg); color: #12141a; }
+  pre.logs, pre.tail { max-height: 26rem; overflow: auto; font-size: 11px; line-height: 1.45; }
   button.armed { background: var(--bad); border-color: var(--bad); color: #12141a; }
   button.armed:hover { color: #12141a; }
   .acts { display: flex; gap: 5px; justify-content: flex-end; }
@@ -88,11 +90,16 @@ const TOKEN = (() => {
 
 const LIST_MS = 3000, DETAIL_MS = 5000;
 const DESTRUCTIVE = new Set(["delete", "purge"]);
+const EVENT_TAIL = 60;
 const SNAPSHOT_CMD = "uptime; echo; free -m; echo; df -h /; echo; ps aux --sort=-%cpu | head -15";
-const AGENTLOG_CMD = "journalctl -u agent -n 100 --no-pager";
+const AGENTLOG_CMD = "journalctl -u agentd -n 100 --no-pager";
 
 let armed = null;   // "act:id" waiting on a second click, survives re-render
 let timer = null;
+let agentPick = "";  // which agent's log the detail view is showing
+let agentEvents = [];
+let logUnit = "cracked-chat";  // the API log is the one an integration bug shows in
+let logLines = [];
 
 /** Call the control plane with header auth. */
 async function api(method, path, body) {
@@ -164,6 +171,21 @@ function agentCell(a) {
   return '<span class="err" title="' + esc(a.error) + '">unreachable</span>';
 }
 
+/** Spend, or why it could not be read. A clean $0.00 over an unreadable guest
+ *  is indistinguishable from a VM that has done nothing, which is how a whole
+ *  agent rollout stayed invisible. */
+function cost(v) {
+  if (v.usage_error) {
+    return '<span class="err" title="' + esc(v.usage_error) + '">unknown</span>';
+  }
+  const un = v.usage.unpriced_models;
+  if (un && un.length) {
+    return usd(v.usage.cost_usd) +
+      ' <span class="err" title="no price for: ' + esc(un.join(", ")) + '">+?</span>';
+  }
+  return usd(v.usage.cost_usd);
+}
+
 /** The header line: real host headroom, not the fixed slot budget. */
 function renderHost(f) {
   const h = f.host, c = f.capacity;
@@ -204,7 +226,7 @@ function vmRow(v) {
     "<td>" + v.usage.turns + "</td>" +
     "<td>" + num(v.usage.input_tokens + v.usage.output_tokens +
       v.usage.cache_read_tokens + v.usage.cache_creation_tokens) + "</td>" +
-    "<td>" + usd(v.usage.cost_usd) + "</td>" +
+    "<td>" + cost(v) + "</td>" +
     '<td class="l">' + rowActions(v) + "</td></tr>";
 }
 
@@ -241,8 +263,8 @@ function detailFacts(v) {
     ["slot / pid", v.slot + " / " + v.pid], ["guest ip", esc(v.guest_ip) + " on " + esc(v.tap)],
     ["agent", agentCell(v.agent)],
     ["firecracker", esc(fc.state || "?") + " " + esc(fc.vmm_version || "")],
-    ["spend", usd(v.usage.cost_usd) + " over " + v.usage.turns + " turns, last " +
-      usd(v.usage.last_cost_usd) + " in " + Math.round((v.usage.last_duration_ms || 0) / 100) / 10 + "s"],
+    ["spend", cost(v) + " over " + v.usage.turns + " turns, last took " +
+      Math.round((v.usage.last_duration_ms || 0) / 100) / 10 + "s"],
     ["last turn", v.usage.last_activity ? esc(v.usage.last_activity) + " (" +
       ago(v.usage.last_activity) + ")" : "never"],
     ["tokens", "in " + num(v.usage.input_tokens) + ", out " + num(v.usage.output_tokens) +
@@ -319,12 +341,71 @@ function renderDetail(v) {
     '<button data-act="agentlog" data-id="' + esc(v.id) + '">agent log</button></div>' +
     '<pre id="execout" class="muted">the agent\'s own stdout never reaches the host console; ' +
     'use the agent log button to read it from the guest journal.</pre></div>' +
-    '<div class="panel"><h2>agent activity (newest first)</h2>' +
-    (events.length ? events.map(eventLine).join("") : '<p class="muted">no events yet</p>') + "</div>" +
-    '<div class="panel"><h2>serial console (tail)</h2><pre>' +
-    (esc(v.console_tail) || '<span class="muted">empty</span>') + "</pre></div>";
+    '<div class="panel"><h2>agent activity</h2>' + agentTabs(v) +
+    (agentEvents.length
+      ? agentEvents.slice().reverse().map(eventLine).join("")
+      : '<p class="muted">' + (agentPick ? "no events yet" : "pick an agent") + "</p>") + "</div>" +
+    '<div class="panel"><h2>serial console (tail)</h2><pre class="tail">' +
+    (esc(v.console_tail) || '<span class="muted">empty</span>') + "</pre></div>" +
+    logPanel();
   restoreShell(shell);
   applyArmed();
+  tailToBottom();
+}
+
+/** Pin the log panes to their newest line. journalctl and the serial console
+ *  both print oldest first, so a fresh render otherwise opens on history from
+ *  days ago and the line you came to read is off-screen. */
+function tailToBottom() {
+  document.querySelectorAll("pre.logs, pre.tail").forEach((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+/** Read one agent's own event log, through the guest proxy.
+ *
+ *  Per agent, not per VM: a specialist doing the work has its own transcript,
+ *  and the boss's log only records that it handed the job over. ?poll=1 reads
+ *  the file rather than subscribing, so looking does not start the agent. */
+async function loadAgentEvents(vmID, agentID) {
+  if (!agentID) { agentEvents = []; return; }
+  try {
+    const p = "/vms/" + encodeURIComponent(vmID) + "/agent/agents/" +
+      encodeURIComponent(agentID) + "/events?poll=1&since=0";
+    const page = await api("GET", p);
+    agentEvents = (page.events || []).slice(-EVENT_TAIL);
+  } catch (e) {
+    agentEvents = [];
+  }
+}
+
+/** Tail a service journal. This is where every API request now lands, so it is
+ *  the log to read when the app reports something the fleet table cannot explain. */
+async function loadLog() {
+  try {
+    logLines = (await api("GET", "/logs?unit=" + encodeURIComponent(logUnit))).lines || [];
+  } catch (e) {
+    logLines = ["could not read the journal: " + e.message];
+  }
+}
+
+/** The agent picker: one button per agent, the chosen one marked. */
+function agentTabs(v) {
+  const list = v.agents || [];
+  if (!list.length) return '<p class="muted">no agents, or the guest is unreachable</p>';
+  return '<div class="row">' + list.map((a) =>
+    '<button data-act="pickagent" data-id="' + esc(v.id) + '" data-agent="' + esc(a.id) + '"' +
+    (a.id === agentPick ? ' class="on"' : "") + ">" + esc(a.id) +
+    (a.state === "working" ? " ●" : "") + "</button>").join("") + "</div>";
+}
+
+/** The journal panel, with a unit switcher. */
+function logPanel() {
+  const tabs = ["cracked-chat", "cracked", "caddy"].map((u) =>
+    '<button data-act="pickunit" data-unit="' + u + '"' +
+    (u === logUnit ? ' class="on"' : "") + ">" + u + "</button>").join("");
+  return '<div class="panel"><h2>service log</h2><div class="row">' + tabs + "</div>" +
+    '<pre class="logs">' + (logLines.length ? esc(logLines.join("\n")) : "empty") + "</pre></div>";
 }
 
 /** Paint the armed button red. Kept out of the templates so the arming state
@@ -362,6 +443,8 @@ async function exec(id, cmd) {
 async function act(name, id) {
   const p = "/vms/" + encodeURIComponent(id);
   if (name === "exec") return exec(id, document.getElementById("cmd").value);
+  if (name === "pickagent") { agentPick = agentOf(); await loadAgentEvents(id, agentPick); return refresh(); }
+  if (name === "pickunit") { logUnit = unitOf(); await loadLog(); return refresh(); }
   if (name === "snapshot") return exec(id, SNAPSHOT_CMD);
   if (name === "agentlog") return exec(id, AGENTLOG_CMD);
   if (name === "create") await api("POST", "/vms", {});
@@ -371,10 +454,17 @@ async function act(name, id) {
   return refresh();
 }
 
+/** The dataset of the button being handled. Read at dispatch rather than
+ *  threaded through act(), which only ever knew about a vm id. */
+let clicked = null;
+function agentOf() { return clicked ? clicked.dataset.agent || "" : ""; }
+function unitOf() { return clicked ? clicked.dataset.unit || logUnit : logUnit; }
+
 /** One click handler for the whole page, so re-rendering rebinds nothing. */
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-act]");
   if (!b) return;
+  clicked = b;
   const key = b.dataset.act + ":" + (b.dataset.id || "");
   if (DESTRUCTIVE.has(b.dataset.act) && armed !== key) return arm(key);
   armed = null;
@@ -392,6 +482,17 @@ function setStatus(msg, bad) {
   el.textContent = msg;
 }
 
+/** Keep the detail panels current: default to the boss on first open, then
+ *  refetch whatever is selected so the log tails rather than freezing. */
+async function pickDefaultAgent(id, d) {
+  const list = d.agents || [];
+  if (!agentPick || !list.some((a) => a.id === agentPick)) {
+    agentPick = list.length ? list[0].id : "";
+  }
+  await loadAgentEvents(id, agentPick);
+  await loadLog();
+}
+
 /** The id in #/vm/{id}, or null on the fleet view. */
 function currentVM() {
   const m = location.hash.match(/^#\/vm\/(.+)$/);
@@ -402,8 +503,11 @@ function currentVM() {
 async function refresh() {
   const id = currentVM();
   try {
-    if (id) renderDetail(await api("GET", "/vms/" + encodeURIComponent(id) + "/stats"));
-    else renderList(await api("GET", "/stats"));
+    if (id) {
+      const d = await api("GET", "/vms/" + encodeURIComponent(id) + "/stats");
+      await pickDefaultAgent(id, d);
+      renderDetail(d);
+    } else renderList(await api("GET", "/stats"));
     setStatus("updated " + new Date().toLocaleTimeString());
   } catch (err) {
     setStatus(err.message, true);

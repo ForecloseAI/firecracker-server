@@ -38,11 +38,10 @@ type VM struct {
 	State     State
 	PID       int
 	CreatedAt time.Time
-
-	Tap     string
-	HostIP  string
-	GuestIP string
-	MAC     string
+	Tap       string
+	HostIP    string
+	GuestIP   string
+	MAC       string
 
 	cmd            *exec.Cmd
 	done           chan struct{}

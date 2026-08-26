@@ -189,7 +189,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := cl.SendMessage(req.Text, idempotencyKey(req.ID, req.Text)); err != nil {
+	if err := cl.SendMessage(chatAgent, req.Text, idempotencyKey(req.ID, req.Text)); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -214,7 +214,7 @@ func (s *Server) interrupt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	cl.Interrupt()
+	cl.Interrupt(chatAgent)
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -230,7 +230,7 @@ func (s *Server) resolvePending(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "already resolved"})
 		return
 	}
-	body, known := p.Body(req.Option)
+	body, known := p.Body(req.Option, req.Text)
 	if !known {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown option"})
 		return

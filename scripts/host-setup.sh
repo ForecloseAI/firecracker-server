@@ -48,9 +48,15 @@ MSG
 # --- 2. Service user ----------------------------------------------------------
 # Never run the control plane as root: KVM comes from group membership and tap
 # creation from AmbientCapabilities=CAP_NET_ADMIN.
+#
+# systemd-journal is what lets the dashboard's service-log panel read the OTHER
+# units' journals -- the chat service's especially, where every API request
+# lands. Without it GET /logs returns journalctl's permissions notice instead of
+# lines, which reads as an empty log rather than as a misconfigured host.
 setup_user() {
   id -u "$USER_NAME" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin "$USER_NAME"
   getent group kvm >/dev/null && usermod -aG kvm "$USER_NAME"
+  getent group systemd-journal >/dev/null && usermod -aG systemd-journal "$USER_NAME"
   echo "user $USER_NAME ready"
 }
 

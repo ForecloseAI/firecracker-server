@@ -1,0 +1,388 @@
+package chat
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"cracked/internal/agentapi"
+)
+
+// fakeGuest is a daemon with a roster that actually changes, so a test can
+// activate an agent and then see it in the next call rather than asserting
+// against a frozen fixture.
+type fakeGuest struct {
+	mu         sync.Mutex
+	roster     []agentapi.Status
+	sendStatus int // non-zero to make the next message fail with this code
+	sent       []string
+
+	events        []agentapi.Event
+	resolved      []resolution
+	resolveStatus int // non-zero to make the next resolve fail with this code
+}
+
+// resolution is one decision the gateway forwarded, kept so a test can assert
+// on the body the SERVER authored rather than on what a client asked for.
+type resolution struct {
+	id   string
+	body map[string]any
+}
+
+// profiles is the catalog the fake serves: a boss plus two specialists, which
+// is enough to cover exclusion, activation and duplicates.
+var fakeProfiles = []agentapi.Profile{
+	{Key: "boss", Title: "Boss", Description: "Runs the team"},
+	{Key: "coder", Title: "Coder", Description: "Writes code"},
+	{Key: "researcher", Title: "Researcher", Description: "Reads the web", Browser: true},
+}
+
+// routes wires the four guest endpoints this pass depends on.
+func (g *fakeGuest) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		json.NewEncoder(w).Encode(g.roster)
+	})
+	mux.HandleFunc("GET /agent-types", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(fakeProfiles)
+	})
+	mux.HandleFunc("POST /agents", g.create)
+	mux.HandleFunc("DELETE /agents/{id}", g.remove)
+	mux.HandleFunc("POST /agents/{id}/messages", g.message)
+	mux.HandleFunc("GET /agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		json.NewEncoder(w).Encode(agentapi.EventsPage{Events: g.events, LastEventID: len(g.events)})
+	})
+	mux.HandleFunc("POST /approvals/{apid}", g.resolve)
+	return mux
+}
+
+// resolve records what the gateway sent, or refuses with the configured status.
+func (g *fakeGuest) resolve(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.resolveStatus != 0 {
+		w.WriteHeader(g.resolveStatus)
+		return
+	}
+	var body map[string]any
+	json.NewDecoder(r.Body).Decode(&body)
+	g.resolved = append(g.resolved, resolution{id: r.PathValue("apid"), body: body})
+	json.NewEncoder(w).Encode(map[string]any{"approval_id": r.PathValue("apid")})
+}
+
+// create adds a roster row, giving it the id agentd would derive from the type.
+func (g *fakeGuest) create(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Type, Name string }
+	json.NewDecoder(r.Body).Decode(&req)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Mirrors agentd: an empty name falls back to the lowercase type key.
+	name := req.Name
+	if name == "" {
+		name = req.Type
+	}
+	rec := agentapi.Record{ID: req.Type, Name: name, Type: req.Type, CreatedAt: time.Now()}
+	g.roster = append(g.roster, agentapi.Status{ID: rec.ID, Name: rec.Name, Type: rec.Type})
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(rec)
+}
+
+// remove drops a roster row.
+func (g *fakeGuest) remove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i, st := range g.roster {
+		if st.ID == id {
+			g.roster = append(g.roster[:i], g.roster[i+1:]...)
+			json.NewEncoder(w).Encode(map[string]any{"id": id, "deleted": true})
+			return
+		}
+	}
+	w.WriteHeader(http.StatusConflict)
+}
+
+// message records a queued turn, or fails with the configured status.
+func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sendStatus != 0 {
+		w.WriteHeader(g.sendStatus)
+		return
+	}
+	var req struct{ Text string }
+	json.NewDecoder(r.Body).Decode(&req)
+	g.sent = append(g.sent, req.Text)
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{
+		"message_id": "m_001", "session_state": "working", "last_event_id": 41 + len(g.sent)})
+}
+
+// newFake stands a whole gateway up over a fake guest and one known login.
+func newFake(t *testing.T) (*Server, *fakeGuest, user) {
+	t.Helper()
+	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss"}}}
+	s, u := serverOver(t, g)
+	return s, g, u
+}
+
+// serverOver wires a gateway to an already-configured fake guest.
+func serverOver(t *testing.T, g *fakeGuest) (*Server, user) {
+	t.Helper()
+	srv := httptest.NewServer(g.routes())
+	t.Cleanup(srv.Close)
+	return &Server{control: stubControl(t, srv.URL, "running")}, testUser(t)
+}
+
+// call runs one request through the guard, as the app would reach it.
+func call(t *testing.T, s *Server, u user, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr *strings.Reader = strings.NewReader(body)
+	r := httptest.NewRequest(method, path, rdr)
+	r.Header.Set("Authorization", "Bearer "+u.Token)
+	w := httptest.NewRecorder()
+	s.Routes().ServeHTTP(w, r)
+	return w
+}
+
+// The gallery is what the person picks from, so the boss must not be in it:
+// every machine already has one and it cannot be deleted.
+func TestGalleryExcludesTheBoss(t *testing.T) {
+	s, _, u := newFake(t)
+	var got []Template
+	w := call(t, s, u, "GET", "/v1/agent-types", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("status %d: %v", w.Code, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("gallery = %+v, want the two specialists", got)
+	}
+	for _, tpl := range got {
+		if tpl.ID == "boss" {
+			t.Error("the boss is offered as something to add")
+		}
+		if tpl.Active {
+			t.Errorf("%s is active on a fresh machine", tpl.ID)
+		}
+	}
+}
+
+// A card carries the same avatar recipe as the agent it becomes, which works
+// only because a type is activated once and keeps the template's id.
+func TestGalleryCardMatchesTheAgentItBecomes(t *testing.T) {
+	s, _, u := newFake(t)
+	var gallery []Template
+	json.Unmarshal(call(t, s, u, "GET", "/v1/agent-types", "").Body.Bytes(), &gallery)
+	var made Agent
+	json.Unmarshal(call(t, s, u, "POST", "/v1/agents", `{"templateId":"coder"}`).Body.Bytes(), &made)
+	for _, tpl := range gallery {
+		if tpl.ID != "coder" {
+			continue
+		}
+		if tpl.Hue != made.Hue || tpl.Shape != made.Shape || tpl.Initial != made.Initial {
+			t.Errorf("card %+v does not match agent %+v", tpl, made)
+		}
+	}
+}
+
+// Activating is the core of the add flow: it must return the finished row, and
+// that row must then be on the roster.
+func TestActivateReturnsTheAgentAndItSticks(t *testing.T) {
+	s, _, u := newFake(t)
+	w := call(t, s, u, "POST", "/v1/agents", `{"templateId":"researcher"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	var made Agent
+	json.Unmarshal(w.Body.Bytes(), &made)
+	if made.ID != "researcher" || !made.Online {
+		t.Fatalf("agent = %+v", made)
+	}
+	// The daemon falls back to the lowercase type key when no name is sent, so
+	// the card would read "researcher" where the gallery said "Researcher".
+	if made.Name != "Researcher" {
+		t.Errorf("name = %q, want the gallery's title", made.Name)
+	}
+	if !made.Capabilities.Browse {
+		t.Error("the researcher's browser capability did not come from its profile")
+	}
+	var roster []Agent
+	json.Unmarshal(call(t, s, u, "GET", "/v1/agents", "").Body.Bytes(), &roster)
+	if len(roster) != 2 {
+		t.Fatalf("roster = %+v, want boss plus researcher", roster)
+	}
+}
+
+// One of each kind. A second would be created as "coder-2", which the gallery
+// has no card for and the person never asked for.
+func TestActivatingTwiceIsRefused(t *testing.T) {
+	s, g, u := newFake(t)
+	call(t, s, u, "POST", "/v1/agents", `{"templateId":"coder"}`)
+	w := call(t, s, u, "POST", "/v1/agents", `{"templateId":"coder"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.roster) != 2 {
+		t.Errorf("the refused call still created something: %+v", g.roster)
+	}
+}
+
+// Once active, the card says so, so the client can grey it out.
+func TestGalleryMarksActive(t *testing.T) {
+	s, _, u := newFake(t)
+	call(t, s, u, "POST", "/v1/agents", `{"templateId":"coder"}`)
+	var gallery []Template
+	json.Unmarshal(call(t, s, u, "GET", "/v1/agent-types", "").Body.Bytes(), &gallery)
+	for _, tpl := range gallery {
+		if tpl.ID == "coder" && !tpl.Active {
+			t.Error("coder is on the roster but its card is not marked active")
+		}
+		if tpl.ID == "researcher" && tpl.Active {
+			t.Error("researcher is marked active but was never added")
+		}
+	}
+}
+
+// An unknown template must be a client error, not a 502 that reads as an outage.
+func TestUnknownTemplateIsRejected(t *testing.T) {
+	s, _, u := newFake(t)
+	for _, body := range []string{`{"templateId":"nope"}`, `{"templateId":""}`, `{"templateId":"boss"}`} {
+		if w := call(t, s, u, "POST", "/v1/agents", body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s gave %d, want 400", body, w.Code)
+		}
+	}
+}
+
+// Retiring returns 204 with an empty body: the client calls res.json() on any
+// other 2xx and would throw on nothing.
+func TestRetireReturns204AndRemoves(t *testing.T) {
+	s, _, u := newFake(t)
+	call(t, s, u, "POST", "/v1/agents", `{"templateId":"coder"}`)
+	w := call(t, s, u, "DELETE", "/v1/agents/coder", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", w.Body.String())
+	}
+	var gallery []Template
+	json.Unmarshal(call(t, s, u, "GET", "/v1/agent-types", "").Body.Bytes(), &gallery)
+	for _, tpl := range gallery {
+		if tpl.ID == "coder" && tpl.Active {
+			t.Error("a retired type is still marked active, so it cannot be re-added")
+		}
+	}
+}
+
+// agentd answers 409 for both "no such agent" and "that is the boss". A client
+// retrying on 409 would retry a missing agent forever, so the gateway has to
+// tell them apart itself.
+func TestRetireDistinguishesMissingFromBoss(t *testing.T) {
+	s, _, u := newFake(t)
+	if w := call(t, s, u, "DELETE", "/v1/agents/nope", ""); w.Code != http.StatusNotFound {
+		t.Errorf("unknown agent gave %d, want 404", w.Code)
+	}
+	if w := call(t, s, u, "DELETE", "/v1/agents/boss", ""); w.Code != http.StatusConflict {
+		t.Errorf("boss gave %d, want 409", w.Code)
+	}
+}
+
+// The stored message is what the client appends to the thread, so it has to
+// carry the guest's own event id -- a later history fetch reports the same line
+// under that id.
+func TestSendReturnsTheStoredMessage(t *testing.T) {
+	s, g, u := newFake(t)
+	w := call(t, s, u, "POST", "/v1/threads/boss/messages", `{"text":"ship it"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	var msg Message
+	if err := json.Unmarshal(w.Body.Bytes(), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Kind != "text" || msg.From != "me" || msg.Text != "ship it" {
+		t.Fatalf("message = %+v", msg)
+	}
+	if msg.ID != "42" {
+		t.Errorf("id = %q, want the guest's event id", msg.ID)
+	}
+	if msg.Time.IsZero() {
+		t.Error("message has no timestamp")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.sent) != 1 || g.sent[0] != "ship it" {
+		t.Errorf("guest received %v", g.sent)
+	}
+}
+
+// The same text twice must reach the agent twice. The web path hashes text into
+// a 5-second bucket and silently drops the repeat; a person saying "yes" twice
+// would lose the second with no error at all.
+func TestRepeatedTextIsNotSwallowed(t *testing.T) {
+	s, g, u := newFake(t)
+	for i := 0; i < 2; i++ {
+		if w := call(t, s, u, "POST", "/v1/threads/boss/messages", `{"text":"yes"}`); w.Code != http.StatusOK {
+			t.Fatalf("send %d gave %d", i, w.Code)
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.sent) != 2 {
+		t.Errorf("guest received %d messages, want 2", len(g.sent))
+	}
+}
+
+// A busy agent is worth retrying and an unreachable guest is not, so 503 must
+// survive rather than being flattened into 502 the way /api/send does.
+func TestBusyAgentSurfacesAs503(t *testing.T) {
+	s, g, u := newFake(t)
+	g.sendStatus = http.StatusServiceUnavailable
+	w := call(t, s, u, "POST", "/v1/threads/boss/messages", `{"text":"hi"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("503 carries no Retry-After, so a client cannot know when to try again")
+	}
+}
+
+// Empty text must not reach the agent: agentd rejects it anyway, and a blank
+// turn would burn a model call saying nothing.
+func TestEmptyTextIsRejected(t *testing.T) {
+	s, g, u := newFake(t)
+	if w := call(t, s, u, "POST", "/v1/threads/boss/messages", `{"text":""}`); w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.sent) != 0 {
+		t.Error("an empty message reached the guest")
+	}
+}
+
+// Every new route must refuse an unauthenticated caller.
+func TestNewRoutesNeedAToken(t *testing.T) {
+	s, _, _ := newFake(t)
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/v1/agent-types"}, {"POST", "/v1/agents"},
+		{"DELETE", "/v1/agents/coder"}, {"POST", "/v1/threads/boss/messages"},
+	} {
+		r := httptest.NewRequest(c.method, c.path, strings.NewReader("{}"))
+		w := httptest.NewRecorder()
+		s.Routes().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s gave %d, want 401", c.method, c.path, w.Code)
+		}
+	}
+}

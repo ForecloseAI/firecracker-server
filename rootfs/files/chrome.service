@@ -20,6 +20,21 @@ RuntimeDirectoryMode=0700
 # --password-store=basic pins plaintext os_crypt. The VM has no keyring today so
 # Chrome falls back to it anyway, but a future apt install could pull one in and
 # silently make every existing profile undecryptable.
+# Chrome's SingletonLock is a symlink holding "<ip-or-hostname>-<pid>". The guest
+# IP comes from the VM's slot (internal/hostnet/tap.go SlotAddrs), so a VM that
+# comes back in a DIFFERENT slot reads a lock naming an address that is not this
+# machine, concludes another computer holds the profile, and refuses to start
+# forever -- observed at NRestarts=230 with the unit stuck "activating", which
+# then wedges the agent permanently while /health still reports ok.
+#
+# Removing them is unconditionally safe here: this unit is the only thing in the
+# image that starts Chrome and systemd runs ExecStartPre to completion first, so
+# anything present at this instant is stale by construction. All three, not just
+# the lock -- Chrome checks the trio and a stray socket reproduces the refusal.
+# The leading `-` keeps a read-only overlay from blocking Chrome entirely.
+ExecStartPre=-/bin/rm -f /home/agent/chrome-profile/SingletonLock \
+  /home/agent/chrome-profile/SingletonSocket \
+  /home/agent/chrome-profile/SingletonCookie
 ExecStart=/usr/bin/google-chrome \
   --no-sandbox \
   --disable-dev-shm-usage \

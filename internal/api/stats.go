@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 	"cracked/internal/fc"
 	"cracked/internal/hoststat"
 	"cracked/internal/vm"
@@ -35,6 +36,8 @@ type vmStats struct {
 	vm.Stats
 	Agent agentStatus  `json:"agent"`
 	Usage agent.Totals `json:"usage"`
+	// Why this row's spend could not be read, when it could not be.
+	UsageError string `json:"usage_error,omitempty"`
 }
 
 // fleet is the whole-host snapshot. /stats returns it and /metrics renders it.
@@ -51,7 +54,11 @@ type vmDetail struct {
 	vmStats
 	Firecracker *fc.InstanceInfo `json:"firecracker,omitempty"`
 	ConsoleTail string           `json:"console_tail"`
-	Events      []agent.Event    `json:"events"`
+	// Agents is the roster, not one agent's events. The peek-inside view used to
+	// show the BOSS's log and nothing else, so a specialist doing the actual work
+	// was invisible. The client picks an agent and reads its log through the
+	// guest proxy, which no longer starts anything to serve a poll.
+	Agents []agentapi.Status `json:"agents"`
 }
 
 // collect gathers one snapshot of the whole host. Every read surface renders
@@ -79,7 +86,7 @@ func (s *Server) collect() fleet {
 func (s *Server) probeGuest(row *vmStats, id string) {
 	if row.State != vm.StateRunning {
 		row.Agent.Error = "vm is " + string(row.State)
-		row.Usage, _ = s.usage.Snapshot(id)
+		row.Usage = s.usage.Snapshot(id)
 		return
 	}
 	if h, err := agent.New(row.GuestIP, vm.AgentPort).Health(); err == nil {
@@ -88,8 +95,31 @@ func (s *Server) probeGuest(row *vmStats, id string) {
 		row.Agent.Error = err.Error()
 	}
 	// Update returns the last known totals even when the guest is unreachable,
-	// so a blip shows stale spend rather than blanking it to zero.
-	row.Usage, _, _ = s.usage.Update(id, row.GuestIP, vm.AgentPort)
+	// so a blip shows stale spend rather than blanking it to zero. The error is
+	// RECORDED rather than discarded: a guest whose usage cannot be read renders
+	// a clean $0.00 otherwise, which is indistinguishable from a VM that has done
+	// nothing -- and that is exactly how the whole go-agent rollout stayed
+	// invisible for as long as it did.
+	var err error
+	row.Usage, err = s.usage.Update(id, row.GuestIP, vm.AgentPort)
+	if err != nil {
+		row.UsageError = err.Error()
+	}
+}
+
+// roster is who lives on this machine, fetched on demand.
+//
+// This used to return the BOSS's event tail and nothing else, so a specialist
+// doing the actual work was invisible in the peek-inside view. The client now
+// picks an agent and reads its log through the guest proxy, which no longer
+// starts an agent to serve a poll. Errors degrade to an empty list: an
+// unreachable guest is already reported by the agent column.
+func roster(v *vm.VM) []agentapi.Status {
+	out, err := agent.New(v.GuestIP, vm.AgentPort).Agents()
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // sumUsage adds every VM's spend into one fleet total.
@@ -125,7 +155,7 @@ func (s *Server) handleVMStats(w http.ResponseWriter, r *http.Request) {
 	info, _ := s.reg.Inspect(v)
 	d := vmDetail{vmStats: vmStats{Stats: s.reg.Stats(v)}, Firecracker: info}
 	s.probeGuest(&d.vmStats, v.ID)
-	_, d.Events = s.usage.Snapshot(v.ID)
+	d.Agents = roster(v)
 	d.ConsoleTail = tailFile(s.reg.Layout().Console(v.ID), consoleTailBytes)
 	writeJSON(w, http.StatusOK, d)
 }

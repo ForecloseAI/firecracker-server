@@ -14,7 +14,10 @@ type Config struct {
 	VNCOrigin  string
 	ControlURL string
 	Token      string
-	UsersFile  string
+	// LogBodies puts request and response bodies in the log. On by default
+	// because the app is being integrated against; set CHAT_LOG_BODIES=0 once
+	// real people are using it, since message text is their content.
+	LogBodies bool
 }
 
 // LoadConfig reads and validates the environment.
@@ -26,7 +29,7 @@ func LoadConfig() (Config, error) {
 		VNCOrigin:  env("CHAT_VNC_ORIGIN", ""),
 		ControlURL: env("CRACKED_URL", "http://127.0.0.1:8080"),
 		Token:      env("CRACKED_TOKEN", ""),
-		UsersFile:  env("CHAT_USERS_FILE", "/etc/cracked/chat-users"),
+		LogBodies:  env("CHAT_LOG_BODIES", "1") != "0",
 	}
 	return c, c.validate()
 }

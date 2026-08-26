@@ -106,3 +106,19 @@ func hasToken(args, prefix string) bool {
 	}
 	return false
 }
+
+// There is exactly one guest agent now, so the command line must carry no
+// selector at all. A leftover token would be a lie in every VM's /proc/cmdline
+// and would send anyone debugging a boot failure looking for a unit that no
+// longer exists.
+func TestBootArgsCarryNoAgentSelector(t *testing.T) {
+	args := bootArgs(newVM("alice", 0))
+	if strings.Contains(args, "cracked.agent") {
+		t.Errorf("boot args still select an agent: %s", args)
+	}
+	// overlay_root is consumed by init and was where the flag used to ride;
+	// assert it is still the final token so nothing was left dangling after it.
+	if !strings.HasSuffix(args, "overlay_root=vdb") {
+		t.Errorf("boot args should end at overlay_root, got: %s", args)
+	}
+}

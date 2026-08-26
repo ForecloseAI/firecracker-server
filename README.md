@@ -15,7 +15,7 @@ Go 1.27, stdlib only, zero dependencies.
 | `internal/fc` | firecracker API client over its unix socket |
 | `internal/hostnet` | TAP devices and slot→IP/MAC derivation |
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
-| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agent |
+| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd |
 | `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh` |
 | `deploy/` | systemd unit for the control plane |
 
@@ -78,8 +78,24 @@ The agent and the human share display `:0`, so takeover is instant.
 
 ## Dashboard
 
+Port 8080 is deliberately **not** in the security group — the control plane is
+guarded only by a bearer token, so reach it through an SSH local forward rather
+than exposing it:
+
+```sh
+# The security group allows SSH from one /32, which goes stale whenever your
+# address rotates. The Instance Connect Endpoint needs no SG change.
+aws ec2-instance-connect open-tunnel --region ap-south-1 \
+    --instance-id <instance-id> --local-port 2222 &
+
+ssh -i ~/.ssh/<key>.pem -p 2222 -L 8080:localhost:8080 ubuntu@localhost
+
+# read the token on the host, then open the URL below
+sudo systemctl show cracked -p Environment --value | tr ' ' '\n' | grep ^CRACKED_TOKEN=
 ```
-http://<host>:8080/dashboard?token=<T>
+
+```
+http://localhost:8080/dashboard?token=<T>
 ```
 
 A single page, no build step. The token is taken out of the URL, kept in
@@ -89,8 +105,21 @@ serves same-origin content under `/vms/{id}/agent/`.
 
 The fleet table shows, per VM: uptime, state, CPU, resident memory, disk, agent
 state, turns, tokens and cost, with pause/resume/stop/purge and links to VNC.
-Click a VM to peek inside: firecracker's own view, the serial console tail, the
-agent's recent activity, and a shell into the guest.
+Click a VM to peek inside: firecracker's own view, the serial console tail, a
+shell into the guest, **each agent's own event log**, and **the service
+journals**.
+
+Two panels are worth knowing about:
+
+- **agent activity** has one button per agent. It is per agent, not per VM: a
+  specialist doing the work has its own transcript, and the boss's log only
+  records that it handed the job over. Reading one starts nothing — the guest
+  serves the snapshot off disk.
+- **service log** tails `cracked-chat`, `cracked` or `caddy`. The chat journal
+  is where every `/v1` request and response lands, so it is the log to read when
+  a client reports something the fleet table cannot explain. This needs the
+  service user in the `systemd-journal` group, which `host-setup.sh` does; without
+  it the panel shows a permissions notice rather than lines.
 
 Three columns are easy to misread:
 
@@ -103,10 +132,10 @@ Three columns are easy to misread:
   5 GiB cap. This is the real cost on the host.
 
 Cost and token counts are lifetime totals **for the workspace**, not for this
-boot: the guest's event log lives on the overlay and survives `DELETE` without
-`?purge=true`. The host aggregates it by polling
-`/session/events?poll=1&since=N` incrementally, so nothing is counted twice.
-`?purge=true` resets both.
+boot: the guest keeps its running total on the overlay, which survives `DELETE`
+without `?purge=true`. The host reads it from the daemon's `GET /usage` and
+applies the price table, so nothing is counted twice and rates can change
+without rebuilding a guest image. `?purge=true` resets both.
 
 Destructive buttons need two clicks rather than opening a native dialog, so the
 page stays drivable by browser automation.
@@ -140,10 +169,8 @@ VMs that are running instead of spinning.
 make install-chat
 sudo install -m0644 deploy/cracked-chat.service /etc/systemd/system/
 sudo install -m0644 deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
-make hashpw USER_NAME=alice | sudo tee -a /etc/cracked/chat-users
 sudo systemctl edit cracked-chat     # Environment=CRACKED_TOKEN=<token>
 sudo systemctl enable --now cracked-chat
-sudo systemctl reload cracked-chat   # after adding a user; does not drop streams
 ```
 
 Three origins, isolated by **hostname**:
@@ -163,6 +190,34 @@ server-side. When a site needs a login, the agent asks via `ask_human` with
 kind `handoff` and you take over the VM's own screen, so the credential never
 touches this service.
 
+## App API
+
+The mobile and web client talks to `cracked-chat` under `/v1`, which is a
+separate surface from the `/api/*` routes the built-in chat page uses. Point the
+client at `https://chat.usetypeo.com/v1`.
+
+Logins are a hardcoded list in `internal/chat/users.go`. Add a tester by adding
+a line and redeploying.
+
+```sh
+curl -sX POST https://chat.usetypeo.com/v1/auth/sign-in \
+     -H 'Content-Type: application/json' \
+     -d '{"email":"someone@example.com","password":"..."}'   # -> {userId,email,token}
+curl -s https://chat.usetypeo.com/v1/agents -H "Authorization: Bearer $TOK"
+curl -sX POST https://chat.usetypeo.com/v1/auth/sign-out -H "Authorization: Bearer $TOK"
+```
+
+Auth is deliberately trivial: a hardcoded list of email, password and token
+compared with `==`, and one hardcoded machine that every login shares. There is
+no user store, no hashing, no expiry and nothing to revoke — signing out just
+drops the client's copy of a constant. All of it is scaffolding for a handful of
+testers and is deleted when a real identity provider lands.
+
+Sessions are reachable three ways — `Authorization: Bearer`, `?token=` (for the
+event stream, which cannot set headers) and the `__Host-sess` cookie (for the
+built-in page). Every `/v1` route answers **401** rather than redirecting, so a
+client never receives an HTML login page where it expected JSON.
+
 ## Storage model
 
 - `images/rootfs.ext4` — one immutable image, opened **read-only by every VM at
@@ -173,6 +228,43 @@ touches this service.
 - `run/{id}/` — ephemeral; wiped by the startup sweep.
 
 Delete a VM and recreate it with the same id to get its data back.
+
+## Memory
+
+Every agent gets its own state directory on the overlay, so all of it survives
+`DELETE` and all of it dies on `?purge=true`. `agentd.service` passes
+`-state-dir /home/agent/agent-state/agentd`, and each agent lives under
+`agents/<id>/` inside it:
+
+| Path (relative to the agent's own directory) | Holds |
+|---|---|
+| `memory/` | durable facts, as Markdown concept files (OKF v0.1) |
+| `instructions.md` | standing role and behaviour, spliced into the system prompt |
+| `events.jsonl` | that agent's event log |
+| `conversation.json` | the wire-format history it resumes from |
+
+The tree is seeded from templates embedded in the binary (`internal/agentd/memtree`),
+written with `O_EXCL` so the check and the write are one syscall: seeding runs on
+every start and an agent's own edits always survive it.
+
+`memory/index.md` and `memory/system/definition.md` are inlined into the system
+prompt, each capped at 16 kB independently so one runaway file cannot crowd out
+the other. Everything deeper the agent reads on demand by following links from
+the index — the prompt carries a header naming the real paths so it knows where
+to look. A tree that cannot be read at all injects nothing rather than a block
+announcing its own absence, which would spend tokens saying only that there is
+no memory.
+
+Because the whole prompt is composed once when an agent starts, memory is
+refreshed by eviction rather than mid-session: an agent evicted under the live
+ceiling and later re-addressed comes back with a fresh view of its own files.
+That also keeps the cached prefix stable, which is what makes context editing
+free (see `internal/agentd/loop.go`).
+
+The full prompt is `BaseIdentity` + browser guidance (browser profiles only) +
+the profile's role + memory + `instructions.md` + `BaseLimits`. The limits go
+last on purpose: `instructions.md` is agent-writable, so the safety rules have
+to be the final word.
 
 ## Operational notes
 

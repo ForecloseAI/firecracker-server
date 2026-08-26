@@ -3,14 +3,13 @@ package agent
 import (
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
-// recentCap is how many trailing events the detail view keeps per VM.
-const recentCap = 50
-
 // Totals is one VM's cumulative agent spend. It covers the lifetime of the
-// workspace, not this boot: events.jsonl lives on the persisted overlay and
-// survives DELETE without ?purge=true, and a cold accumulator reads from id 0.
+// workspace, not this boot: the daemon keeps its running total on the persisted
+// overlay, so it survives DELETE and resets on ?purge=true.
 type Totals struct {
 	CostUSD             float64   `json:"cost_usd"`
 	InputTokens         int64     `json:"input_tokens"`
@@ -18,9 +17,11 @@ type Totals struct {
 	CacheReadTokens     int64     `json:"cache_read_tokens"`
 	CacheCreationTokens int64     `json:"cache_creation_tokens"`
 	Turns               int64     `json:"turns"`
-	LastCostUSD         float64   `json:"last_cost_usd"`
 	LastDurationMS      int64     `json:"last_duration_ms"`
 	LastActivity        time.Time `json:"last_activity,omitzero"`
+	// UnpricedModels names any model the price table did not recognise. Without
+	// it an unknown id contributes zero and the row reads like a cheap VM.
+	UnpricedModels []string `json:"unpriced_models,omitempty"`
 }
 
 // TotalTokens is every token billed across all four categories.
@@ -28,110 +29,86 @@ func (t Totals) TotalTokens() int64 {
 	return t.InputTokens + t.OutputTokens + t.CacheReadTokens + t.CacheCreationTokens
 }
 
-// entry is one VM's accumulator: a watermark into the guest's event log, the
-// running totals, and a trailing window of events for the detail view.
-type entry struct {
-	mu        sync.Mutex
-	watermark int
-	totals    Totals
-	recent    []Event
-}
-
-// Accumulator folds guest usage events into per-VM totals, polling each guest
-// incrementally from a watermark so no event is read or counted twice.
+// Accumulator caches each VM's last known spend.
+//
+// It used to rebuild these totals itself, folding an event stream behind a
+// per-VM watermark so nothing was counted twice, and re-reading the guest's
+// whole log on every poll to do it. The daemon now reports what it has spent,
+// so all that is left is fetching, pricing and remembering the answer for a VM
+// that is no longer running to be asked.
 type Accumulator struct {
 	mu   sync.Mutex
-	byID map[string]*entry
+	byID map[string]Totals
 }
 
 // NewAccumulator builds an empty accumulator.
 func NewAccumulator() *Accumulator {
-	return &Accumulator{byID: map[string]*entry{}}
+	return &Accumulator{byID: map[string]Totals{}}
 }
 
-// entryFor returns the per-VM accumulator, creating it on first sight.
-func (a *Accumulator) entryFor(id string) *entry {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	e, ok := a.byID[id]
-	if !ok {
-		e = &entry{}
-		a.byID[id] = e
-	}
-	return e
-}
-
-// Forget drops a VM's totals and watermark. Required on delete: a ?purge=true
-// recreate resets the guest log to id 1, and a stale high watermark would then
-// skip every event the new VM ever emits.
+// Forget drops a VM's totals. Required on delete, so a recreated VM reports its
+// own spend rather than inheriting the last one's.
 func (a *Accumulator) Forget(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.byID, id)
 }
 
-// Update pulls any new events from a guest and returns its totals plus the
-// trailing event window. The whole fetch-and-advance holds the VM's lock, so
-// two concurrent dashboard polls cannot both consume the same batch.
-func (a *Accumulator) Update(id, guestIP string, port int) (Totals, []Event, error) {
-	e := a.entryFor(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	events, last, err := New(guestIP, port).EventsSince(e.watermark)
+// Update fetches a guest's spend, prices it, and caches the result.
+//
+// On failure the last known totals are returned alongside the error, so a blip
+// shows stale spend rather than blanking a live VM's cost to zero.
+func (a *Accumulator) Update(id, guestIP string, port int) (Totals, error) {
+	report, err := New(guestIP, port).Usage()
 	if err != nil {
-		return e.totals, e.recent, err
+		return a.Snapshot(id), err
 	}
-	e.absorb(events, last)
-	return e.totals, e.recent, nil
+	t := Price(report)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.byID[id] = t
+	return t, nil
 }
 
-// absorb folds a fresh batch in and advances the watermark. Caller holds e.mu.
-func (e *entry) absorb(events []Event, last int) {
-	for _, ev := range events {
-		if ev.Type == "usage" {
-			foldUsage(&e.totals, ev)
+// Snapshot returns a VM's last known totals without touching the guest. Used
+// for VMs that are not running, where a poll would only buy a timeout.
+func (a *Accumulator) Snapshot(id string) Totals {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.byID[id]
+}
+
+// Price turns a daemon's token report into money.
+func Price(r agentapi.UsageReport) Totals {
+	t := Totals{Turns: r.Turns, LastDurationMS: r.LastDurationMS, LastActivity: r.LastActivity}
+	for _, row := range r.ByModel {
+		addTokens(&t, row.Usage)
+		cost, ok := costOf(row.Model, row.Usage)
+		if !ok {
+			warnUnpriced(row.Model)
+			t.UnpricedModels = append(t.UnpricedModels, row.Model)
+			continue
 		}
+		t.CostUSD += cost
 	}
-	e.recent = appendRecent(e.recent, events)
-	// Trust the reported id only when it moves forward: a guest whose log was
-	// reset would otherwise leave us stuck reading nothing.
-	if last > e.watermark {
-		e.watermark = last
-	}
+	return t
 }
 
-// foldUsage adds one usage event to a VM's running totals.
-func foldUsage(t *Totals, e Event) {
-	t.CostUSD += e.CostUSD
-	t.Turns++
-	t.LastCostUSD, t.LastDurationMS = e.CostUSD, e.DurationMS
-	if ts, err := time.Parse(time.RFC3339, e.TS); err == nil {
-		t.LastActivity = ts
-	}
-	if e.Usage == nil {
-		return
-	}
-	t.InputTokens += e.Usage.InputTokens
-	t.OutputTokens += e.Usage.OutputTokens
-	t.CacheReadTokens += e.Usage.CacheReadInputTokens
-	t.CacheCreationTokens += e.Usage.CacheCreationInputTokens
+// addTokens folds one model's token counts into a VM's totals.
+func addTokens(t *Totals, u agentapi.Usage) {
+	t.InputTokens += u.InputTokens
+	t.OutputTokens += u.OutputTokens
+	t.CacheReadTokens += u.CacheReadInputTokens
+	t.CacheCreationTokens += u.CacheCreationInputTokens
 }
 
-// appendRecent keeps the newest recentCap events, oldest first.
-func appendRecent(recent, fresh []Event) []Event {
-	out := append(recent, fresh...)
-	if len(out) > recentCap {
-		out = append([]Event(nil), out[len(out)-recentCap:]...)
-	}
-	return out
-}
-
-// Snapshot returns a VM's last known totals and event window without touching
-// the guest. Used for VMs that are not running, where a poll would only buy a
-// timeout, and for the detail view once Update has already run.
-func (a *Accumulator) Snapshot(id string) (Totals, []Event) {
-	e := a.entryFor(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.totals, e.recent
+// Sum adds one VM's spend into a fleet total.
+func (t *Totals) Sum(o Totals) {
+	t.CostUSD += o.CostUSD
+	t.InputTokens += o.InputTokens
+	t.OutputTokens += o.OutputTokens
+	t.CacheReadTokens += o.CacheReadTokens
+	t.CacheCreationTokens += o.CacheCreationTokens
+	t.Turns += o.Turns
+	t.UnpricedModels = append(t.UnpricedModels, o.UnpricedModels...)
 }

@@ -13,7 +13,8 @@ import (
 	"cracked/internal/vm"
 )
 
-// createReq is the POST /vms body. Sizing is fixed in v1, so id is the only field.
+// createReq is the POST /vms body. Sizing is fixed in v1, so the id is the only
+// choice a caller has.
 type createReq struct {
 	ID string `json:"id"`
 }
