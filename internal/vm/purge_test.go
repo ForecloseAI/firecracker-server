@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // workspaceIn creates a registry over a temp dir with one workspace file on
@@ -86,5 +87,71 @@ func TestPurgeWorkspaceReportsAFailedRemove(t *testing.T) {
 	}
 	if err := r.PurgeWorkspace("alice1"); err == nil {
 		t.Fatal("a failed purge reported success")
+	}
+}
+
+// Creating -> Stopping is legal, so a delete can land on a machine that is still
+// booting -- and shutdown returns at once because no process exists yet. The
+// purge therefore takes effect immediately, which is what makes the recreate
+// race in Create worth guarding against.
+func TestDeleteDuringCreationPurgesAtOnce(t *testing.T) {
+	if !canTransition(StateCreating, StateStopping) {
+		t.Skip("a delete can no longer land on a booting machine")
+	}
+	r, path := workspaceIn(t, "alice1")
+	v, err := r.Allocate("alice1") // as Create does, before it boots anything
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Delete(v, true) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("delete during creation = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("delete blocked on a machine with no process")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the workspace survived: %v", err)
+	}
+	if _, err := r.Get("alice1"); err == nil {
+		t.Error("the deleted machine is still registered")
+	}
+}
+
+// A workspace this Create made must not outlive a delete that raced it. Nothing
+// follows stopping, so a failed transition to running is that race, and the disk
+// has to go with it -- otherwise the machine someone just erased comes back with
+// a fresh workspace their next request adopts.
+func TestCleanupPurgesAWorkspaceThisCallCreated(t *testing.T) {
+	r, path := workspaceIn(t, "alice1")
+	v, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.workspaceIsNew = true
+	if err := r.cleanup(v, v.workspaceIsNew); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("a workspace created by a raced boot was left behind")
+	}
+}
+
+// The mirror: a workspace that was already there is a returning person's data,
+// and a boot that fails for its own reasons must not take it.
+func TestCleanupKeepsAPreexistingWorkspace(t *testing.T) {
+	r, path := workspaceIn(t, "alice1")
+	v, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanup(v, v.workspaceIsNew); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a failed boot destroyed existing data: %v", err)
 	}
 }

@@ -2,7 +2,6 @@ package chat
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -78,9 +77,13 @@ func (c *Control) Resume(id string) error {
 // to tell a failure from a slow success, on the one operation where that
 // distinction is what a person was promised.
 //
-// A machine that does not exist is success: there is nothing left to delete.
-// The control plane purges a stopped machine's workspace too, so this is not the
-// same as the delete having done nothing.
+// A 404 is NOT treated as success. A control plane carrying the purge fix never
+// answers one here: it erases a stopped machine's workspace and reports 200,
+// idempotently, whether or not there was anything to erase. So the only way to
+// see a 404 is to be talking to a control plane deployed before that fix -- one
+// that leaves the workspace on disk. Swallowing it would answer 204 and tell
+// someone their data was erased during exactly the rolling deploy where it was
+// not.
 func (c *Control) DeleteVM(id string) error {
 	req, err := http.NewRequest(http.MethodDelete, c.base+"/vms/"+id+"?purge=true", nil)
 	if err != nil {
@@ -92,10 +95,7 @@ func (c *Control) DeleteVM(id string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if err := statusError(resp, "/vms/"+id); err != nil && !errors.Is(err, ErrNoVM) {
-		return err
-	}
-	return nil
+	return statusError(resp, "/vms/"+id)
 }
 
 // CreateVM boots a machine and blocks until its agent daemon answers. A 409

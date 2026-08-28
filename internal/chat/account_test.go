@@ -16,6 +16,10 @@ type fakeControl struct {
 	deleted []string
 	purged  []string
 	fail    bool
+	// notFound answers 404, as a control plane deployed before the purge fix
+	// does for a machine that is not running -- while its workspace stays on
+	// disk.
+	notFound bool
 }
 
 func (f *fakeControl) server(t *testing.T) *Control {
@@ -31,8 +35,13 @@ func (f *fakeControl) server(t *testing.T) *Control {
 		if r.URL.Query().Get("purge") == "true" {
 			f.purged = append(f.purged, id)
 		}
-		bad := f.fail
+		bad, missing := f.fail, f.notFound
 		f.mu.Unlock()
+		if missing {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"not_found"}`))
+			return
+		}
 		if bad {
 			w.WriteHeader(http.StatusBadGateway)
 			w.Write([]byte(`{"error":"vm_unreachable"}`))
@@ -145,5 +154,24 @@ func TestDeleteAccountLeavesOtherMachinesAlone(t *testing.T) {
 		if id != testMachine {
 			t.Errorf("deleted %q, which is not the caller's machine", id)
 		}
+	}
+}
+
+// A 404 must not read as "already gone".
+//
+// The fixed control plane never answers one to a purge: it erases a stopped
+// machine's workspace and reports 200 whether or not there was anything there.
+// So a 404 means the old control plane is still deployed -- the one that leaves
+// the workspace on disk -- and answering 204 would tell someone their data was
+// erased during exactly the rolling deploy where it was not.
+func TestDeleteAccountDoesNotTreatNotFoundAsSuccess(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fc.notFound = true
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code == http.StatusNoContent {
+		t.Fatal("a 404 from the control plane was reported as data erased")
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
 	}
 }
