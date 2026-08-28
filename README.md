@@ -36,7 +36,7 @@ aws ec2 modify-instance-cpu-options --instance-id <id> \
 Then, on the host:
 
 ```sh
-sudo scripts/host-setup.sh          # KVM gate, user, firewall, firecracker, kernel
+sudo scripts/host-setup.sh          # KVM gate, user, firewall, firecracker, kernel, Go
 scripts/build-rootfs.sh             # Docker -> shared read-only rootfs.ext4
 make install                        # build and install /usr/local/bin/cracked
 sudo install -m0644 deploy/cracked.service /etc/systemd/system/
@@ -341,5 +341,9 @@ make vet
 make build   # cross-compiles to bin/cracked for linux/amd64
 ```
 
-`make build` cross-compiles, so you can build on a laptop and ship only the
-binary to the host; the EC2 box needs no Go toolchain of its own.
+`make build` cross-compiles, so a laptop can build and ship only the binary.
+The host builds too: `host-setup.sh` installs the Go release `go.mod` asks for
+under `/usr/local/go` and links it into `/usr/local/bin`, ahead of Ubuntu's
+packaged Go. Unpacking alone is not enough: an unlinked tree loses to
+`/usr/bin/go` on PATH, so `go version` reports the old release while the right
+toolchain sits unused on disk. Diagnose that with `which -a go`.
