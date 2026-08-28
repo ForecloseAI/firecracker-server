@@ -104,6 +104,16 @@ func (r *Registry) cleanup(v *VM, purge bool) error {
 	if v.console != nil {
 		_ = v.console.Close()
 	}
+	// Everything below is addressed by id or slot, not by this pointer, so a
+	// late cleanup would reach into whatever holds them now. Rolling back a
+	// creation can arrive after a delete released the id and a second creation
+	// claimed it -- and then this would take that machine's tap, run directory
+	// and disk. Its own resources are still ours to release either way.
+	if !r.ownsOrFree(v) {
+		log.Printf("vm %s: skipping cleanup, the id belongs to a newer machine", v.ID)
+		r.Release(v)
+		return nil
+	}
 	os.Remove(l.Sock(v.ID))
 	if err := hostnet.DeleteTap(v.Tap); err != nil {
 		log.Printf("vm %s: delete tap %s: %v", v.ID, v.Tap, err)
@@ -118,6 +128,18 @@ func (r *Registry) cleanup(v *VM, purge bool) error {
 	}
 	r.Release(v)
 	return purgeErr
+}
+
+// ownsOrFree reports whether this VM still holds its id, or nobody does.
+//
+// Not simply "is it registered": a rollback runs after Release, when the id is
+// free and the resources are genuinely this VM's to remove. The case to refuse
+// is the id having been claimed by someone else in the meantime.
+func (r *Registry) ownsOrFree(v *VM) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	other, taken := r.byID[v.ID]
+	return !taken || other == v
 }
 
 // DrainAll stops every VM within a total budget, for control-plane shutdown.

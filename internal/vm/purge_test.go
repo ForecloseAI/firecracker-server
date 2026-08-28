@@ -155,3 +155,30 @@ func TestCleanupKeepsAPreexistingWorkspace(t *testing.T) {
 		t.Errorf("a failed boot destroyed existing data: %v", err)
 	}
 }
+
+// A rollback that arrives after the id was reclaimed must not reach into the
+// machine that holds it now. cleanup addresses the tap, run directory and disk
+// by id, so a late one would take a live machine's resources -- including, since
+// a raced creation now purges, its workspace.
+func TestCleanupSkipsWhenTheIdBelongsToANewerMachine(t *testing.T) {
+	r, path := workspaceIn(t, "alice1")
+	stale, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.workspaceIsNew = true
+	r.Release(stale) // as a delete racing this creation would
+	fresh, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanup(stale, stale.workspaceIsNew); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a stale rollback destroyed the current machine's disk: %v", err)
+	}
+	if got, err := r.Get("alice1"); err != nil || got != fresh {
+		t.Errorf("a stale rollback deregistered the current machine: %v", err)
+	}
+}
