@@ -17,6 +17,9 @@ Environment=CHAT_VNC_ADDR=127.0.0.1:8091
 Environment=CHAT_ORIGIN=https://chat.usetypeo.com
 Environment=CHAT_VNC_ORIGIN=https://vnc.usetypeo.com
 Environment=CRACKED_URL=http://127.0.0.1:8080
+# The Supabase project whose public keys verify every /v1 access token. Not a
+# secret -- it is the same URL the app ships with -- so it lives here.
+Environment=SUPABASE_URL=https://vpjsckvgqodzsbxuceau.supabase.co
 # CRACKED_TOKEN via `systemctl edit cracked-chat`, never in this file.
 
 ExecStart=/usr/local/bin/cracked-chat

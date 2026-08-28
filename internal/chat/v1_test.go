@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,68 +12,10 @@ import (
 	"cracked/internal/agentapi"
 )
 
-// testUser swaps the hardcoded user list for one known login and restores it.
-func testUser(t *testing.T) user {
-	t.Helper()
-	u := user{"tester@example.com", "pw", "tok_test_1234", "alice-1"}
-	old := users
-	users = []user{u}
-	t.Cleanup(func() { users = old })
-	return u
-}
-
-// The app replays a bearer token, the stream can only use a query param, and the
-// built-in page only has a cookie. All three have to reach the same user.
-func TestEveryDoorResolvesTheSameUser(t *testing.T) {
-	u := testUser(t)
-	bearer := httptest.NewRequest("GET", "/v1/agents", nil)
-	bearer.Header.Set("Authorization", "Bearer "+u.Token)
-	query := httptest.NewRequest("GET", "/v1/stream?token="+u.Token, nil)
-	cookie := httptest.NewRequest("GET", "/chat", nil)
-	cookie.AddCookie(&http.Cookie{Name: sessionCookie, Value: u.Token})
-	for name, r := range map[string]*http.Request{
-		"bearer": bearer, "query": query, "cookie": cookie} {
-		if got, ok := userFor(r); !ok || got != u.Email {
-			t.Errorf("%s resolved to (%q, %v)", name, got, ok)
-		}
-	}
-}
-
-// A request with no credentials must not match. This is the one worth pinning:
-// the lookup compares against every user, so an empty token must never be
-// treated as equal to anything.
-func TestBadTokensAreRefused(t *testing.T) {
-	testUser(t)
-	for _, tok := range []string{"", "tok_wrong", "tok_test_123"} {
-		r := httptest.NewRequest("GET", "/v1/agents", nil)
-		if tok != "" {
-			r.Header.Set("Authorization", "Bearer "+tok)
-		}
-		if _, ok := userFor(r); ok {
-			t.Errorf("token %q was accepted", tok)
-		}
-	}
-}
-
-// login matches on both fields, not either.
-func TestLoginNeedsBothFields(t *testing.T) {
-	u := testUser(t)
-	if _, ok := login(u.Email, "wrong"); ok {
-		t.Error("a wrong password was accepted")
-	}
-	if _, ok := login("someone@else.com", u.Password); ok {
-		t.Error("an unknown email was accepted")
-	}
-	if tok, ok := login(u.Email, u.Password); !ok || tok != u.Token {
-		t.Errorf("login = (%q, %v)", tok, ok)
-	}
-}
-
 // The client treats any non-2xx as failure and does not read the body, so a
 // missing token must produce 401 -- never the web page's 302 to an HTML login,
 // which would surface as an unreadable error.
 func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
-	testUser(t)
 	s := &Server{}
 	w := httptest.NewRecorder()
 	s.apiGuard(func(http.ResponseWriter, *http.Request, string) {
@@ -91,13 +32,13 @@ func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
 // roster is one machine's agents plus their profiles.
 func roster() ([]agentapi.Status, []agentapi.Profile) {
 	return []agentapi.Status{
-		{ID: "boss", Name: "Boss", Type: "boss"},
-		{ID: "cody", Name: "Cody", Type: "coder",
-			Task: &agentapi.Task{Title: "Reconciling invoices"}},
-	}, []agentapi.Profile{
-		{Key: "boss", Description: "Runs the team", Browser: true},
-		{Key: "coder", Description: "Writes code", Browser: false},
-	}
+			{ID: "boss", Name: "Boss", Type: "boss"},
+			{ID: "cody", Name: "Cody", Type: "coder",
+				Task: &agentapi.Task{Title: "Reconciling invoices"}},
+		}, []agentapi.Profile{
+			{Key: "boss", Description: "Runs the team", Browser: true},
+			{Key: "coder", Description: "Writes code", Browser: false},
+		}
 }
 
 // The projection is what the whole roster screen renders from.
@@ -172,56 +113,7 @@ func TestUnknownProfileStillGetsAShape(t *testing.T) {
 	}
 }
 
-// Sign-in returns the token the app stores; every later call replays it.
-func TestSignInReturnsAToken(t *testing.T) {
-	u := testUser(t)
-	s := &Server{}
-	w := httptest.NewRecorder()
-	body := strings.NewReader(`{"email":"tester@example.com","password":"pw"}`)
-	s.signIn(w, httptest.NewRequest("POST", "/v1/auth/sign-in", body))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var got sessionResp
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Token != u.Token || got.Email != u.Email {
-		t.Fatalf("session = %+v", got)
-	}
-	r := httptest.NewRequest("GET", "/v1/agents", nil)
-	r.Header.Set("Authorization", "Bearer "+got.Token)
-	if _, ok := userFor(r); !ok {
-		t.Error("the returned token does not authenticate")
-	}
-}
-
-// A wrong password must not mint a token.
-func TestSignInRejectsABadPassword(t *testing.T) {
-	testUser(t)
-	s := &Server{}
-	w := httptest.NewRecorder()
-	body := strings.NewReader(`{"email":"tester@example.com","password":"wrong"}`)
-	s.signIn(w, httptest.NewRequest("POST", "/v1/auth/sign-in", body))
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", w.Code)
-	}
-}
-
 // 204 is load-bearing: the client calls res.json() on any other 2xx and would
-// throw on an empty body.
-func TestSignOutReturns204WithNoBody(t *testing.T) {
-	s := &Server{}
-	w := httptest.NewRecorder()
-	s.signOut(w, httptest.NewRequest("POST", "/v1/auth/sign-out", nil), "tester@example.com")
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", w.Code)
-	}
-	if w.Body.Len() != 0 {
-		t.Errorf("body = %q, want empty", w.Body.String())
-	}
-}
-
 // stubGuest answers the two calls a roster fetch makes, and counts them so a
 // test can prove listing never reaches the agent-starting event route.
 func stubGuest(t *testing.T, hits *int) *httptest.Server {
@@ -267,13 +159,15 @@ func stubControl(t *testing.T, guestURL, state string) *Control {
 func TestListAgentsEndToEnd(t *testing.T) {
 	hits := 0
 	guest := stubGuest(t, &hits)
-	u := testUser(t)
-	s := &Server{control: stubControl(t, guest.URL, "running")}
+	v, mint := testAuth(t)
+	s := &Server{control: stubControl(t, guest.URL, "running"), auth: v,
+		cfg: Config{Origin: "https://chat.example.com", Token: "fleet-token"}}
 	r := httptest.NewRequest("GET", "/v1/agents", nil)
-	r.Header.Set("Authorization", "Bearer "+u.Token)
-	_ = u.Machine
+	r.Header.Set("Authorization", "Bearer "+mint(testUserID, "tester@example.com"))
 	w := httptest.NewRecorder()
-	s.apiGuard(s.listAgents)(w, r)
+	// Through the real handler chain, so the token is verified the way a live
+	// request would verify it rather than by a guard called in isolation.
+	s.Routes().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
@@ -295,10 +189,9 @@ func TestListAgentsEndToEnd(t *testing.T) {
 func TestPausedMachineIsNotAnError(t *testing.T) {
 	hits := 0
 	guest := stubGuest(t, &hits)
-	testUser(t)
 	s := &Server{control: stubControl(t, guest.URL, "paused")}
 	w := httptest.NewRecorder()
-	s.listAgents(w, httptest.NewRequest("GET", "/v1/agents", nil), "tester@example.com")
+	s.listAgents(w, httptest.NewRequest("GET", "/v1/agents", nil), testUserID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -307,47 +200,15 @@ func TestPausedMachineIsNotAnError(t *testing.T) {
 // A user with no machine assigned gets an empty roster, not an error and
 // certainly not an attempt to boot a VM named "".
 func TestNoMachineBootsNothing(t *testing.T) {
-	old := users
-	users = []user{{"nomachine@example.com", "pw", "tok_nm", ""}}
-	t.Cleanup(func() { users = old })
 	s := &Server{}
 	w := httptest.NewRecorder()
-	s.listAgents(w, httptest.NewRequest("GET", "/v1/agents", nil), "nomachine@example.com")
+	// A subject that is not a UUID derives no machine id at all.
+	s.listAgents(w, httptest.NewRequest("GET", "/v1/agents", nil), "not-a-uuid")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
 		t.Errorf("body = %s, want an empty array", got)
-	}
-}
-
-// Every tester must own a distinct machine, or two people share a roster and
-// each sees the other's conversations.
-func TestEveryUserHasTheirOwnMachine(t *testing.T) {
-	seen := map[string]string{}
-	for _, u := range users {
-		if u.Machine == "" {
-			t.Errorf("%s has no machine", u.Email)
-			continue
-		}
-		if other, dup := seen[u.Machine]; dup {
-			t.Errorf("%s and %s share machine %q", other, u.Email, u.Machine)
-		}
-		seen[u.Machine] = u.Email
-	}
-	if len(users) > 5 {
-		t.Errorf("%d users but the host has 5 VM slots", len(users))
-	}
-}
-
-// Machine ids go straight into a control-plane URL, so they must match the id
-// shape the control plane itself enforces.
-func TestMachineIDsAreValid(t *testing.T) {
-	ok := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	for _, u := range users {
-		if !ok.MatchString(u.Machine) {
-			t.Errorf("%s has an unusable machine id %q", u.Email, u.Machine)
-		}
 	}
 }
 
