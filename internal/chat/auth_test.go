@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,5 +192,104 @@ func TestDistinctUsersGetDistinctMachines(t *testing.T) {
 			t.Errorf("%s and %s share machine %q", other, sub, m)
 		}
 		seen[m] = sub
+	}
+}
+
+// The fleet token must not survive in the address bar.
+//
+// Setting the cookie is only half the job: left in the URL the token rides along
+// in the Referer of every same-origin request the page makes, and stays in
+// history, screenshots and copied links. The operator link has to bounce to a
+// clean URL, keeping any other parameters it carried.
+func TestOperatorLinkStripsTheTokenFromTheURL(t *testing.T) {
+	s := &Server{cfg: Config{Token: "fleet-token"}}
+	w := httptest.NewRecorder()
+	s.guard(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("the page was served before the token left the URL")
+	})(w, httptest.NewRequest("GET", "/chat?id=alice-1&token=fleet-token", nil))
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want a redirect", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if strings.Contains(loc, "fleet-token") || strings.Contains(loc, "token=") {
+		t.Errorf("the token survived the redirect: %q", loc)
+	}
+	if !strings.Contains(loc, "id=alice-1") {
+		t.Errorf("the redirect dropped the other parameters: %q", loc)
+	}
+	var stored string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			stored = c.Value
+		}
+	}
+	if stored != "fleet-token" {
+		t.Errorf("the cookie did not keep the session: %q", stored)
+	}
+}
+
+// The cookie alone gets the page served, with no redirect loop.
+func TestOperatorCookieServesThePage(t *testing.T) {
+	s := &Server{cfg: Config{Token: "fleet-token"}}
+	served := false
+	r := httptest.NewRequest("GET", "/chat", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: "fleet-token"})
+	w := httptest.NewRecorder()
+	s.guard(func(http.ResponseWriter, *http.Request) { served = true })(w, r)
+	if !served || w.Code != http.StatusOK {
+		t.Fatalf("served = %v, status = %d", served, w.Code)
+	}
+}
+
+// A POST carrying ?token= must not be redirected: a 302 would drop its body.
+func TestApiCallsWithATokenAreNotRedirected(t *testing.T) {
+	s := &Server{cfg: Config{Token: "fleet-token"}}
+	served := false
+	w := httptest.NewRecorder()
+	s.guard(func(http.ResponseWriter, *http.Request) { served = true })(
+		w, httptest.NewRequest("POST", "/api/send?token=fleet-token", strings.NewReader(`{}`)))
+	if !served {
+		t.Fatalf("the call was not served, status = %d", w.Code)
+	}
+}
+
+// Without the fleet token the page is refused outright -- there is no login form
+// to send anyone to, and an API caller must get JSON rather than HTML.
+func TestOperatorGuardRefusesWithoutTheToken(t *testing.T) {
+	s := &Server{cfg: Config{Token: "fleet-token"}}
+	for path, wantJSON := range map[string]bool{"/chat": false, "/api/vms": true} {
+		w := httptest.NewRecorder()
+		s.guard(func(http.ResponseWriter, *http.Request) {
+			t.Fatalf("%s was served with no token", path)
+		})(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want 401", path, w.Code)
+		}
+		if got := strings.Contains(w.Body.String(), "{"); got != wantJSON {
+			t.Errorf("%s body = %q", path, w.Body.String())
+		}
+	}
+}
+
+// A user's Supabase token must not open the operator page, and the fleet token
+// must not act as a user. The two credentials are for different surfaces.
+func TestTheTwoCredentialsDoNotCrossOver(t *testing.T) {
+	v, mint := testAuth(t)
+	s := &Server{cfg: Config{Token: "fleet-token"}, auth: v}
+
+	r := httptest.NewRequest("GET", "/chat?token="+mint(testUserID, "a@b.com"), nil)
+	w := httptest.NewRecorder()
+	s.guard(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("a user's access token opened the operator page")
+	})(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+
+	r = httptest.NewRequest("GET", "/v1/agents", nil)
+	r.Header.Set("Authorization", "Bearer fleet-token")
+	if _, ok := v.identify(r); ok {
+		t.Error("the fleet token authenticated as a user")
 	}
 }

@@ -78,9 +78,23 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		// Arriving by link: move the token out of the address bar and into the
-		// cookie, so it stops being in every Referer and browser history entry.
-		if r.URL.Query().Get("token") != "" {
-			setSession(w, r.URL.Query().Get("token"))
+		// cookie, then bounce to the clean URL. Setting the cookie is not enough
+		// on its own -- left in the address bar the fleet token rides along in
+		// the Referer of every same-origin request, and survives in history, a
+		// screenshot, or a copied link. The dashboard strips it the same way.
+		//
+		// Only page GETs are redirected: a redirect would silently drop the body
+		// of a POST, and an API caller passing ?token= wants an answer, not a 302.
+		if tok := r.URL.Query().Get("token"); tok != "" {
+			setSession(w, tok)
+			if r.Method == http.MethodGet && !isAPI(r) {
+				clean := *r.URL
+				q := clean.Query()
+				q.Del("token")
+				clean.RawQuery = q.Encode()
+				http.Redirect(w, r, clean.RequestURI(), http.StatusFound)
+				return
+			}
 		}
 		next(w, r)
 	}
