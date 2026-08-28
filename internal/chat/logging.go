@@ -50,10 +50,21 @@ func redact(s string) string {
 //
 // Bodies are included unless CHAT_LOG_BODIES=0, which is the switch to reach for
 // once real people are using this: message text is their content, not ours.
-func logged(next http.Handler, bodies bool) http.Handler {
+//
+// It also verifies the caller, because the log wants a name on every line and
+// the guards want an identity: doing it here means one verification per request
+// rather than one per wrapper.
+func logged(next http.Handler, bodies bool, auth *Verifier) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		user, _ := userFor(r)
+		// The one place a token is verified. This wrapper is outermost, so every
+		// guard below can read the answer off the context instead of checking a
+		// signature again on the same request.
+		user := ""
+		if id, ok := auth.identify(r); ok {
+			user = id.Email
+			r = withIdentity(r, id)
+		}
 		req := ""
 		if bodies {
 			req = captureRequest(r)

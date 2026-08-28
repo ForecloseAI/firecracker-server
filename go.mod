@@ -3,11 +3,14 @@ module cracked
 go 1.27
 
 require (
+	github.com/MicahParks/keyfunc/v3 v3.8.1
 	github.com/anthropics/anthropic-sdk-go v1.66.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 )
 
 require (
+	github.com/MicahParks/jwkset v0.11.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
@@ -25,4 +28,5 @@ require (
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 )

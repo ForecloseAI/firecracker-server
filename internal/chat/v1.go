@@ -17,12 +17,12 @@ import (
 // /api/* routes rather than an extension of them: the page's handlers all take a
 // VM id in the body and address the boss, which is the shape this replaces.
 //
-// Auth here is a bearer token and deliberately throwaway -- an email-to-machine
-// mapping in the users file -- because it is being replaced by a real identity
-// provider. Nothing else in the gateway depends on how it works.
+// Auth is a Supabase access token, verified against the project's public keys.
+// There is no sign-in route here: the app talks to Supabase directly and this
+// service only ever checks what it is handed. Nothing else in the gateway
+// depends on how that works -- every handler below is given a user id and does
+// not care where it came from.
 func (s *Server) v1Routes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/auth/sign-in", s.signIn)
-	mux.HandleFunc("POST /v1/auth/sign-out", s.apiGuard(s.signOut))
 	mux.HandleFunc("GET /v1/agents", s.apiGuard(s.listAgents))
 	mux.HandleFunc("GET /v1/agent-types", s.apiGuard(s.listTypes))
 	mux.HandleFunc("POST /v1/agents", s.apiGuard(s.createAgent))
@@ -39,59 +39,22 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/feedback", s.apiGuard(s.postFeedback))
 }
 
-// apiGuard requires a session and always answers 401, never a redirect. The web
-// page's guard sends a browser to /login, and an app given a 302 to an HTML page
-// would report an unreadable failure instead of "your token expired".
+// apiGuard requires a verified Supabase token and always answers 401, never a
+// redirect: an app given a 302 to an HTML page would report an unreadable
+// failure instead of "your token expired".
+//
+// The token was already verified by the logging middleware, which wraps
+// everything; this reads that result rather than checking the signature twice.
+// The string handed to each handler is the Supabase user id.
 func (s *Server) apiGuard(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, ok := userFor(r)
+		id, ok := identityFrom(r.Context())
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next(w, r, user)
+		next(w, r, id.UserID)
 	}
-}
-
-// signInReq is the sign-in body. Email is simply the users-file key.
-type signInReq struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-// session is what the app stores and replays as a bearer token.
-type sessionResp struct {
-	UserID string `json:"userId"`
-	Email  string `json:"email"`
-	Token  string `json:"token"`
-}
-
-// signIn checks the password and mints a token. The cookie is set as well so the
-// existing web page keeps working against the same session store.
-func (s *Server) signIn(w http.ResponseWriter, r *http.Request) {
-	var req signInReq
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req) != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
-		return
-	}
-	token, ok := login(req.Email, req.Password)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-	setSession(w, token)
-	writeJSON(w, http.StatusOK, sessionResp{UserID: req.Email, Email: req.Email, Token: token})
-}
-
-// signOut clears the cookie and answers 204 with no body, per the client's rule
-// that any other 2xx has res.json() called on it.
-//
-// Tokens are fixed constants, so there is nothing to revoke server-side: the
-// client drops its stored copy and that is the whole of it. Real revocation
-// arrives with real auth.
-func (s *Server) signOut(w http.ResponseWriter, r *http.Request, _ string) {
-	clearSession(w)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // listAgents returns the roster of the signed-in person's own machine, booting

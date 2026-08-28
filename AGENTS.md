@@ -29,4 +29,10 @@ Recent commits use concise, imperative subjects, often scoped by subsystem, such
 
 ## Security & Configuration
 
+`cracked-chat` verifies Supabase access tokens against the project's public keys
+(`SUPABASE_URL`, fetched from its JWKS endpoint at startup). It holds no user
+store and no signing secret: identity lives in Supabase, and a user's VM id is
+derived from their Supabase user id rather than recorded anywhere. Do not
+reintroduce a local list of logins.
+
 Never commit bearer tokens, credentials, workspace images, or generated binaries. Preserve hostname-based cookie isolation described in `README.md`; in particular, do not introduce cookies scoped to `.usetypeo.com`.

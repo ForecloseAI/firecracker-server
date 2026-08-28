@@ -126,28 +126,32 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 		"message_id": "m_001", "session_state": "working", "last_event_id": 41 + len(g.sent)})
 }
 
-// newFake stands a whole gateway up over a fake guest and one known login.
-func newFake(t *testing.T) (*Server, *fakeGuest, user) {
+// newFake stands a whole gateway up over a fake guest, with a signed-in user.
+// The returned string is that user's access token.
+func newFake(t *testing.T) (*Server, *fakeGuest, string) {
 	t.Helper()
 	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss"}}}
-	s, u := serverOver(t, g)
-	return s, g, u
+	s, tok := serverOver(t, g)
+	return s, g, tok
 }
 
 // serverOver wires a gateway to an already-configured fake guest.
-func serverOver(t *testing.T, g *fakeGuest) (*Server, user) {
+func serverOver(t *testing.T, g *fakeGuest) (*Server, string) {
 	t.Helper()
 	srv := httptest.NewServer(g.routes())
 	t.Cleanup(srv.Close)
-	return &Server{control: stubControl(t, srv.URL, "running")}, testUser(t)
+	v, mint := testAuth(t)
+	s := &Server{control: stubControl(t, srv.URL, "running"), auth: v,
+		cfg: Config{Origin: "https://chat.example.com", Token: "fleet-token"}}
+	return s, mint(testUserID, "tester@example.com")
 }
 
 // call runs one request through the guard, as the app would reach it.
-func call(t *testing.T, s *Server, u user, method, path, body string) *httptest.ResponseRecorder {
+func call(t *testing.T, s *Server, tok, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rdr *strings.Reader = strings.NewReader(body)
 	r := httptest.NewRequest(method, path, rdr)
-	r.Header.Set("Authorization", "Bearer "+u.Token)
+	r.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	s.Routes().ServeHTTP(w, r)
 	return w

@@ -234,7 +234,9 @@ async function post(path, body) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (r.status === 401) location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    // There is no login form to send anyone to any more: this page is gated on
+    // the fleet token, so an expired session means reopening it with ?token=.
+    if (r.status === 401) showBanner("Session expired. Reopen this page with ?token=&lt;CRACKED_TOKEN&gt;.");
     return r.ok;
   } catch { return false; }
 }

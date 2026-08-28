@@ -62,13 +62,18 @@ func (s *Server) postFeedback(w http.ResponseWriter, r *http.Request, user strin
 		fail(w, http.StatusServiceUnavailable, "feedback is not configured")
 		return
 	}
-	s.forwardFeedback(w, user, req)
+	// The email is read from the verified token rather than the user id the
+	// guard hands down: the sheet is read by people, and a column of UUIDs
+	// would name nobody.
+	who, _ := identityFrom(r.Context())
+	s.forwardFeedback(w, who, req)
 }
 
 // forwardFeedback stamps the row and sends it, mapping a webhook failure.
-func (s *Server) forwardFeedback(w http.ResponseWriter, user string, req feedbackReq) {
+func (s *Server) forwardFeedback(w http.ResponseWriter, who Identity, req feedbackReq) {
+	user := who.UserID
 	row := feedbackRow{
-		Time: time.Now().UTC().Format(time.RFC3339), Email: user,
+		Time: time.Now().UTC().Format(time.RFC3339), Email: who.Email,
 		Machine: machineFor(user), AgentID: req.AgentID,
 		TaskTitle: req.TaskTitle, TaskSlug: req.TaskSlug,
 		Rating: req.Rating, Comment: req.Comment,

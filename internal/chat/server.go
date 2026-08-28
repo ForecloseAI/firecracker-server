@@ -4,21 +4,18 @@ import (
 	_ "embed"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"sync"
 )
 
 //go:embed static/chat.html
 var chatPage []byte
 
-//go:embed static/login.html
-var loginPage []byte
-
 // Server is the browser-facing half of the chat service.
 type Server struct {
 	cfg     Config
 	control *Control
 	caps    *Caps
+	auth    *Verifier
 	// feedback is nil when no webhook is configured, which is how the endpoint
 	// knows to refuse rather than silently drop what someone typed.
 	feedback *sheet
@@ -28,8 +25,8 @@ type Server struct {
 }
 
 // NewServer wires the chat service together.
-func NewServer(cfg Config, control *Control, caps *Caps) *Server {
-	return &Server{cfg: cfg, control: control, caps: caps,
+func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server {
+	return &Server{cfg: cfg, control: control, caps: caps, auth: auth,
 		feedback: newSheet(cfg.FeedbackWebhookURL), bridges: map[string]*Bridge{}}
 }
 
@@ -37,8 +34,6 @@ func NewServer(cfg Config, control *Control, caps *Caps) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.redirectHome)
-	mux.HandleFunc("GET /login", s.loginPage)
-	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("GET /logout", s.logout)
 	mux.HandleFunc("GET /chat", s.guard(s.chat))
 	mux.HandleFunc("GET /api/vms", s.guard(s.listVMs))
@@ -51,7 +46,7 @@ func (s *Server) Routes() http.Handler {
 	s.v1Routes(mux)
 	cop := http.NewCrossOriginProtection()
 	cop.AddTrustedOrigin(s.cfg.Origin)
-	return logged(cop.Handler(mux), s.cfg.LogBodies)
+	return logged(cop.Handler(mux), s.cfg.LogBodies, s.auth)
 }
 
 // bridge returns the consumer for a VM, starting one on first use. A cached
@@ -69,22 +64,47 @@ func (s *Server) bridge(id string) *Bridge {
 	return b
 }
 
-// guard requires a session, redirecting pages and 401ing API calls.
+// guard requires the fleet token. An operator arrives with ?token=<CRACKED_TOKEN>
+// once and the cookie carries them from there, which is how the control plane's
+// dashboard already works.
+//
+// There is no redirect to a login form any more: there is no form to send anyone
+// to. A browser without the token gets 401 and an explanation, not a page that
+// invites it to guess.
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := userFor(r); ok {
-			next(w, r)
+		if !s.isOperator(r) {
+			if isAPI(r) {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+			http.Error(w, "unauthorized: append ?token=<CRACKED_TOKEN>", http.StatusUnauthorized)
 			return
 		}
-		if isAPI(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
+		// Arriving by link: move the token out of the address bar and into the
+		// cookie, then bounce to the clean URL. Setting the cookie is not enough
+		// on its own -- left in the address bar the fleet token rides along in
+		// the Referer of every same-origin request, and survives in history, a
+		// screenshot, or a copied link. The dashboard strips it the same way.
+		//
+		// Only page GETs are redirected: a redirect would silently drop the body
+		// of a POST, and an API caller passing ?token= wants an answer, not a 302.
+		if tok := r.URL.Query().Get("token"); tok != "" {
+			setSession(w, tok)
+			if r.Method == http.MethodGet && !isAPI(r) {
+				clean := *r.URL
+				q := clean.Query()
+				q.Del("token")
+				clean.RawQuery = q.Encode()
+				http.Redirect(w, r, clean.RequestURI(), http.StatusFound)
+				return
+			}
 		}
-		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+		next(w, r)
 	}
 }
 
-// isAPI reports whether a request wants JSON rather than a redirect.
+// isAPI reports whether a request wants JSON rather than an HTML error.
 func isAPI(r *http.Request) bool {
 	return len(r.URL.Path) >= 5 && r.URL.Path[:5] == "/api/"
 }
@@ -101,42 +121,10 @@ func (s *Server) redirectHome(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/chat", http.StatusFound)
 }
 
-// loginPage serves the form, or skips it if already signed in.
-func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := userFor(r); ok {
-		http.Redirect(w, r, "/chat", http.StatusFound)
-		return
-	}
-	servePage(w, loginPage)
-}
-
-// login checks the password and starts a session.
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/login?e=1", http.StatusSeeOther)
-		return
-	}
-	tok, ok := login(r.FormValue("user"), r.FormValue("password"))
-	if !ok {
-		http.Redirect(w, r, "/login?e=1", http.StatusSeeOther)
-		return
-	}
-	setSession(w, tok)
-	http.Redirect(w, r, nextPath(r.FormValue("next")), http.StatusSeeOther)
-}
-
-// nextPath keeps a post-login redirect on this site.
-func nextPath(next string) string {
-	if len(next) > 1 && next[0] == '/' && next[1] != '/' {
-		return next
-	}
-	return "/chat"
-}
-
-// logout ends the session both server-side and in the browser.
+// logout drops the operator cookie.
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	clearSession(w)
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.Error(w, "signed out", http.StatusUnauthorized)
 }
 
 // chat serves the page itself.

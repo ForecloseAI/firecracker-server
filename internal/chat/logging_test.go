@@ -12,11 +12,19 @@ import (
 // capture runs one request through the middleware and returns what was logged.
 func capture(t *testing.T, bodies bool, h http.HandlerFunc, r *http.Request) string {
 	t.Helper()
+	v, _ := testAuth(t)
+	return captureAs(t, bodies, v, h, r)
+}
+
+// captureAs is capture against a specific verifier, for the one test that needs
+// a token the middleware will actually accept.
+func captureAs(t *testing.T, bodies bool, v *Verifier, h http.HandlerFunc, r *http.Request) string {
+	t.Helper()
 	var out bytes.Buffer
 	old := log.Writer()
 	log.SetOutput(&out)
 	t.Cleanup(func() { log.SetOutput(old) })
-	logged(h, bodies).ServeHTTP(httptest.NewRecorder(), r)
+	logged(h, bodies, v).ServeHTTP(httptest.NewRecorder(), r)
 	return out.String()
 }
 
@@ -67,15 +75,15 @@ func TestBodyStillReachesTheHandler(t *testing.T) {
 // One line per request, carrying what an integrator needs: outcome, route,
 // timing, who, and both bodies.
 func TestRequestLineHasWhatIsNeeded(t *testing.T) {
-	u := testUser(t)
+	v, mint := testAuth(t)
 	r := httptest.NewRequest("POST", "/v1/threads/coder/messages", strings.NewReader(`{"text":"hi"}`))
-	r.Header.Set("Authorization", "Bearer "+u.Token)
-	got := capture(t, true, func(w http.ResponseWriter, r *http.Request) {
+	r.Header.Set("Authorization", "Bearer "+mint(testUserID, "tester@example.com"))
+	got := captureAs(t, true, v, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(`{"id":"12"}`))
 	}, r)
 	for _, want := range []string{"201", "POST", "/v1/threads/coder/messages",
-		"user=" + u.Email, `req={"text":"hi"}`, `res={"id":"12"}`} {
+		"user=tester@example.com", `req={"text":"hi"}`, `res={"id":"12"}`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("log is missing %q:\n%s", want, got)
 		}

@@ -33,16 +33,31 @@ func (f *fakeSheet) routes() http.Handler {
 	})
 }
 
-// serverWithSheet wires a gateway whose feedback reaches a fake webhook.
-//
-// control is deliberately left nil. Feedback must never reach the guest, so a
-// handler that grew a guestOf call would panic here rather than quietly start
-// costing a VM boot per star rating.
-func serverWithSheet(t *testing.T, f *fakeSheet) (*Server, user) {
+// testEmail is the address on the access token every feedback test signs in
+// with, and so the one the row must be stamped with.
+const testEmail = "tester@example.com"
+
+// serverWithSheet wires a gateway whose feedback reaches a fake webhook, and
+// returns the access token of the person rating. control is deliberately left
+// nil. Feedback must never reach the guest, so a handler that grew a guestOf
+// call would panic here rather than quietly start costing a VM boot per star
+// rating.
+func serverWithSheet(t *testing.T, f *fakeSheet) (*Server, string) {
 	t.Helper()
 	srv := httptest.NewServer(f.routes())
 	t.Cleanup(srv.Close)
-	return &Server{feedback: newSheet(srv.URL)}, testUser(t)
+	s, tok := signedIn(t)
+	s.feedback = newSheet(srv.URL)
+	return s, tok
+}
+
+// signedIn is a gateway with no guest behind it and a token that gets through
+// its guard.
+func signedIn(t *testing.T) (*Server, string) {
+	t.Helper()
+	v, mint := testAuth(t)
+	s := &Server{auth: v, cfg: Config{Origin: "https://chat.example.com"}}
+	return s, mint(testUserID, testEmail)
 }
 
 // The happy path, and the shape of a row: what the person typed, plus who and
@@ -63,7 +78,7 @@ func TestFeedbackRecordsARow(t *testing.T) {
 	if row.Rating != 4 || row.Comment != "nearly" || row.TaskTitle != "Book flights" {
 		t.Errorf("row = %+v", row)
 	}
-	if row.Email != u.Email || row.Machine != u.Machine || row.Time == "" {
+	if row.Email != testEmail || row.Machine != machineFor(testUserID) || row.Time == "" {
 		t.Errorf("row was not stamped server-side: %+v", row)
 	}
 }
@@ -79,8 +94,8 @@ func TestFeedbackIdentifiesTheTokenHolder(t *testing.T) {
 	if len(f.rows) != 1 {
 		t.Fatalf("sheet got %d rows, want 1", len(f.rows))
 	}
-	if f.rows[0].Email != u.Email {
-		t.Errorf("email = %q, want the token holder %q", f.rows[0].Email, u.Email)
+	if f.rows[0].Email != testEmail {
+		t.Errorf("email = %q, want the token holder %q", f.rows[0].Email, testEmail)
 	}
 	if strings.HasPrefix(f.rows[0].Time, "1999") {
 		t.Errorf("the client set the time: %q", f.rows[0].Time)
@@ -112,8 +127,7 @@ func TestFeedbackRejectsWhatTheCardCannotProduce(t *testing.T) {
 // With no webhook configured there is nowhere to put this. Saying so is better
 // than a 204 that means the person's answer went in the bin.
 func TestFeedbackRefusesWhenNoSheetIsConfigured(t *testing.T) {
-	u := testUser(t)
-	s := &Server{}
+	s, u := signedIn(t)
 	w := call(t, s, u, "POST", "/v1/feedback", `{"agentId":"boss","rating":5}`)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
@@ -138,7 +152,8 @@ func TestFeedbackBelievesTheBodyOverThe200(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "no such sheet"})
 	}))
 	t.Cleanup(srv.Close)
-	s, u := &Server{feedback: newSheet(srv.URL)}, testUser(t)
+	s, u := signedIn(t)
+	s.feedback = newSheet(srv.URL)
 
 	w := call(t, s, u, "POST", "/v1/feedback", `{"agentId":"boss","rating":5}`)
 	if w.Code != http.StatusBadGateway {
