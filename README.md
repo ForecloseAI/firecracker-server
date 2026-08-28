@@ -173,6 +173,27 @@ sudo systemctl edit cracked-chat     # Environment=CRACKED_TOKEN=<token>
 sudo systemctl enable --now cracked-chat
 ```
 
+### Task feedback
+
+When an agent closes a task the app offers to rate it, and `POST /v1/feedback`
+appends the rating to a Google Sheet. The row is stamped server-side with the
+signed-in email and the time, so a client cannot file feedback as someone else,
+and nothing about it reaches the guest — the agent being rated must not be able
+to read the rating.
+
+Deploy `deploy/feedback-sheet.gs` as a web app bound to the sheet (the file's
+header has the steps, including the "Who has access: Anyone" setting that a
+Workspace account gets wrong by default), then:
+
+```sh
+sudo systemctl edit cracked-chat     # Environment=FEEDBACK_WEBHOOK_URL=<exec url>
+```
+
+The `/exec` URL is a bearer credential: anyone holding it can append rows, so it
+belongs in the drop-in and never in the checked-in unit. Leaving it unset turns
+the endpoint off — it answers 503 rather than quietly dropping what someone
+took the trouble to type.
+
 Three origins, isolated by **hostname**:
 
 | Origin | Serves | Holds |

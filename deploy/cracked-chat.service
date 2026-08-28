@@ -18,6 +18,8 @@ Environment=CHAT_ORIGIN=https://chat.usetypeo.com
 Environment=CHAT_VNC_ORIGIN=https://vnc.usetypeo.com
 Environment=CRACKED_URL=http://127.0.0.1:8080
 # CRACKED_TOKEN via `systemctl edit cracked-chat`, never in this file.
+# FEEDBACK_WEBHOOK_URL goes the same way: the Apps Script /exec URL is a bearer
+# credential. See deploy/feedback-sheet.gs. Unset just turns feedback off.
 
 ExecStart=/usr/local/bin/cracked-chat
 Restart=on-failure

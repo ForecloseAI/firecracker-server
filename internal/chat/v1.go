@@ -36,6 +36,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/stream", s.apiGuard(s.streamV1))
 	mux.HandleFunc("POST /v1/threads/{id}/messages/{messageId}/approval",
 		s.apiGuard(s.resolveApproval))
+	mux.HandleFunc("POST /v1/feedback", s.apiGuard(s.postFeedback))
 }
 
 // apiGuard requires a session and always answers 401, never a redirect. The web

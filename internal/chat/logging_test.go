@@ -139,3 +139,39 @@ func TestLongBodiesAreTrimmed(t *testing.T) {
 		t.Errorf("a body broke the line into %d:\n%s", strings.Count(got, "\n"), got)
 	}
 }
+
+// What someone types about an agent is written to us for the sheet, not for the
+// journal. Bodies are logged by default, so it has to be redacted by name.
+func TestFeedbackCommentIsRedactedFromTheLog(t *testing.T) {
+	body := `{"agentId":"boss","rating":2,"comment":"it kept losing my \"booking\" details"}`
+	r := httptest.NewRequest("POST", "/v1/feedback", strings.NewReader(body))
+	got := capture(t, true, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}, r)
+	for _, secret := range []string{"booking", "kept losing"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("%q reached the log: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, `"rating":2`) {
+		t.Errorf("redaction ate the rest of the row: %s", got)
+	}
+}
+
+// The log only ever sees the first captureCap bytes of a body, so a long enough
+// comment arrives with no closing quote. A rule that insisted on one matched
+// nothing, and printed the opening of the comment verbatim.
+func TestALongFeedbackCommentIsStillRedacted(t *testing.T) {
+	secret := strings.Repeat("this should never reach the journal ", 400)
+	body := `{"agentId":"boss","rating":2,"comment":"` + secret + `","taskTitle":"Book flights"}`
+	if len(body) <= captureCap {
+		t.Fatalf("body is %d bytes; the test needs one past captureCap", len(body))
+	}
+	r := httptest.NewRequest("POST", "/v1/feedback", strings.NewReader(body))
+	got := capture(t, true, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}, r)
+	if strings.Contains(got, "never reach the journal") {
+		t.Errorf("the comment reached the log: %s", got)
+	}
+}

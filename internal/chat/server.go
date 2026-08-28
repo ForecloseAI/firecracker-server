@@ -19,6 +19,9 @@ type Server struct {
 	cfg     Config
 	control *Control
 	caps    *Caps
+	// feedback is nil when no webhook is configured, which is how the endpoint
+	// knows to refuse rather than silently drop what someone typed.
+	feedback *sheet
 
 	mu      sync.Mutex
 	bridges map[string]*Bridge
@@ -26,7 +29,8 @@ type Server struct {
 
 // NewServer wires the chat service together.
 func NewServer(cfg Config, control *Control, caps *Caps) *Server {
-	return &Server{cfg: cfg, control: control, caps: caps, bridges: map[string]*Bridge{}}
+	return &Server{cfg: cfg, control: control, caps: caps,
+		feedback: newSheet(cfg.FeedbackWebhookURL), bridges: map[string]*Bridge{}}
 }
 
 // Routes builds the handler, wrapped in stdlib CSRF protection.

@@ -22,10 +22,19 @@ const captureCap = 8 << 10
 // secrets are redacted before anything is written. A token arrives in the query
 // string because SSE cannot set headers, and sign-in carries a password: both
 // would otherwise sit in the journal in the clear.
+//
+// A feedback comment is not a secret, but it is written to us in confidence
+// about the agent that was just working for the person -- it belongs in the
+// sheet it was collected for and nowhere else.
 var secrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(token=)[^&\s"]+`),
 	regexp.MustCompile(`(?i)("password"\s*:\s*)"[^"]*"`),
 	regexp.MustCompile(`(?i)("token"\s*:\s*)"[^"]*"`),
+	// The closing quote is optional because the body reaching redact is already
+	// truncated at captureCap: a comment long enough to run past that has no
+	// closing quote left to match, and requiring one printed the opening of it
+	// in the clear -- the one string in the row this rule exists to hide.
+	regexp.MustCompile(`(?i)("comment"\s*:\s*)"(\\.|[^"\\])*("|$)`),
 }
 
 // redact removes anything that must not be logged.
