@@ -76,6 +76,13 @@ func (r *Registry) freeSlot() int {
 func (r *Registry) Release(v *VM) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.releaseLocked(v)
+}
+
+// releaseLocked is Release for callers already holding the mutex. Both checks
+// compare the pointer, so releasing a VM whose id or slot has since been taken
+// by another does not evict that one.
+func (r *Registry) releaseLocked(v *VM) {
 	if r.slots[v.Slot] == v {
 		r.slots[v.Slot] = nil
 	}

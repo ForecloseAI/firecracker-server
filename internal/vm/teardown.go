@@ -92,6 +92,32 @@ func (r *Registry) waitExit(v *VM, d time.Duration) bool {
 	}
 }
 
+// reap makes certain a VM's process is gone before its resources are removed.
+//
+// A running firecracker is a host resource like any other, and cleanup is the
+// only thing every exit path shares. shutdown covers the delete path, but a
+// creation rolling back has already spawned by the time waitForAgent times out
+// or a raced delete steals its state -- and the process would otherwise outlive
+// the record of it, holding an unlinked disk and answering to nobody.
+//
+// No graceful ladder: a VM that never reached running has nothing to flush.
+func (r *Registry) reap(v *VM) {
+	if v.cmd == nil || v.PID <= 0 {
+		return
+	}
+	select {
+	case <-v.done: // shutdown, or the process ended on its own
+		return
+	default:
+	}
+	log.Printf("vm %s: killing pid %d left by a rolled back creation", v.ID, v.PID)
+	// Negated: the group, so a firecracker that forked takes its children along.
+	_ = syscall.Kill(-v.PID, syscall.SIGKILL)
+	if !r.waitExit(v, killWait) {
+		log.Printf("vm %s: pid %d survived SIGKILL", v.ID, v.PID)
+	}
+}
+
 // cleanup releases every host resource for a VM. It runs on all exit paths and
 // tolerates each step already being done.
 //
@@ -101,17 +127,25 @@ func (r *Registry) waitExit(v *VM, d time.Duration) bool {
 // still on disk and will come back on their next sign-in.
 func (r *Registry) cleanup(v *VM, purge bool) error {
 	l := r.dirs
+	r.reap(v)
 	if v.console != nil {
 		_ = v.console.Close()
 	}
 	// Everything below is addressed by id or slot, not by this pointer, so a
 	// late cleanup would reach into whatever holds them now. Rolling back a
-	// creation can arrive after a delete released the id and a second creation
-	// claimed it -- and then this would take that machine's tap, run directory
-	// and disk. Its own resources are still ours to release either way.
-	if !r.ownsOrFree(v) {
+	// creation can arrive after a delete released the id, and a second creation
+	// can then claim it -- after which this would take that machine's tap, run
+	// directory and disk.
+	//
+	// Held across the removals rather than checked and released, so the id
+	// cannot be claimed in between: Allocate takes this same lock, so it waits
+	// for the resources named after that id to be gone before handing it out.
+	// The process is already reaped above, so nothing slow happens under here.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if other, taken := r.byID[v.ID]; taken && other != v {
 		log.Printf("vm %s: skipping cleanup, the id belongs to a newer machine", v.ID)
-		r.Release(v)
+		r.releaseLocked(v)
 		return nil
 	}
 	os.Remove(l.Sock(v.ID))
@@ -126,20 +160,8 @@ func (r *Registry) cleanup(v *VM, purge bool) error {
 			purgeErr = fmt.Errorf("purge workspace %s: %w", v.ID, err)
 		}
 	}
-	r.Release(v)
+	r.releaseLocked(v)
 	return purgeErr
-}
-
-// ownsOrFree reports whether this VM still holds its id, or nobody does.
-//
-// Not simply "is it registered": a rollback runs after Release, when the id is
-// free and the resources are genuinely this VM's to remove. The case to refuse
-// is the id having been claimed by someone else in the meantime.
-func (r *Registry) ownsOrFree(v *VM) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	other, taken := r.byID[v.ID]
-	return !taken || other == v
 }
 
 // DrainAll stops every VM within a total budget, for control-plane shutdown.

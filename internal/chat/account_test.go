@@ -175,3 +175,33 @@ func TestDeleteAccountDoesNotTreatNotFoundAsSuccess(t *testing.T) {
 		t.Errorf("status = %d, want 502", w.Code)
 	}
 }
+
+// A subscriber racing the delete must not bring the bridge back.
+//
+// Subscribe treats a cancelled context as an idle stop and revives from it, and
+// cancelling is exactly what closing does -- so without a terminal flag the
+// consumer dropping the bridge was meant to remove returns, still holding the
+// deleted machine's event watermark, to reconnect to the replacement under the
+// same id.
+func TestADeletedBridgeCannotBeRevived(t *testing.T) {
+	s, _, tok := accountServer(t)
+	b := s.bridge(testMachine)
+	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", w.Code)
+	}
+	// As an /api/stream request that grabbed the pointer before the delete would.
+	ch := b.Subscribe()
+	b.mu.Lock()
+	revived := b.ctx.Err() == nil
+	subs := len(b.subs)
+	b.mu.Unlock()
+	if revived {
+		t.Error("the deleted machine's consumer reconnected")
+	}
+	if subs != 0 {
+		t.Errorf("the deleted bridge kept %d subscriber(s)", subs)
+	}
+	if _, open := <-ch; open {
+		t.Error("a deleted bridge delivered a frame")
+	}
+}

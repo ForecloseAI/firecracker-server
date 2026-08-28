@@ -3,7 +3,9 @@ package vm
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -180,5 +182,56 @@ func TestCleanupSkipsWhenTheIdBelongsToANewerMachine(t *testing.T) {
 	}
 	if got, err := r.Get("alice1"); err != nil || got != fresh {
 		t.Errorf("a stale rollback deregistered the current machine: %v", err)
+	}
+}
+
+// A creation that rolls back must not leave its process behind.
+//
+// cleanup is the only step every exit path shares, and it released the named
+// resources without ever signalling the process. shutdown covers the delete
+// path, but a creation rolling back has already spawned by the time
+// waitForAgent times out or a raced delete steals its state -- and the process
+// would outlive every record of it, holding a disk nothing can reach.
+func TestCleanupReapsAProcessLeftByARollback(t *testing.T) {
+	r, _ := workspaceIn(t, "alice1")
+	v, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real child that ignores everything short of SIGKILL, standing in for a
+	// firecracker that spawned and then had its creation rolled back.
+	cmd := exec.Command("sleep", "300")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	v.cmd, v.PID = cmd, cmd.Process.Pid
+	v.done = make(chan struct{})
+	go func() { _ = cmd.Wait(); close(v.done) }()
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+
+	if err := r.cleanup(v, true); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	select {
+	case <-v.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the rolled back creation's process is still running")
+	}
+}
+
+// A VM that never spawned must not have a signal sent anywhere. Kill(-0, ...)
+// would reach the control plane's own process group.
+func TestCleanupDoesNotSignalWhenNothingSpawned(t *testing.T) {
+	r, _ := workspaceIn(t, "alice1")
+	v, err := r.Allocate("alice1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.PID != 0 || v.cmd != nil {
+		t.Fatal("a freshly allocated VM already has a process")
+	}
+	if err := r.cleanup(v, true); err != nil { // must not signal, must not hang
+		t.Fatalf("cleanup: %v", err)
 	}
 }
