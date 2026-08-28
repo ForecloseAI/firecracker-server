@@ -34,6 +34,12 @@ type feedFrame struct {
 	MessageID   string    `json:"messageId,omitempty"`
 	Verdict     string    `json:"verdict,omitempty"`
 	VerdictTime time.Time `json:"verdictTime,omitzero"`
+
+	// Carried on a task_complete frame. The title is sent structurally rather
+	// than left for the client to read back out of the "Finished: x" line,
+	// which is display text and free to change.
+	TaskTitle string `json:"taskTitle,omitempty"`
+	TaskSlug  string `json:"taskSlug,omitempty"`
 }
 
 // feed tracks what this connection has already told the client, so a tick only
@@ -178,7 +184,20 @@ func (f *feed) forward(w io.Writer, id string, events []agentapi.Event) {
 			continue
 		}
 		f.emitMessage(w, id, ev)
+		if ev.Type == "task_end" {
+			f.emitTaskComplete(w, id, ev)
+		}
 	}
+}
+
+// emitTaskComplete announces that a named piece of work is over.
+//
+// Sent alongside the "Finished: x" line, not instead of it: the line is history
+// and the frame is a signal, and a client that wants to act on the moment a task
+// ended should not have to guess it from a rendered string.
+func (f *feed) emitTaskComplete(w io.Writer, id string, ev agentapi.Event) {
+	write(w, feedFrame{Type: "task_complete", AgentID: id,
+		TaskTitle: ev.TaskTitle, TaskSlug: ev.TaskSlug})
 }
 
 // emitMessage sends one line of conversation.

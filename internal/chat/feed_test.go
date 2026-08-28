@@ -295,3 +295,46 @@ func TestTypingFalseIsExplicit(t *testing.T) {
 // noHandoff stands in for the capability minter in tests that do not exercise a
 // handoff card.
 func noHandoff() string { return "" }
+
+// A task ending is two things at once: a line in the thread, so the history
+// reads "Started: x ... Finished: x", and a signal carrying the title, so a
+// client acting on the moment work ended does not have to parse display text.
+func TestTaskEndIsBothALineAndASignal(t *testing.T) {
+	e := ev(9, "task_end")
+	e.TaskTitle, e.TaskSlug = "Book flights", "book-flights"
+
+	var out strings.Builder
+	newFeed("m1", noHandoff).forward(&out, "coder", []agentapi.Event{e})
+	parts := strings.Split(strings.TrimSpace(out.String()), "\n\n")
+	if len(parts) != 2 {
+		t.Fatalf("got %d frames, want a line and a signal: %q", len(parts), out.String())
+	}
+
+	var line, signal feedFrame
+	if err := json.Unmarshal(payload(t, parts[0]), &line); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload(t, parts[1]), &signal); err != nil {
+		t.Fatal(err)
+	}
+	if line.Type != "message" || line.Message.Text != "Finished: Book flights" {
+		t.Errorf("line = %+v", line)
+	}
+	if signal.Type != "task_complete" || signal.TaskTitle != "Book flights" {
+		t.Errorf("signal = %+v", signal)
+	}
+	if signal.TaskSlug != "book-flights" || signal.AgentID != "coder" {
+		t.Errorf("signal = %+v", signal)
+	}
+}
+
+// The stream and a later reload must agree, or a task reads one way as it
+// finishes and another way after the app refetches the thread.
+func TestTaskEndReadsTheSameOnReload(t *testing.T) {
+	e := ev(9, "task_end")
+	e.TaskTitle = "Book flights"
+	th := buildThread("coder", []agentapi.Event{e}, "")
+	if len(th.Messages) != 1 || th.Messages[0].Text != "Finished: Book flights" {
+		t.Fatalf("history = %+v", th.Messages)
+	}
+}

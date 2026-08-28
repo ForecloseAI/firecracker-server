@@ -29,7 +29,7 @@ func projectMessage(ev agentapi.Event) (Message, bool) {
 		m.Kind, m.From, m.Text, m.File = kindText, fromMe, ev.Text, ev.File
 	case "text":
 		m.Kind, m.Text = kindText, ev.Text
-	case "delegation", "task_start", "agent_message":
+	case "delegation", "task_start", "task_end", "agent_message":
 		m.Kind, m.Text = kindEvent, teamLine(ev)
 	case "approval_required", "question":
 		return askMessage(m, ev), true
@@ -84,6 +84,8 @@ func teamLine(ev agentapi.Event) string {
 		return "Handed " + ev.TaskTitle + " to " + ev.To
 	case ev.Type == "task_start":
 		return "Started: " + ev.TaskTitle
+	case ev.Type == "task_end":
+		return "Finished: " + ev.TaskTitle
 	case ev.From != "":
 		return "Heard back from " + ev.From
 	}
