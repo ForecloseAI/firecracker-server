@@ -20,6 +20,9 @@ type fakeControl struct {
 	// does for a machine that is not running -- while its workspace stays on
 	// disk.
 	notFound bool
+	// conflict answers 409, as the control plane does when the machine was
+	// replaced before the purge could reach it.
+	conflict bool
 }
 
 func (f *fakeControl) server(t *testing.T) *Control {
@@ -35,8 +38,13 @@ func (f *fakeControl) server(t *testing.T) *Control {
 		if r.URL.Query().Get("purge") == "true" {
 			f.purged = append(f.purged, id)
 		}
-		bad, missing := f.fail, f.notFound
+		bad, missing, clash := f.fail, f.notFound, f.conflict
 		f.mu.Unlock()
+		if clash {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"conflict"}`))
+			return
+		}
 		if missing {
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(`{"error":"not_found"}`))
@@ -203,5 +211,23 @@ func TestADeletedBridgeCannotBeRevived(t *testing.T) {
 	}
 	if _, open := <-ch; open {
 		t.Error("a deleted bridge delivered a frame")
+	}
+}
+
+// A purge the control plane could not carry out must not read as erased.
+//
+// It answers 409 when the machine was replaced before the purge reached it --
+// the replacement and its workspace are untouched, so 204 here would claim an
+// erasure that did not happen. The app shows a failure and the person retries,
+// which then targets the machine that is actually there.
+func TestDeleteAccountDoesNotTreatAConflictAsSuccess(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fc.conflict = true
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code == http.StatusNoContent {
+		t.Fatal("a purge the control plane refused was reported as data erased")
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
 	}
 }

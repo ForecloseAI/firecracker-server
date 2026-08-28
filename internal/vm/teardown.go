@@ -146,6 +146,14 @@ func (r *Registry) cleanup(v *VM, purge bool) error {
 	if other, taken := r.byID[v.ID]; taken && other != v {
 		log.Printf("vm %s: skipping cleanup, the id belongs to a newer machine", v.ID)
 		r.releaseLocked(v)
+		// Skipping is only success when nothing was promised. A purge was a
+		// promise: the machine now holding this id was never touched, and its
+		// workspace is still there, so reporting nil would tell someone their
+		// data was erased when it was not. ErrState so the caller sees a
+		// conflict and retries against the machine that is actually there.
+		if purge {
+			return fmt.Errorf("%w: %s was replaced before it could be purged", ErrState, v.ID)
+		}
 		return nil
 	}
 	os.Remove(l.Sock(v.ID))
