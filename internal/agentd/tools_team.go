@@ -46,6 +46,7 @@ func teamTools(d toolDeps) ([]anthropic.BetaTool, error) {
 	}
 	return buildTools(
 		func() (anthropic.BetaTool, error) { return startTaskTool(d) },
+		func() (anthropic.BetaTool, error) { return finishTaskTool(d) },
 		func() (anthropic.BetaTool, error) { return listAgentsTool(d) },
 		func() (anthropic.BetaTool, error) { return messageAgentTool(d) },
 		func() (anthropic.BetaTool, error) { return delegateTool(d) },
@@ -67,6 +68,26 @@ func startTaskTool(d toolDeps) (anthropic.BetaTool, error) {
 				return toolText(err.Error()), nil
 			}
 			return toolText("Working in " + task.Dir + ". Put this task's files there."), nil
+		})
+}
+
+// finishTaskTool closes the piece of work an agent is on.
+//
+// Nothing infers this from the agent going idle: an agent falls idle at the end
+// of every turn, including one that only asked the person a question, and
+// treating that as "finished" would report work as done that plainly is not.
+func finishTaskTool(d toolDeps) (anthropic.BetaTool, error) {
+	return toolrunner.NewBetaToolFromJSONSchema[noInput](
+		"finish_task",
+		"Close the piece of work you are currently on. Call this as soon as you have "+
+			"delivered what was asked and nothing on it is left to do. "+
+			"Do not call it while you are still waiting on someone else's part.",
+		func(ctx context.Context, _ noInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
+			task, ok := d.team.FinishTask(d.self)
+			if !ok {
+				return toolText("You have no open task."), nil
+			}
+			return toolText("Closed " + task.Title + "."), nil
 		})
 }
 

@@ -376,11 +376,45 @@ func (s *Supervisor) Delegate(from string, d Delegation) error {
 	if err != nil {
 		return err
 	}
-	if err := target.DeliverWork(from, delegationBrief(from, d)); err != nil {
+	// The task rides along with the work and is opened when the turn picks it
+	// up. Nothing about the roster moves here: the inbox serialises turns, so
+	// this delegation may sit in it while the agent's current one is still running.
+	if err := target.DeliverWork(from, delegationBrief(from, d), taskFor(d)); err != nil {
 		return err
 	}
 	s.logFor(from, Event{Type: "delegation", To: d.To, TaskTitle: d.Title, TaskDir: d.TaskDir})
 	return nil
+}
+
+// taskFor names delegated work so the specialist's own roster row and thread can
+// say what it is doing. start_task is boss-only, so this is the only task a
+// worker ever gets. The folder is the boss's: the worker did not open it.
+func taskFor(d Delegation) *Task {
+	name := slug(d.Title)
+	if name == "" {
+		name = "delegated"
+	}
+	return &Task{Slug: name, Title: d.Title, Dir: d.TaskDir}
+}
+
+// BeginTask opens delegated work as the agent's own, closing whatever it had.
+//
+// Called when the turn DEQUEUES the work, never when it was handed over. An
+// agent runs one turn at a time, so a second delegation waits in the inbox
+// while the first is still running -- and moving the roster at hand-over time
+// claimed the agent had switched jobs while it was demonstrably still on the
+// last one, then closed that one, which the person saw as a finished task to
+// rate. By the time this runs the agent really has stopped working on the old
+// task, so closing it is a statement of fact rather than a guess.
+func (s *Supervisor) BeginTask(agentID string, task *Task) {
+	if task == nil {
+		return
+	}
+	s.FinishTask(agentID)
+	task.StartedAt = time.Now().UTC()
+	s.logFor(agentID, Event{Type: "task_start",
+		TaskSlug: task.Slug, TaskTitle: task.Title, TaskDir: task.Dir})
+	s.roster.SetTask(agentID, task)
 }
 
 // delegationBrief is what the specialist actually receives. It has to carry
@@ -399,6 +433,11 @@ func delegationBrief(from string, d Delegation) string {
 // StartTask opens a dated folder for a piece of work and records it on the
 // roster, so a poll can say what an agent is doing rather than just that it is
 // busy.
+//
+// Any task still open is closed first. An agent can only be on one piece of
+// work, so starting a second one is itself the news that the first ended --
+// without this, a model that never calls finish_task leaves the old title on
+// the roster forever and nothing downstream can tell the two jobs apart.
 func (s *Supervisor) StartTask(agentID, title, taskSlug string) (Task, error) {
 	name := slug(taskSlug)
 	if name == "" {
@@ -408,9 +447,28 @@ func (s *Supervisor) StartTask(agentID, title, taskSlug string) (Task, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Task{}, err
 	}
+	s.FinishTask(agentID)
 	task := Task{Slug: name, Title: title, Dir: dir, StartedAt: time.Now().UTC()}
 	s.logFor(agentID, Event{Type: "task_start", TaskSlug: name, TaskTitle: title, TaskDir: dir})
 	return task, s.roster.SetTask(agentID, &task)
+}
+
+// FinishTask closes an agent's open task, reporting what was closed.
+//
+// Nothing else ever cleared Task, so a title stayed on the roster long after
+// the work ended and "what is this agent doing" could not be answered from it.
+// The event is what tells a client the job is over; the roster clear is what
+// stops it being claimed twice.
+func (s *Supervisor) FinishTask(agentID string) (Task, bool) {
+	rec, ok := s.roster.Get(agentID)
+	if !ok || rec.Task == nil {
+		return Task{}, false
+	}
+	task := *rec.Task
+	s.logFor(agentID, Event{Type: "task_end",
+		TaskSlug: task.Slug, TaskTitle: task.Title, TaskDir: task.Dir})
+	s.roster.SetTask(agentID, nil)
+	return task, true
 }
 
 // CurrentTask reports what an agent is working on, if anything.

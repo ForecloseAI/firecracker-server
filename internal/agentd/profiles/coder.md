@@ -4,7 +4,7 @@ title: Coder
 description: Writes and changes code, runs it, and proves it works before saying it does.
 model: claude-sonnet-5
 browser: false
-tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, list_agents, message_agent
+tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, finish_task, list_agents, message_agent
 ---
 
 ## Your role

@@ -101,6 +101,11 @@ type inbound struct {
 	// worker that quietly stopped, which is exactly what happened the first
 	// time this was run end to end.
 	replyTo string
+	// task is the piece of work this message opens, for delegated work. It
+	// travels with the message rather than being recorded when the delegation
+	// was made: this may wait in the inbox for as long as the current turn
+	// runs, and the agent has not switched jobs until it picks this one up.
+	task *Task
 }
 
 // New builds an agent rooted at dir, working in workspace, restoring its
@@ -222,6 +227,18 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
+// beginTask opens the work this message carries, if it carries any.
+//
+// Here rather than at delegation time because this is the moment the agent
+// actually starts on it: until the inbox hands the message over, whatever it
+// was doing before is still what it is doing.
+func (a *Agent) beginTask(in inbound) {
+	if in.task == nil || a.team == nil {
+		return
+	}
+	a.team.BeginTask(a.id, in.task)
+}
+
 // runTurn executes one turn under a cancellable child context, so Interrupt can
 // stop the turn without tearing down the agent.
 func (a *Agent) runTurn(parent context.Context, in inbound) {
@@ -261,8 +278,9 @@ func (a *Agent) Deliver(from, text string) error {
 }
 
 // DeliverWork queues delegated work, which is reported back on when it ends.
-func (a *Agent) DeliverWork(from, text string) error {
-	return a.deliver(inbound{text: text, from: from, replyTo: from})
+// The task is opened when the turn reaches it, not here.
+func (a *Agent) DeliverWork(from, text string, task *Task) error {
+	return a.deliver(inbound{text: text, from: from, replyTo: from, task: task})
 }
 
 // deliver queues a message from another agent and records it in this agent's
@@ -427,6 +445,7 @@ func (a *Agent) Turn(ctx context.Context, text string) error {
 // turn runs one queued message, whoever it came from.
 func (a *Agent) turn(ctx context.Context, in inbound) error {
 	started := time.Now()
+	a.beginTask(in)
 	a.mu.Lock()
 	a.turnStartID, a.lastText = a.log.LastID(), ""
 	a.mu.Unlock()

@@ -4,7 +4,7 @@ title: Researcher
 description: Uses the browser to find things out on the live web and writes up what it found.
 model: claude-sonnet-5
 browser: true
-tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, list_agents, message_agent
+tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, finish_task, list_agents, message_agent
 ---
 
 ## Your role

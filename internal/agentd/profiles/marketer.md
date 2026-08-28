@@ -4,7 +4,7 @@ title: Marketer
 description: Positioning, copy and launch plans, written for a real audience rather than in general.
 model: claude-sonnet-5
 browser: false
-tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, list_agents, message_agent
+tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, finish_task, list_agents, message_agent
 ---
 
 ## Your role
