@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -24,13 +25,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Fetched at startup, not lazily: a wrong SUPABASE_URL should stop the
+	// service coming up rather than tell every user they are unauthorized.
+	auth, err := chat.NewVerifier(context.Background(), cfg.SupabaseURL)
+	if err != nil {
+		return err
+	}
 	control := chat.NewControl(cfg.ControlURL, cfg.Token)
 	caps := chat.NewCaps(cfg.VNCOrigin)
 	gw, err := chat.NewVNCGateway(caps, cfg.ControlURL, cfg.Token)
 	if err != nil {
 		return err
 	}
-	serve(cfg, chat.NewServer(cfg, control, caps).Routes(), gw.Routes())
+	serve(cfg, chat.NewServer(cfg, control, caps, auth).Routes(), gw.Routes())
 	return waitForSignal()
 }
 

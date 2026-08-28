@@ -4,7 +4,8 @@ Firecracker microVM control plane for a single EC2 host. Boots agent sandboxes
 (Ubuntu + Chrome + desktop + Python) on demand, tracks capacity, and proxies
 VNC and agent traffic to each VM.
 
-Go 1.27, stdlib only, zero dependencies.
+Go 1.27. The host binaries depend only on `golang-jwt/jwt` and `keyfunc` for
+verifying Supabase access tokens; everything else is stdlib.
 
 ## Layout
 
@@ -170,6 +171,8 @@ make install-chat
 sudo install -m0644 deploy/cracked-chat.service /etc/systemd/system/
 sudo install -m0644 deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 sudo systemctl edit cracked-chat     # Environment=CRACKED_TOKEN=<token>
+                                     # SUPABASE_URL is in the unit file itself
+
 sudo systemctl enable --now cracked-chat
 ```
 
@@ -196,27 +199,57 @@ The mobile and web client talks to `cracked-chat` under `/v1`, which is a
 separate surface from the `/api/*` routes the built-in chat page uses. Point the
 client at `https://chat.usetypeo.com/v1`.
 
-Logins are a hardcoded list in `internal/chat/users.go`. Add a tester by adding
-a line and redeploying.
+Identity is Supabase. The app signs in against the project directly — email and
+password, or Google — and sends the access token it gets back. This service never
+sees a password, holds no user store and mints nothing: it verifies.
 
 ```sh
-curl -sX POST https://chat.usetypeo.com/v1/auth/sign-in \
-     -H 'Content-Type: application/json' \
-     -d '{"email":"someone@example.com","password":"..."}'   # -> {userId,email,token}
+TOK=$(curl -s "$SUPABASE_URL/auth/v1/token?grant_type=password" \
+        -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H 'Content-Type: application/json' \
+        -d '{"email":"someone@example.com","password":"..."}' | jq -r .access_token)
 curl -s https://chat.usetypeo.com/v1/agents -H "Authorization: Bearer $TOK"
-curl -sX POST https://chat.usetypeo.com/v1/auth/sign-out -H "Authorization: Bearer $TOK"
 ```
 
-Auth is deliberately trivial: a hardcoded list of email, password and token
-compared with `==`, and one hardcoded machine that every login shares. There is
-no user store, no hashing, no expiry and nothing to revoke — signing out just
-drops the client's copy of a constant. All of it is scaffolding for a handful of
-testers and is deleted when a real identity provider lands.
+There is no `/v1/auth/sign-in` or `/v1/auth/sign-out`. Signing out is something
+the client does with Supabase; there is nothing here to call.
 
-Sessions are reachable three ways — `Authorization: Bearer`, `?token=` (for the
-event stream, which cannot set headers) and the `__Host-sess` cookie (for the
-built-in page). Every `/v1` route answers **401** rather than redirecting, so a
-client never receives an HTML login page where it expected JSON.
+Tokens are verified against the project's **public** keys, fetched once at
+startup from `$SUPABASE_URL/auth/v1/.well-known/jwks.json` and refreshed in the
+background. Signature, expiry, issuer and audience are all checked locally, so a
+request costs no round trip — and this service holds no secret that could mint a
+token. Rotating a signing key in the Supabase dashboard needs no redeploy. Add a
+tester by inviting them in Supabase; there is no list in this repo to edit.
+
+The consequence of local verification is that revocation is not visible here: a
+token stays good until it expires. That is the standard trade and the reason
+access tokens are short-lived.
+
+**A user's machine id is derived from their Supabase user id**, not stored. A
+UUID with its hyphens removed is exactly the 32 characters the control plane's
+id shape allows, so `3f8a1c92-5e4b-…` owns machine `3f8a1c925e4b…`. That is why
+there is no user table: a person who has never been seen before still resolves
+to a machine, and `ensureMachine` boots it on first use. Note the ceiling — one
+VM per user against `MaxVMs = 5` means the sixth concurrent user gets a capacity
+error.
+
+Tokens reach `/v1` two ways — `Authorization: Bearer` and `?token=` (for the
+event stream, which cannot set headers). The `__Host-sess` cookie is deliberately
+*not* one of them: it carries the operator token for the built-in page, and
+honouring it here would let whoever runs the service act as any account. Every
+`/v1` route answers **401** rather than redirecting, so a client never receives
+an HTML login page where it expected JSON.
+
+### The built-in web page
+
+`/chat` and its `/api/*` routes are an operator tool, gated on `CRACKED_TOKEN`
+the way the control plane's dashboard is. Open it once as
+`https://chat.usetypeo.com/chat?token=<CRACKED_TOKEN>`; the token moves into the
+`__Host-sess` cookie and drops out of the address bar. `/logout` clears it.
+
+It has no user login because it has no users. Those `/api/*` handlers take the VM
+id from the request body and never check it against the caller — under the old
+hardcoded scheme that let any tester drive any other tester's machine. Behind the
+fleet token it is just the operator looking at their own fleet.
 
 ## Storage model
 
