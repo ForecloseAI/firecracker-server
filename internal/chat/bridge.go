@@ -71,6 +71,10 @@ type Bridge struct {
 	ctx     context.Context
 	stop    context.CancelFunc
 	idle    *time.Timer
+	// closed is terminal, unlike a cancelled ctx. Subscribe treats a cancelled
+	// context as an idle stop and revives from it, which for a deleted machine
+	// would bring back the very consumer dropping it was meant to remove.
+	closed bool
 }
 
 // newBridge starts a consumer for one VM id.
@@ -342,6 +346,15 @@ func (b *Bridge) Subscribe() chan Frame {
 		b.idle.Stop()
 		b.idle = nil
 	}
+	if b.closed {
+		// The machine is gone. Hand back a channel that never carries anything
+		// rather than reconnecting: this consumer holds the deleted machine's
+		// event watermark, and the replacement boots under the same id.
+		log.Printf("chat bridge %s: refusing to revive a deleted machine", b.id)
+		delete(b.subs, ch)
+		close(ch)
+		return ch
+	}
 	if b.ctx.Err() != nil {
 		log.Printf("chat bridge %s: reviving after idle stop", b.id)
 		b.startLocked()
@@ -442,6 +455,25 @@ func (b *Bridge) Unsubscribe(ch chan Frame) {
 	if len(b.subs) == 0 && b.idle == nil {
 		b.idle = time.AfterFunc(idleGrace, b.stopIfEmpty)
 	}
+}
+
+// Close ends this bridge for good, for when its machine is deleted.
+//
+// stopIfEmpty is the idle path and leaves the bridge revivable; this is the
+// terminal one. The consumer loops re-resolve the VM on every reconnect by
+// design, so without cancelling them they would retry a machine that no longer
+// exists every fifteen seconds, forever.
+func (b *Bridge) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Before cancelling, because cancelling is what Subscribe reads as an idle
+	// stop -- a subscriber racing the delete would otherwise revive it.
+	b.closed = true
+	if b.idle != nil {
+		b.idle.Stop()
+		b.idle = nil
+	}
+	b.stop()
 }
 
 // stopIfEmpty ends the guest stream when the last browser has really gone.

@@ -2,8 +2,10 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -13,12 +15,14 @@ import (
 )
 
 const (
-	// tick is how often the gateway asks the guest what changed. A message can
-	// therefore take up to this long to appear.
-	tick = time.Second
 	// beat keeps the socket alive through proxies and a sleeping phone.
 	beat = 25 * time.Second
 )
+
+// tick is how often the gateway asks the guest what changed. A message can
+// therefore take up to this long to appear. A var, like guestPort, so a test
+// does not have to spend a second per poll.
+var tick = time.Second
 
 // feedFrame is one server-originated update. Type is what the client switches
 // on, and it ignores any type it does not know, which is what lets this grow.
@@ -47,7 +51,25 @@ type feed struct {
 	machine  string
 	// handoff mints a fresh capability each time it is called.
 	handoff func() string
+	// guestIP is the address the client was built for, and resolve reports the
+	// machine's address now. Slot addresses are derived arithmetically from the
+	// slot number, so a machine that goes away frees an address another
+	// account's machine can be given -- and this connection's client, fixed at
+	// connect time, would go on polling it and forward that person's roster and
+	// messages here. Every poll re-checks rather than trusting the address it
+	// started with, the same thing the operator bridge does on each reconnect.
+	guestIP string
+	resolve func() (string, error)
 }
+
+// staleLimit is how many consecutive unverifiable polls end a connection.
+//
+// A poll that cannot confirm which machine it is talking to sends nothing, so a
+// control plane briefly unreachable merely goes quiet. Ending it after a while
+// is what stops that quiet from being permanent: the client reconnects with
+// backoff and refetches, where a stream held open forever would show a frozen
+// roster and heartbeats with nothing reporting a problem.
+const staleLimit = 15
 
 // stream is the app's one live connection: every agent on the person's machine,
 // over SSE.
@@ -56,16 +78,30 @@ type feed struct {
 // this needs no new protocol; the token arrives as a query parameter because a
 // browser and React Native both refuse to set headers on a stream.
 func (s *Server) streamV1(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(s, user)
+	// Resolved here rather than through guestOf, which returns only a client:
+	// this connection has to remember the address it was built for so every
+	// later poll can check it is still the same machine answering there.
+	machine := machineFor(user)
+	if machine == "" {
+		fail(w, http.StatusBadGateway, ErrNoVM.Error())
+		return
+	}
+	view, err := s.ensureMachine(machine)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	cl := agent.New(view.GuestIP, guestPort)
 	rc := http.NewResponseController(w)
 	rc.SetWriteDeadline(time.Time{}) // an absolute deadline would cut the stream
 	writeSSEHeaders(w)
 	rc.Flush()
-	f := newFeed(machineFor(user), func() string { return s.handoffURL(user) })
+	f := newFeed(machine, func() string { return s.handoffURL(user) })
+	f.guestIP = view.GuestIP
+	f.resolve = func() (string, error) {
+		v, err := s.control.VM(machine)
+		return v.GuestIP, err
+	}
 	f.run(r, w, rc, cl)
 }
 
@@ -79,13 +115,21 @@ func newFeed(machine string, handoff func() string) *feed {
 	}
 }
 
-// run polls until the client leaves or the guest stops answering.
+// run polls until the client leaves, or the machine it was opened for stops
+// being the machine at that address.
 func (f *feed) run(r *http.Request, w io.Writer,
 	rc *http.ResponseController, cl *agent.Client) {
+	if f.resolve == nil {
+		// Refusing rather than polling: without a way to confirm which machine
+		// is answering, every frame risks being someone else's.
+		log.Printf("chat feed %s: no resolver, refusing to stream", f.machine)
+		return
+	}
 	poll := time.NewTicker(tick)
 	defer poll.Stop()
 	heart := time.NewTicker(beat)
 	defer heart.Stop()
+	stale := 0
 	for {
 		select {
 		case <-r.Context().Done():
@@ -94,6 +138,25 @@ func (f *feed) run(r *http.Request, w io.Writer,
 			fmt.Fprint(w, ": beat\n\n")
 			rc.Flush()
 		case <-poll.C:
+			switch ip, err := f.resolve(); {
+			case errors.Is(err, ErrNoVM):
+				log.Printf("chat feed %s: machine gone, ending the stream", f.machine)
+				return
+			case err != nil:
+				// Unverifiable: send nothing rather than risk sending someone
+				// else's. Quiet is recoverable; a misdelivered roster is not.
+				if stale++; stale >= staleLimit {
+					log.Printf("chat feed %s: unresolvable for %d polls, ending the stream",
+						f.machine, stale)
+					return
+				}
+				continue
+			case ip != f.guestIP:
+				log.Printf("chat feed %s: address moved from %s to %s, ending the stream",
+					f.machine, f.guestIP, ip)
+				return
+			}
+			stale = 0
 			f.sweep(w, cl)
 			rc.Flush()
 		}

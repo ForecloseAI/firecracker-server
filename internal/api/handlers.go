@@ -131,13 +131,35 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request, fn func(*vm.
 }
 
 // handleDelete stops a VM, purging the workspace only when asked.
+//
+// A purge is also honoured for a VM that is not running. The registry holds only
+// live VMs and the startup sweep empties it, so a stopped machine is the normal
+// case, not an edge one -- and its workspace is the file holding everything the
+// person owns. Refusing there with a 404 would make "delete my data" a no-op for
+// most people and hand the data back on their next sign-in.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	v, err := s.reg.Get(r.PathValue("id"))
+	id := r.PathValue("id")
+	purge := r.URL.Query().Get("purge") == "true"
+	v, err := s.reg.Get(id)
+	if errors.Is(err, vm.ErrNotFound) && purge {
+		// The id reaches a filesystem path from here, so it is checked against
+		// the same shape the control plane enforces everywhere else.
+		if !vm.ValidID(id) {
+			writeErr(w, http.StatusBadRequest, apiError{"bad_id", "invalid vm id", ""})
+			return
+		}
+		if err := s.reg.PurgeWorkspace(id); err != nil {
+			writeVMErr(w, err)
+			return
+		}
+		s.usage.Forget(id)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "purged": true})
+		return
+	}
 	if err != nil {
 		writeVMErr(w, err)
 		return
 	}
-	purge := r.URL.Query().Get("purge") == "true"
 	if err := s.reg.Delete(v, purge); err != nil {
 		writeVMErr(w, err)
 		return

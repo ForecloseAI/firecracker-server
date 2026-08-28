@@ -35,11 +35,19 @@ func (r *Registry) Create(id string) (*VM, error) {
 		return nil, err
 	}
 	if err := r.boot(v); err != nil {
-		r.cleanup(v, v.workspaceIsNew)
+		// A workspace this call created is rolled back with it. The purge error
+		// is already logged and there is nothing to tell the caller: the boot
+		// failure is the answer they get.
+		_ = r.cleanup(v, v.workspaceIsNew)
 		return nil, err
 	}
 	if err := r.SetState(v, StateRunning); err != nil {
-		r.cleanup(v, false)
+		// Nothing legally follows stopping, so this failing means a concurrent
+		// delete moved the VM there while it booted. Any workspace THIS call
+		// created goes with it: that delete may have been a purge, and a fresh
+		// disk left behind would resurrect an account someone was told had been
+		// erased. Same reasoning, same argument, as the boot failure above.
+		_ = r.cleanup(v, v.workspaceIsNew)
 		return nil, err
 	}
 	return v, nil

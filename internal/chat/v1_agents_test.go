@@ -381,6 +381,7 @@ func TestNewRoutesNeedAToken(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/v1/agent-types"}, {"POST", "/v1/agents"},
 		{"DELETE", "/v1/agents/coder"}, {"POST", "/v1/threads/boss/messages"},
+		{"DELETE", "/v1/account"},
 	} {
 		r := httptest.NewRequest(c.method, c.path, strings.NewReader("{}"))
 		w := httptest.NewRecorder()

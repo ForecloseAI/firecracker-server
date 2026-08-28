@@ -57,6 +57,23 @@ func (c *Caps) check(key, vmID string) bool {
 	return ok && g.vmID == vmID && time.Now().Before(g.expires)
 }
 
+// Revoke drops every capability for one VM, for when that VM is deleted.
+//
+// Expiry alone is not enough here. A grant lives 15 minutes and check only
+// compares key, VM id and expiry -- so a capability minted just before a delete
+// would still be valid afterwards, and the machine id is derived from the
+// account, meaning the replacement machine reuses it. Without this, a handoff
+// link from before the wipe opens the screen of the machine after it.
+func (c *Caps) Revoke(vmID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, g := range c.grants {
+		if g.vmID == vmID {
+			delete(c.grants, k)
+		}
+	}
+}
+
 // sweep drops expired capabilities.
 func (c *Caps) sweep() {
 	now := time.Now()

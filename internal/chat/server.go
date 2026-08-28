@@ -60,6 +60,24 @@ func (s *Server) bridge(id string) *Bridge {
 	return b
 }
 
+// dropBridge removes a machine's consumer and hands it back to be stopped.
+//
+// Stopping is the caller's job, deliberately: the bridge paths take b.mu and
+// then s.mu, so calling into a bridge while holding s.mu inverts that order.
+// Take the entry out here, release, then stop it.
+//
+// This matters on deletion because a bridge outlives the machine it watched. It
+// holds that machine's event watermark, and the replacement boots under the same
+// id with its log restarted at 1 -- so a bridge left in place would discard the
+// new machine's entire transcript until its ids passed the old high mark.
+func (s *Server) dropBridge(id string) *Bridge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.bridges[id]
+	delete(s.bridges, id)
+	return b
+}
+
 // guard requires the fleet token. An operator arrives with ?token=<CRACKED_TOKEN>
 // once and the cookie carries them from there, which is how the control plane's
 // dashboard already works.

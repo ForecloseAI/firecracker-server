@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"syscall"
@@ -28,8 +29,7 @@ func (r *Registry) Delete(v *VM, purge bool) error {
 		return err
 	}
 	r.shutdown(v, prev)
-	r.cleanup(v, purge)
-	return nil
+	return r.cleanup(v, purge)
 }
 
 // beginStop marks the VM stopping so concurrent deletes conflict without
@@ -92,24 +92,84 @@ func (r *Registry) waitExit(v *VM, d time.Duration) bool {
 	}
 }
 
+// reap makes certain a VM's process is gone before its resources are removed.
+//
+// A running firecracker is a host resource like any other, and cleanup is the
+// only thing every exit path shares. shutdown covers the delete path, but a
+// creation rolling back has already spawned by the time waitForAgent times out
+// or a raced delete steals its state -- and the process would otherwise outlive
+// the record of it, holding an unlinked disk and answering to nobody.
+//
+// No graceful ladder: a VM that never reached running has nothing to flush.
+func (r *Registry) reap(v *VM) {
+	if v.cmd == nil || v.PID <= 0 {
+		return
+	}
+	select {
+	case <-v.done: // shutdown, or the process ended on its own
+		return
+	default:
+	}
+	log.Printf("vm %s: killing pid %d left by a rolled back creation", v.ID, v.PID)
+	// Negated: the group, so a firecracker that forked takes its children along.
+	_ = syscall.Kill(-v.PID, syscall.SIGKILL)
+	if !r.waitExit(v, killWait) {
+		log.Printf("vm %s: pid %d survived SIGKILL", v.ID, v.PID)
+	}
+}
+
 // cleanup releases every host resource for a VM. It runs on all exit paths and
 // tolerates each step already being done.
-func (r *Registry) cleanup(v *VM, purge bool) {
+//
+// Only the purge can fail the caller. The rest is best-effort and logged: a
+// leaked tap or run directory is an operational annoyance, while a workspace
+// that did not get removed is a person being told their data is gone when it is
+// still on disk and will come back on their next sign-in.
+func (r *Registry) cleanup(v *VM, purge bool) error {
 	l := r.dirs
+	r.reap(v)
 	if v.console != nil {
 		_ = v.console.Close()
+	}
+	// Everything below is addressed by id or slot, not by this pointer, so a
+	// late cleanup would reach into whatever holds them now. Rolling back a
+	// creation can arrive after a delete released the id, and a second creation
+	// can then claim it -- after which this would take that machine's tap, run
+	// directory and disk.
+	//
+	// Held across the removals rather than checked and released, so the id
+	// cannot be claimed in between: Allocate takes this same lock, so it waits
+	// for the resources named after that id to be gone before handing it out.
+	// The process is already reaped above, so nothing slow happens under here.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if other, taken := r.byID[v.ID]; taken && other != v {
+		log.Printf("vm %s: skipping cleanup, the id belongs to a newer machine", v.ID)
+		r.releaseLocked(v)
+		// Skipping is only success when nothing was promised. A purge was a
+		// promise: the machine now holding this id was never touched, and its
+		// workspace is still there, so reporting nil would tell someone their
+		// data was erased when it was not. ErrState so the caller sees a
+		// conflict and retries against the machine that is actually there.
+		if purge {
+			return fmt.Errorf("%w: %s was replaced before it could be purged", ErrState, v.ID)
+		}
+		return nil
 	}
 	os.Remove(l.Sock(v.ID))
 	if err := hostnet.DeleteTap(v.Tap); err != nil {
 		log.Printf("vm %s: delete tap %s: %v", v.ID, v.Tap, err)
 	}
 	os.RemoveAll(l.RunDir(v.ID))
+	var purgeErr error
 	if purge {
 		if err := os.Remove(l.Workspace(v.ID)); err != nil && !os.IsNotExist(err) {
 			log.Printf("vm %s: purge workspace: %v", v.ID, err)
+			purgeErr = fmt.Errorf("purge workspace %s: %w", v.ID, err)
 		}
 	}
-	r.Release(v)
+	r.releaseLocked(v)
+	return purgeErr
 }
 
 // DrainAll stops every VM within a total budget, for control-plane shutdown.

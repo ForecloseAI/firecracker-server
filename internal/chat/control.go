@@ -69,6 +69,35 @@ func (c *Control) Resume(id string) error {
 	return statusError(resp, "/vms/"+id+"/resume")
 }
 
+// DeleteVM stops a machine and erases its persisted disk.
+//
+// The boot client, not the 5s one: the teardown ladder is 20s graceful, then 5s
+// TERM, then KILL, so a guest that does not stop promptly would blow the short
+// timeout while the delete carried on server-side -- leaving the caller unable
+// to tell a failure from a slow success, on the one operation where that
+// distinction is what a person was promised.
+//
+// A 404 is NOT treated as success. A control plane carrying the purge fix never
+// answers one here: it erases a stopped machine's workspace and reports 200,
+// idempotently, whether or not there was anything to erase. So the only way to
+// see a 404 is to be talking to a control plane deployed before that fix -- one
+// that leaves the workspace on disk. Swallowing it would answer 204 and tell
+// someone their data was erased during exactly the rolling deploy where it was
+// not.
+func (c *Control) DeleteVM(id string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.base+"/vms/"+id+"?purge=true", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.boot.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return statusError(resp, "/vms/"+id)
+}
+
 // CreateVM boots a machine and blocks until its agent daemon answers. A 409
 // means someone else won the race and created it first, which is success as far
 // as the caller is concerned: the machine they asked for now exists.

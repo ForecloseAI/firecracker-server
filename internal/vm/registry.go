@@ -3,6 +3,7 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -75,12 +76,43 @@ func (r *Registry) freeSlot() int {
 func (r *Registry) Release(v *VM) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.releaseLocked(v)
+}
+
+// releaseLocked is Release for callers already holding the mutex. Both checks
+// compare the pointer, so releasing a VM whose id or slot has since been taken
+// by another does not evict that one.
+func (r *Registry) releaseLocked(v *VM) {
 	if r.slots[v.Slot] == v {
 		r.slots[v.Slot] = nil
 	}
 	if r.byID[v.ID] == v {
 		delete(r.byID, v.ID)
 	}
+}
+
+// PurgeWorkspace deletes the persisted disk of a VM that is not running.
+//
+// Delete covers the running case. This is the other one, and it is the common
+// one: the registry only holds live VMs, and Sweep empties it on every restart,
+// so most of the time a person's machine is stopped and their workspace is just
+// a file on disk that nothing owns. Without this there is no way to honour
+// "delete everything" for them.
+//
+// The absence check happens under the same lock that Allocate takes, so a VM
+// that boots concurrently cannot have its disk pulled out from under it: either
+// this runs first and the boot recreates an empty workspace, or the boot wins
+// and this refuses.
+func (r *Registry) PurgeWorkspace(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, live := r.byID[id]; live {
+		return fmt.Errorf("%w: %s is running", ErrState, id)
+	}
+	if err := os.Remove(r.dirs.Workspace(id)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("purge workspace %s: %w", id, err)
+	}
+	return nil
 }
 
 // Get looks up a VM by id.
