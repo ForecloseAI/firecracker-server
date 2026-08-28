@@ -54,7 +54,24 @@ function appendRow_(row) {
     sheet.appendRow(HEADERS);
     sheet.setFrozenRows(1);
   }
-  sheet.appendRow(HEADERS.map((h) => (row[h] === undefined ? '' : row[h])));
+  sheet.appendRow(HEADERS.map((h) => literal_(row[h])));
+}
+
+/**
+ * Keeps what a person typed from being read as a formula.
+ *
+ * Sheets parses a cell starting with =, +, - or @ as a formula, and appendRow
+ * writes with the same semantics as typing -- so a comment of "=IMPORTXML(...)"
+ * would run under the sheet owner's account instead of being feedback, and a
+ * task title starting with "=" would land as #NAME? rather than as itself. A
+ * leading apostrophe pins the cell to literal text and is consumed, not stored.
+ *
+ * Numbers pass through untouched, so the rating column still adds up.
+ */
+function literal_(v) {
+  if (v === undefined || v === null) return '';
+  if (typeof v !== 'string') return v;
+  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
 }
 
 /** Answers with JSON rather than Apps Script's HTML error wrapper. */
