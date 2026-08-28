@@ -7,6 +7,9 @@ USER_NAME="${CRACKED_USER:-cracked}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"
 KERNEL_VERSION="${KERNEL_VERSION:-6.18}"
 GUEST_CIDR="172.16.0.0/16"
+# The Go toolchain is pinned to whatever go.mod asks for, so resolve the repo
+# root rather than trusting the caller's cwd.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root"; exit 1; }
 
@@ -121,7 +124,50 @@ verify_kernel_config() {
   done
 }
 
-# --- 5. Sysctl and swap -------------------------------------------------------
+# --- 5. Go toolchain ----------------------------------------------------------
+# Resolve the Go release to install: GO_VERSION if set, else the newest patch of
+# the line go.mod asks for. go.mod carries a language version (`go 1.27`) while
+# releases are tagged `go1.27.0`, so appending a bare .0 would pin the oldest
+# patch and miss every security fix on that line.
+go_version() {
+  local line
+  [ -n "${GO_VERSION:-}" ] && { echo "$GO_VERSION"; return; }
+  line=$(grep -oE '^go [0-9]+\.[0-9]+' "$REPO_DIR/go.mod" | awk '{print $2}')
+  [ -n "$line" ] || { echo "FAIL: no go directive in $REPO_DIR/go.mod" >&2; exit 1; }
+  curl -fsSL 'https://go.dev/dl/?mode=json&include=all' \
+    | grep -oE "\"go${line//./\\.}(\.[0-9]+)?\"" | tr -d '"' \
+    | sed 's/^go//' | sort -V | tail -1
+}
+
+# Install that Go under /usr/local/go. Ubuntu's golang-go is deliberately not
+# used: 24.04 ships 1.22 against a go.mod that needs far newer, and with
+# GOTOOLCHAIN=auto a too-old Go tries to fetch the newer one and fails, so
+# NOTHING in this module builds. /usr/local/bin precedes /usr/bin in sudo's
+# secure_path, so the symlink wins over any packaged go still installed.
+install_go() {
+  local want have arch tmp
+  want="$(go_version)"
+  [ -n "$want" ] || { echo "FAIL: could not resolve a Go release"; exit 1; }
+  have="$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')"
+  if [ "$have" != "$want" ]; then
+    arch="$(dpkg --print-architecture)"
+    tmp="$(mktemp -d)"
+    curl -fsSL "https://go.dev/dl/go${want}.linux-${arch}.tar.gz" -o "$tmp/go.tgz"
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "$tmp/go.tgz"
+    rm -rf "$tmp"
+    echo "installed go $want (was ${have:-none})"
+  fi
+  # Relink unconditionally, never only on a fresh unpack. An already-unpacked
+  # /usr/local/go with no symlink is invisible -- apt's /usr/bin/go keeps
+  # winning and nothing builds -- and that is exactly the state a version-gated
+  # relink would refuse to repair. This host spent ten days in it.
+  ln -sf /usr/local/go/bin/go /usr/local/bin/go
+  ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+  /usr/local/bin/go version
+}
+
+# --- 6. Sysctl and swap -------------------------------------------------------
 # No swap: firecracker guidance is no-swap/no-overcommit, so overcommitting
 # would mean the OOM killer reaping live VMs.
 setup_sysctl() {
@@ -134,7 +180,7 @@ SYSCTL
   echo "ip_forward on, swap off"
 }
 
-# --- 6. Firewall --------------------------------------------------------------
+# --- 7. Firewall --------------------------------------------------------------
 setup_firewall() {
   local dev; dev="$(ip -j route list default | jq -r '.[0].dev')"
   echo "host egress interface: $dev"
@@ -169,7 +215,7 @@ setup_firewall() {
     echo "WARN: netfilter-persistent not installed; rules will not survive reboot"
 }
 
-# --- 7. Limits ----------------------------------------------------------------
+# --- 8. Limits ----------------------------------------------------------------
 setup_limits() {
   mkdir -p /etc/systemd/system.conf.d
   cat > /etc/systemd/system.conf.d/99-cracked.conf <<'LIMITS'
@@ -186,6 +232,7 @@ setup_dirs
 install_firecracker
 install_kernel
 verify_kernel_config
+install_go
 setup_sysctl
 setup_firewall
 setup_limits
