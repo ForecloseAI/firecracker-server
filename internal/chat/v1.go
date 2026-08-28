@@ -34,6 +34,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/profile", s.apiGuard(s.putProfile))
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
 	mux.HandleFunc("GET /v1/stream", s.apiGuard(s.streamV1))
+	mux.HandleFunc("DELETE /v1/account", s.apiGuard(s.deleteAccount))
 	mux.HandleFunc("POST /v1/threads/{id}/messages/{messageId}/approval",
 		s.apiGuard(s.resolveApproval))
 }
@@ -66,6 +67,41 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request, user string)
 		return
 	}
 	writeJSON(w, http.StatusOK, agents)
+}
+
+// deleteAccount erases everything the person has on their machine.
+//
+// Not guestOf: that boots the machine on the way in, which is absurd when the
+// next thing is deleting it, and would turn a wipe of a stopped machine into a
+// minute of booting one first. machineFor is a pure derivation and needs nothing
+// running.
+//
+// The Supabase account itself is untouched -- this service can verify tokens and
+// nothing else. So the person can sign in again and gets a blank machine booted
+// on demand, which is the intended shape: a clean start, not a locked door.
+func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, user string) {
+	machine := machineFor(user)
+	if machine == "" {
+		fail(w, http.StatusBadRequest, "no machine for this account")
+		return
+	}
+	if err := s.control.DeleteVM(machine); err != nil {
+		// Deliberately not 204. The app tells someone their data is gone on the
+		// strength of this status, so a failure has to read as one.
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	// The machine id is derived from the account, so the replacement reuses it.
+	// Anything still keyed on it would attach to the new machine as if it were
+	// the old one.
+	if b := s.dropBridge(machine); b != nil {
+		b.Close()
+	}
+	if s.caps != nil {
+		s.caps.Revoke(machine)
+	}
+	log.Printf("chat: erased %s at the account holder's request", machine)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // fail writes an error status. The client reads only the code, never the body,

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -67,6 +68,34 @@ func (c *Control) Resume(id string) error {
 	}
 	defer resp.Body.Close()
 	return statusError(resp, "/vms/"+id+"/resume")
+}
+
+// DeleteVM stops a machine and erases its persisted disk.
+//
+// The boot client, not the 5s one: the teardown ladder is 20s graceful, then 5s
+// TERM, then KILL, so a guest that does not stop promptly would blow the short
+// timeout while the delete carried on server-side -- leaving the caller unable
+// to tell a failure from a slow success, on the one operation where that
+// distinction is what a person was promised.
+//
+// A machine that does not exist is success: there is nothing left to delete.
+// The control plane purges a stopped machine's workspace too, so this is not the
+// same as the delete having done nothing.
+func (c *Control) DeleteVM(id string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.base+"/vms/"+id+"?purge=true", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.boot.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := statusError(resp, "/vms/"+id); err != nil && !errors.Is(err, ErrNoVM) {
+		return err
+	}
+	return nil
 }
 
 // CreateVM boots a machine and blocks until its agent daemon answers. A 409

@@ -232,6 +232,22 @@ to a machine, and `ensureMachine` boots it on first use. Note the ceiling — on
 VM per user against `MaxVMs = 5` means the sixth concurrent user gets a capacity
 error.
 
+`DELETE /v1/account` erases the caller's machine and everything on it, then
+answers 204. It is what the app's "delete everything and sign out" offers. The
+Supabase account is untouched — this service can verify tokens and nothing else —
+so the person can sign in again and gets a blank machine booted on demand.
+
+```sh
+curl -sX DELETE https://chat.usetypeo.com/v1/account -H "Authorization: Bearer $TOK"
+```
+
+Deleting purges the workspace, which is the only copy of their agents, threads
+and files. It works whether or not the machine is running: the control plane
+holds only live VMs in its registry and empties it on restart, so a stopped
+machine is the ordinary case, and `DELETE /vms/{id}?purge=true` removes a stopped
+machine's workspace rather than answering 404. A purge that cannot unlink the
+file is an error, never a silent success — the person was promised something.
+
 Tokens reach `/v1` two ways — `Authorization: Bearer` and `?token=` (for the
 event stream, which cannot set headers). The `__Host-sess` cookie is deliberately
 *not* one of them: it carries the operator token for the built-in page, and

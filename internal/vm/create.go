@@ -35,7 +35,10 @@ func (r *Registry) Create(id string) (*VM, error) {
 		return nil, err
 	}
 	if err := r.boot(v); err != nil {
-		r.cleanup(v, v.workspaceIsNew)
+		// A workspace this call created is rolled back with it. The purge error
+		// is already logged and there is nothing to tell the caller: the boot
+		// failure is the answer they get.
+		_ = r.cleanup(v, v.workspaceIsNew)
 		return nil, err
 	}
 	if err := r.SetState(v, StateRunning); err != nil {

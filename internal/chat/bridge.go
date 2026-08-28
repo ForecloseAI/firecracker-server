@@ -444,6 +444,22 @@ func (b *Bridge) Unsubscribe(ch chan Frame) {
 	}
 }
 
+// Close ends this bridge for good, for when its machine is deleted.
+//
+// stopIfEmpty is the idle path and leaves the bridge revivable; this is the
+// terminal one. The consumer loops re-resolve the VM on every reconnect by
+// design, so without cancelling them they would retry a machine that no longer
+// exists every fifteen seconds, forever.
+func (b *Bridge) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.idle != nil {
+		b.idle.Stop()
+		b.idle = nil
+	}
+	b.stop()
+}
+
 // stopIfEmpty ends the guest stream when the last browser has really gone.
 func (b *Bridge) stopIfEmpty() {
 	b.mu.Lock()
