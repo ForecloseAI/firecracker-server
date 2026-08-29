@@ -101,13 +101,13 @@ func TestNamingBrowserToolsWithoutTheFlagGrantsNothing(t *testing.T) {
 // one and not the other is a tool that reaches nobody with nothing erroring.
 // That drift is why this is one map rather than two slices.
 func TestTheAllowListIsTheOnlySourceOfBrowserToolNames(t *testing.T) {
-	got := permitted([]string{"Read"}, true)
+	got := permitted([]string{"Read"}, true, nil)
 	for name := range browserAllowed {
 		if !contains(got, name) {
 			t.Errorf("%s is allowed by the filter but never reaches keepAllowed", name)
 		}
 	}
-	if contains(permitted([]string{"Read"}, false), "click") {
+	if contains(permitted([]string{"Read"}, false, nil), "click") {
 		t.Error("a browserless profile had browser names added to its allow list")
 	}
 }

@@ -122,7 +122,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	}
 	gate := NewGate(log, hubOf(team), dir)
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
-		stateDir: stateDirOf(team)}
+		stateDir: stateDirOf(team), mcp: mcpOf(team)}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
 		// keeps every other tool, and the failure shows up in its log rather
@@ -158,6 +158,15 @@ func hubOf(team *Supervisor) *Interactions {
 		return nil
 	}
 	return team.Interactions()
+}
+
+// mcpOf is the machine's registered MCP servers, or nil when this agent has no
+// team -- which is only ever the case in a unit test.
+func mcpOf(team *Supervisor) *MCPManager {
+	if team == nil {
+		return nil
+	}
+	return team.mcp
 }
 
 // stateDirOf is where the machine keeps what it knows about the person, or ""

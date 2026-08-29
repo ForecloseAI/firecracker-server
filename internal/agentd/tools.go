@@ -43,8 +43,9 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := append(append(append(files, rest...), team...), browser...)
-	return keepAllowed(all, permitted(allow, d.browser)), nil
+	remote := mcpTools(d)
+	all := append(append(append(append(files, rest...), team...), browser...), remote...)
+	return keepAllowed(all, permitted(allow, d.browser, namesOf(remote))), nil
 }
 
 // alwaysAllowed are the tools every profile gets whether or not it names them.
@@ -65,16 +66,35 @@ var alwaysAllowed = []string{"remember_about_person"}
 //
 // The names come straight from browserAllowed, which is also what filters the
 // server's tools/list -- so the allow list and the surface cannot drift apart.
-func permitted(allow []string, browser bool) []string {
+//
+// The mcp names must be merged here or they are dropped in SILENCE. Every
+// shipped profile but an empty-list one names its tools explicitly, and a
+// profile written months ago cannot name a server the person registered this
+// morning -- so without this, registration would report success, the tools would
+// be built, and keepAllowed would throw every one of them away with nothing
+// anywhere reporting it. They arrive as the names the wrappers ACTUALLY carry,
+// so this set cannot drift from the surface either.
+func permitted(allow []string, browser bool, mcp []string) []string {
 	if len(allow) == 0 {
 		return allow // an empty list already means everything
 	}
 	out := append(append([]string(nil), allow...), alwaysAllowed...)
+	out = append(out, mcp...)
 	if !browser {
 		return out
 	}
 	for name := range browserAllowed {
 		out = append(out, name)
+	}
+	return out
+}
+
+// namesOf reads the names a group of tools actually produced, so an allow list
+// is derived from the surface rather than computed a second way from the store.
+func namesOf(tools []anthropic.BetaTool) []string {
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, tool.Name())
 	}
 	return out
 }
@@ -94,6 +114,8 @@ type toolDeps struct {
 	chrome   *browserServer
 	snaps    *snapshotStore
 	log      *Log
+	// mcp is the machine's registered remote servers, shared like the browser.
+	mcp *MCPManager
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list

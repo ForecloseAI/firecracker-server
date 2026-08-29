@@ -50,6 +50,11 @@ type Supervisor struct {
 	// connection to the same Chrome.
 	browser *browserServer
 
+	// Every remote MCP server the person has registered. Machine-wide for the
+	// same reason the browser is: a session is a connection to a third party,
+	// and one per agent would multiply them by the roster.
+	mcp *MCPManager
+
 	// What this machine has spent, across every agent. Owned here rather than
 	// per-agent because the question the host asks is "what did this VM cost",
 	// and an evicted agent must not take its share of the answer with it.
@@ -82,13 +87,21 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	if err := roster.EnsureBoss(BossID); err != nil {
 		return nil, err
 	}
+	servers, err := LoadMCPStore(stateDir)
+	if err != nil {
+		return nil, err
+	}
 	return &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
+		mcp:   NewMCPManager(servers),
 		meter: OpenMeter(stateDir), hub: NewInteractions(),
 	}, nil
 }
+
+// MCP is the machine's registered remote MCP servers.
+func (s *Supervisor) MCP() *MCPManager { return s.mcp }
 
 // Interactions exposes the machine's raised hands, for the HTTP surface.
 func (s *Supervisor) Interactions() *Interactions { return s.hub }
@@ -309,8 +322,10 @@ func (s *Supervisor) Close() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
-	// After the agents, not before: one of them may be mid-action on the page.
+	// After the agents, not before: one of them may be mid-action on the page,
+	// or mid-call into a server the person registered.
 	s.browser.Close()
+	s.mcp.Close()
 }
 
 // EvictIdle stops every agent that is not mid-turn, so the next message to one
