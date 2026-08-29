@@ -79,6 +79,12 @@ type Agent struct {
 	cancel      context.CancelFunc
 	convBytes   int
 
+	// What the last request actually cost in input tokens, which is what
+	// compaction triggers on. Read off the response rather than estimated from
+	// convBytes: the two diverge badly once a browsing agent's history fills
+	// with base64 the API is already clearing, and this is the number billed.
+	lastInput int64
+
 	// How many people this agent is currently blocked on. A count rather than a
 	// flag because the runner calls tool handlers concurrently, so two questions
 	// can be open at once.
@@ -218,6 +224,10 @@ func (a *Agent) Run(ctx context.Context) {
 			return
 		case in := <-a.inbox:
 			a.runTurn(ctx, in)
+			// After runTurn, so the turn's canceller is already cleared: this
+			// is bookkeeping between turns, and Interrupt must not appear to
+			// stop it. On the agent's own context, so shutdown still does.
+			a.compactIfNeeded(ctx)
 		}
 	}
 }
@@ -558,6 +568,9 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 		ClearedInputTokens:       cleared,
 		ClearedToolUses:          uses,
 	}
+	a.mu.Lock()
+	a.lastInput = msg.Usage.InputTokens
+	a.mu.Unlock()
 	a.log.Append(Event{Type: "usage", Model: msg.Model, Usage: &used})
 	// The log is this agent's transcript; the meter is the machine's total. Both
 	// are written, because the host must not have to read every agent's log back
