@@ -167,7 +167,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 		fail(w, http.StatusBadRequest, "bad_request", "text is required", "")
 		return
 	}
-	RememberZone(s.sup.stateDir, req.TZ, req.ClientTime)
+	s.sup.RememberZone(req.TZ, req.ClientTime)
 	id, replayed := s.nextMessageID(r.Header.Get("Idempotency-Key"))
 	if replayed {
 		reply(w, http.StatusOK, map[string]any{"message_id": id, "replayed": true})

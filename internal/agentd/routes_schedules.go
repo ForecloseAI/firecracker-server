@@ -38,7 +38,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, scheduleBodyCap, &req) {
 		return
 	}
-	RememberZone(s.sup.stateDir, req.TZ, req.ClientTime)
+	s.sup.RememberZone(req.TZ, req.ClientTime)
 	if req.Name == "" || req.Task == "" || req.Expr == "" {
 		fail(w, http.StatusBadRequest, "bad_request", "name, task and expr are required", "")
 		return
@@ -64,9 +64,18 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteSchedule cancels a schedule.
+//
+// A write that did not land is a 500 and not a 200, for the same reason Add's
+// is: the schedule is still on the disk and comes back at the next restart, so
+// a client told "deleted" would stop showing something that still fires.
 func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.sup.Schedules().Delete(id) {
+	deleted, err := s.sup.Schedules().Delete(id)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "schedule")
+		return
+	}
+	if !deleted {
 		fail(w, http.StatusNotFound, "not_found", "no such schedule", "schedule")
 		return
 	}

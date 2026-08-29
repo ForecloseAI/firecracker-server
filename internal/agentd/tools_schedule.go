@@ -72,6 +72,13 @@ func listSchedulesTool(d toolDeps) (anthropic.BetaTool, error) {
 
 // cancelScheduleTool stops a standing job. Not gated: undoing a commitment does
 // not need the same permission as making one.
+//
+// Only the agent's own jobs, and a colleague's answers the same way an invented
+// id does. list_schedules already filters by owner, so an id belonging to
+// someone else can only have arrived out of band -- a colleague message, a
+// localhost call -- and cancelling on it would undo work its owner is relying
+// on. The route is deliberately not restricted this way: that request is the
+// person, who owns every schedule on the machine.
 func cancelScheduleTool(d toolDeps) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[cancelScheduleInput](
 		"cancel_schedule", "Stop one of your standing scheduled jobs.",
@@ -79,8 +86,17 @@ func cancelScheduleTool(d toolDeps) (anthropic.BetaTool, error) {
 			if d.team == nil {
 				return toolText(noSupervisor), nil
 			}
-			if !d.team.Schedules().Delete(in.ID) {
-				return toolText("There is no schedule " + in.ID + ". Use list_schedules."), nil
+			missing := toolText("There is no schedule " + in.ID + ". Use list_schedules.")
+			if owner, ok := d.team.Schedules().Owner(in.ID); !ok || owner != d.self {
+				return missing, nil
+			}
+			deleted, err := d.team.Schedules().Delete(in.ID)
+			if err != nil {
+				return toolText("Could not cancel " + in.ID + ": " + err.Error() +
+					". It is still scheduled."), nil
+			}
+			if !deleted {
+				return missing, nil
 			}
 			return toolText("Cancelled " + in.ID + "."), nil
 		})

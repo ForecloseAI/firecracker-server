@@ -151,6 +151,37 @@ func TestScheduleIDsAreNotReused(t *testing.T) {
 	}
 }
 
+// A cancellation that only happened in memory is worse than a refused one: the
+// job comes back at the next restart while the person has been told it is gone.
+func TestDeleteReportsAFailedWrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := LoadSchedules(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := store.Add(Schedule{Name: "sweep", Agent: BossID, Expr: "every 30m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the temporary file goes makes the write fail the way a
+	// full or read-only disk would.
+	if err := os.Mkdir(store.path+".tmp", 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := store.Delete(added.ID)
+
+	if err == nil {
+		t.Fatal("a delete that could not be written reported success")
+	}
+	if deleted {
+		t.Error("delete reported the schedule gone despite the failure")
+	}
+	if got := store.List(); len(got) != 1 {
+		t.Errorf("the store holds %d schedules, want the one that could not be deleted", len(got))
+	}
+}
+
 // The store is the durable half of the feature; a schedule that does not survive
 // a restart is one the person agreed to and never gets.
 func TestSchedulesSurviveAReload(t *testing.T) {
@@ -384,6 +415,114 @@ func TestAnInvalidScheduleNeverReachesThePerson(t *testing.T) {
 	if events, _ := gate.log.ReadAll(); len(events) != 0 {
 		t.Errorf("the person was asked about an invalid schedule: %+v", events)
 	}
+}
+
+// cancelAs runs cancel_schedule as one agent.
+func cancelAs(t *testing.T, sup *Supervisor, self, id string) string {
+	t.Helper()
+	tools, err := scheduleTools(toolDeps{team: sup, self: self})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runTool(t, tools, "cancel_schedule", `{"id":"`+id+`"}`)[0].OfText.Text
+}
+
+// list_schedules filters by owner, so an id belonging to a colleague can only
+// have arrived out of band. Cancelling on it would undo work its owner is
+// relying on and never told anyone about.
+func TestCancelOnlyReachesTheCallersOwnSchedules(t *testing.T) {
+	sup := newTestSupervisor(t)
+	sc, err := sup.Schedules().Add(Schedule{Name: "sweep", Agent: "colleague",
+		Task: "check the deploy", Expr: "every 30m", NextRunAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := cancelAs(t, sup, BossID, sc.ID)
+
+	if !strings.Contains(got, "no schedule") {
+		t.Errorf("answer = %q, want a colleague's id to read like an unknown one", got)
+	}
+	if len(sup.Schedules().List()) != 1 {
+		t.Error("an agent cancelled a schedule belonging to someone else")
+	}
+	if got := cancelAs(t, sup, "colleague", sc.ID); !strings.Contains(got, "Cancelled") {
+		t.Errorf("the owner could not cancel its own schedule: %q", got)
+	}
+}
+
+// A person who travels must not get one firing on the zone they left. The
+// stored instant is absolute, so a London 09:00 read in Los Angeles is 01:00
+// local unless it is recomputed when the zone lands.
+func TestAChangedZoneMovesTheClockSchedules(t *testing.T) {
+	sup := newTestSupervisor(t)
+	sup.RememberZone("Europe/London", "")
+	daily, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	every, err := sup.Schedules().Add(Schedule{Name: "sweep", Agent: BossID, Task: "check",
+		Expr: "every 30m", NextRunAt: time.Now().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sup.RememberZone("America/Los_Angeles", "")
+
+	la := mustZone(t, "America/Los_Angeles")
+	got := byID(t, sup, daily.ID).NextRunAt.In(la)
+	if got.Hour() != 9 || got.Minute() != 0 {
+		t.Errorf("next run = %v, want 09:00 in the zone the person moved to", got)
+	}
+	// An interval is not anchored to a wall clock; moving it would only push the
+	// next run further out.
+	if moved := byID(t, sup, every.ID).NextRunAt; !moved.Equal(every.NextRunAt) {
+		t.Errorf("an \"every 30m\" schedule moved from %v to %v on a zone change",
+			every.NextRunAt, moved)
+	}
+}
+
+// The same zone arrives on every message, so the common case must not rewrite
+// the store -- a recompute on each message would walk a daily job forward a day
+// at a time and it would never fire.
+func TestAnUnchangedZoneLeavesSchedulesAlone(t *testing.T) {
+	sup := newTestSupervisor(t)
+	sup.RememberZone("Europe/London", "")
+	sc, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sup.RememberZone("Europe/London", "2026-08-29T14:03:11+01:00")
+
+	if got := byID(t, sup, sc.ID).NextRunAt; !got.Equal(sc.NextRunAt) {
+		t.Errorf("next run moved from %v to %v with no change of zone", sc.NextRunAt, got)
+	}
+}
+
+// nextOf is the first firing of an expression, for a test that needs a schedule
+// already pointing at the right instant.
+func nextOf(t *testing.T, expr string, loc *time.Location) time.Time {
+	t.Helper()
+	sp, err := parseSchedule(expr, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sp.next(time.Now())
+}
+
+// byID reads back one schedule, failing the test if it has gone.
+func byID(t *testing.T, sup *Supervisor, id string) Schedule {
+	t.Helper()
+	for _, sc := range sup.Schedules().List() {
+		if sc.ID == id {
+			return sc
+		}
+	}
+	t.Fatalf("schedule %s is gone", id)
+	return Schedule{}
 }
 
 // The app creates schedules directly rather than through a conversation, so the

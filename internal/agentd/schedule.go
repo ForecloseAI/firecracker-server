@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,16 +106,38 @@ func (s *ScheduleStore) Add(sc Schedule) (Schedule, error) {
 // mintScheduleID returns a short random handle.
 func mintScheduleID() string { return fmt.Sprintf("sch-%06x", rand.N(1<<24)) }
 
-// Delete drops a schedule, reporting whether there was one.
-func (s *ScheduleStore) Delete(id string) bool {
+// Delete drops a schedule, reporting whether there was one and whether the
+// removal reached the disk.
+//
+// A failed write is put back in memory before it is reported. Confirming a
+// cancellation that only happened in RAM is the worst of the three outcomes: the
+// job resumes at the next restart while list_schedules agrees it is gone, so
+// nobody looks again. Restoring it means the error and what the person can see
+// say the same thing.
+func (s *ScheduleStore) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.by[id] == nil {
-		return false
+	rec := s.by[id]
+	if rec == nil {
+		return false, nil
 	}
 	delete(s.by, id)
-	s.saveLocked()
-	return true
+	if err := s.saveLocked(); err != nil {
+		s.by[id] = rec
+		return false, err
+	}
+	return true, nil
+}
+
+// Owner reports which agent a schedule belongs to, and whether it exists.
+func (s *ScheduleStore) Owner(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.by[id]
+	if !ok {
+		return "", false
+	}
+	return rec.Agent, true
 }
 
 // Update edits one schedule in place and persists it. Everything the sweep
@@ -239,6 +262,45 @@ func RememberZone(stateDir, tz, clientTime string) {
 	}
 	if _, err := time.Parse(time.RFC3339, clientTime); err == nil {
 		os.WriteFile(zonePath(stateDir), []byte(clientTime), 0o640)
+	}
+}
+
+// RememberZone records the zone and, when it has actually changed, moves the
+// clock schedules onto it.
+//
+// The method rather than the function is what the HTTP handlers call, because a
+// stored NextRunAt is an absolute instant: a person who books "daily at 09:00"
+// in London and then opens the app in Los Angeles would get one firing at the
+// old 9am -- 01:00 where they now are -- before the schedule settled onto the
+// new zone. The file's own bytes decide whether anything changed, so the usual
+// case, the same zone arriving on every message, costs one read and no writes.
+func (s *Supervisor) RememberZone(tz, clientTime string) {
+	before, _ := os.ReadFile(zonePath(s.stateDir))
+	RememberZone(s.stateDir, tz, clientTime)
+	after, _ := os.ReadFile(zonePath(s.stateDir))
+	if bytes.Equal(before, after) {
+		return
+	}
+	s.rezone(time.Now())
+}
+
+// rezone recomputes the next firing of every enabled clock schedule.
+//
+// "every 30m" is left alone: an interval is not anchored to a wall clock, so
+// moving it would only push the next run further out. A schedule whose
+// expression no longer parses is left for the sweep, which disables it and says
+// why rather than silently skipping it here.
+func (s *Supervisor) rezone(now time.Time) {
+	loc := loadZone(s.stateDir)
+	for _, sc := range s.schedules.List() {
+		if !sc.Enabled {
+			continue
+		}
+		sp, err := parseSchedule(sc.Expr, loc)
+		if err != nil || sp.every > 0 {
+			continue
+		}
+		s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = sp.next(now) })
 	}
 }
 
