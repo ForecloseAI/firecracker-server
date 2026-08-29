@@ -263,3 +263,21 @@ func TestABrowserlessProfileStartsNothing(t *testing.T) {
 		t.Error("a browserless profile started the browser server")
 	}
 }
+
+// The screenshot flags are the difference between a capture costing ~110 KB of
+// conversation and ~930 KB of it. chrome-devtools-mcp defaults to PNG, which is
+// lossless and compresses a page of text badly, so dropping these silently
+// restores that -- and nothing would report it but the bill and a conversation
+// file growing eight times faster.
+func TestScreenshotsAreNotLeftAtThePNGDefault(t *testing.T) {
+	args := strings.Join(MCPServerArgs, " ")
+	for _, want := range []string{
+		"--screenshot-format jpeg",
+		"--screenshot-quality 70",
+		"--screenshot-max-width 1280",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("MCPServerArgs is missing %q; it is %q", want, args)
+		}
+	}
+}

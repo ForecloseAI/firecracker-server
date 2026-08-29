@@ -33,8 +33,22 @@ var (
 	// are dead weight for a browsing agent and their schemas are charged on
 	// every turn -- the node agent measured dropping four tools at ~1,100
 	// tokens off the prefix.
+	// The screenshot flags shrink what a capture costs, in both of the ways it
+	// costs. Xvfb runs at 1920x1080 and the server's own default format is PNG,
+	// which is lossless and compresses a page of text badly: ~930 KB of base64
+	// in the conversation, and ~1,844 tokens once the API scales it to its
+	// 1568px long edge. JPEG at 1280 wide is ~110 KB and ~1,229 tokens, and
+	// upstream documents the format choice as being for exactly this.
+	//
+	// Not narrower than 1280: 1024 would save more, but it is a third off what
+	// the model sees today and dense pages stop being readable. These set
+	// DEFAULTS -- format stays in the tool schema, so a page that needs a
+	// lossless capture can still ask for one.
 	MCPServerArgs = []string{
 		"--no-category-performance", "--no-category-network", "--no-category-emulation",
+		"--screenshot-format", "jpeg",
+		"--screenshot-quality", "70",
+		"--screenshot-max-width", "1280",
 	}
 )
 
