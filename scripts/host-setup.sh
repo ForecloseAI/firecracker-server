@@ -21,7 +21,7 @@ install_deps() {
   echo iptables-persistent iptables-persistent/autosave_v4 boolean false | debconf-set-selections
   echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
   apt-get update -qq
-  apt-get install -y -qq jq curl iptables iptables-persistent e2fsprogs iproute2
+  apt-get install -y -qq jq curl iptables iptables-persistent e2fsprogs iproute2 openssh-client
   echo "dependencies installed"
 }
 
@@ -70,6 +70,34 @@ setup_dirs() {
   chmod 0750 "$BASE" "$BASE/workspaces" "$BASE/run"
   chmod 0555 "$BASE/images"
   echo "directories ready under $BASE"
+}
+
+# --- 3b. The operator's key for reaching a guest ------------------------------
+# Generated for the HUMAN who runs this, not for root and not for $USER_NAME:
+# that account is nologin, and a key owned by root would need sudo on every
+# connection. Only the public half ever leaves this host -- it is baked into the
+# guest image, where its private counterpart never appears.
+setup_guest_key() {
+  local u home key
+  u="${CRACKED_OPERATOR:-${SUDO_USER:-ubuntu}}"
+  # getent, NOT ~$u: bash expands tildes BEFORE parameters, so "~$u" stays a
+  # literal string and ssh-keygen would create a directory named "~ubuntu" in
+  # whatever this script's working directory happens to be.
+  home="$(getent passwd "$u" | cut -d: -f6)"
+  [ -n "$home" ] || { echo "WARN: no home for $u; skipping the guest key"; return; }
+  key="$home/.ssh/cracked_guest"
+  # Never rotate an existing key: the public half is baked into an image that
+  # was already built, and replacing it here would lock the operator out of
+  # every running VM with no error anywhere.
+  if [ ! -f "$key" ]; then
+    install -d -m 0700 -o "$u" -g "$u" "$home/.ssh"
+    # runuser rather than generate-as-root-then-chown: ownership and the 0600
+    # mode come out right by construction.
+    runuser -u "$u" -- ssh-keygen -t ed25519 -N "" -C cracked-guest -f "$key"
+  fi
+  install -m 0755 "$REPO_DIR/scripts/vm-ssh.sh" /usr/local/bin/vm-ssh
+  GUEST_PUBKEY="$(cat "$key.pub")"
+  echo "guest key ready at $key, vm-ssh installed"
 }
 
 # --- 4. Binaries and guest kernel ---------------------------------------------
@@ -229,6 +257,7 @@ install_deps
 check_kvm
 setup_user
 setup_dirs
+setup_guest_key
 install_firecracker
 install_kernel
 verify_kernel_config
@@ -242,7 +271,11 @@ cat <<MSG
 Host setup complete.
 
 Remaining steps:
-  1. Build the guest image:   scripts/build-rootfs.sh
+  1. Build the guest image. The ssh key was generated HERE and is consumed by
+     the build, so pass it explicitly -- otherwise the image ships with no
+     operator key and vm-ssh fails with a bare "Permission denied (publickey)":
+
+       SSH_PUBKEY='${GUEST_PUBKEY:-<run setup_guest_key>}' scripts/build-rootfs.sh
   2. Install the unit:        install -m0644 deploy/cracked.service /etc/systemd/system/
   3. Set the token:           systemctl edit cracked  (Environment=CRACKED_TOKEN=...)
   4. Start:                   systemctl enable --now cracked

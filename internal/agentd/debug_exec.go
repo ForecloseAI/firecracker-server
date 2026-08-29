@@ -31,9 +31,14 @@ type execResp struct {
 //
 // This is an operator surface, not an agent tool: it bypasses the approval Gate
 // deliberately, exactly as the TypeScript agent's /debug/exec does, and sits
-// behind the control plane's authenticated /vms/{id}/agent/ proxy. Inside a
-// microVM it is the ONLY way in -- there is no vsock, no metadata service and no
-// sshd -- so without it a Go VM that misbehaves is a black box.
+// behind the control plane's authenticated /vms/{id}/agent/ proxy.
+//
+// The guest now also runs sshd, so this is no longer the only way in for a
+// human -- but it is still the only way in for the CONTROL PLANE and the
+// dashboard, which hold a bearer token rather than an ssh key. It is also the
+// bootstrap for debugging ssh itself: when sshd will not start you cannot ssh
+// in to find out why, and this reaches the guest over a path that does not
+// depend on it.
 func (s *Server) handleDebugExec(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Cmd == "" {

@@ -17,7 +17,7 @@ verifying Supabase access tokens; everything else is stdlib.
 | `internal/hostnet` | TAP devices and slot→IP/MAC derivation |
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
 | `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd |
-| `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh` |
+| `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh`, `vm-ssh.sh` |
 | `deploy/` | systemd unit for the control plane |
 
 ## Setup
@@ -140,6 +140,49 @@ without rebuilding a guest image. `?purge=true` resets both.
 
 Destructive buttons need two clicks rather than opening a native dialog, so the
 page stays drivable by browser automation.
+
+## A shell inside a VM
+
+Guests run sshd, reachable **only from the host that runs them**. Each tap is a
+point-to-point /30, the firewall has no DNAT or PREROUTING at all, and
+guest-to-guest is dropped — so nothing off the box can reach port 22, and no
+firewall change was needed to make this work.
+
+`host-setup.sh` generates `~/.ssh/cracked_guest` for whoever runs it and installs
+`vm-ssh`. The **public** half is baked into the image at build time:
+
+```sh
+SSH_PUBKEY="$(cat ~/.ssh/cracked_guest.pub)" ANTHROPIC_API_KEY=sk-ant-... scripts/build-rootfs.sh
+```
+
+Unlike the API key in the same image, this is safe to bake: the private half
+never enters a guest, it stays on the host, which is already fully privileged
+over every VM. Rotating it does mean rebuilding the rootfs.
+
+```sh
+vm-ssh                       # one VM running -> straight in
+vm-ssh 1                     # by slot
+vm-ssh 0 -- systemctl status ssh
+vm-ssh --ip 0                # for scp and rsync
+vm-ssh 0 -L 9222:127.0.0.1:9222 -N &   # Chrome DevTools, bound to loopback in the guest
+```
+
+You land as `agent`, which has passwordless sudo — SSH in **is** root on that
+guest. From a laptop it is one hop through the tunnel you already use:
+
+```sh
+ssh -J ubuntu@localhost:2222 -i ~/.ssh/cracked_guest agent@172.16.0.2
+```
+
+Two things that will look like bugs and are not. Host identity is deliberately
+not checked: slots are recycled, so `172.16.0.2` is a different workspace after
+a recreate, and a real `known_hosts` would cry man-in-the-middle on every routine
+recreate. And a **paused** VM's tap is still listed, so `vm-ssh` will reach it
+and time out after five seconds rather than knowing it is frozen.
+
+After a rootfs rebuild, **existing VMs must be deleted and recreated** before
+they have sshd — `build-rootfs.sh` only unlinks the old image, and a running VM
+holds the deleted inode.
 
 ## Metrics
 
