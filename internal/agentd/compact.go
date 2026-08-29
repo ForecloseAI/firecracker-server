@@ -80,7 +80,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 	}
 	a.setState("working")
 	defer a.setState("idle")
-	summary, err := summarize(ctx, a.client, msgs[:cut])
+	summary, err := summarize(ctx, a, msgs[:cut])
 	if err != nil {
 		a.log.Append(Event{Type: "error", Message: "could not compact: " + err.Error()})
 		return
@@ -159,8 +159,12 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 }
 
 // callSummary asks the cheap model to condense the prefix.
-func callSummary(ctx context.Context, c anthropic.Client, msgs []anthropic.BetaMessageParam) (string, error) {
-	msg, err := c.Beta.Messages.New(ctx, anthropic.BetaMessageNewParams{
+//
+// The tokens are booked against the transcript and the meter like any other
+// response. They are real spend on a real model, and a compaction the person
+// never sees must not be a hole in what /usage reports.
+func callSummary(ctx context.Context, a *Agent, msgs []anthropic.BetaMessageParam) (string, error) {
+	msg, err := a.client.Beta.Messages.New(ctx, anthropic.BetaMessageNewParams{
 		Model:     summaryModel,
 		MaxTokens: summaryMaxTokens,
 		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(
@@ -169,6 +173,14 @@ func callSummary(ctx context.Context, c anthropic.Client, msgs []anthropic.BetaM
 	if err != nil {
 		return "", err
 	}
+	// Booked before the text is checked: the call was billed whether or not it
+	// came back usable.
+	a.bookUsage(msg.Model, Usage{
+		InputTokens:              msg.Usage.InputTokens,
+		OutputTokens:             msg.Usage.OutputTokens,
+		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+	})
 	var out strings.Builder
 	for _, block := range msg.Content {
 		if b, ok := block.AsAny().(anthropic.BetaTextBlock); ok {

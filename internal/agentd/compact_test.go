@@ -226,7 +226,7 @@ func TestRenderingLeavesImagesOut(t *testing.T) {
 func stubSummary(t *testing.T, out string, err error) {
 	t.Helper()
 	prev := summarize
-	summarize = func(context.Context, anthropic.Client, []anthropic.BetaMessageParam) (string, error) {
+	summarize = func(context.Context, *Agent, []anthropic.BetaMessageParam) (string, error) {
 		return out, err
 	}
 	t.Cleanup(func() { summarize = prev })
@@ -330,5 +330,35 @@ func TestCompactionDoesNotRepeatWithoutAFreshMeasurement(t *testing.T) {
 	a.compactIfNeeded(context.Background()) // no turn ran in between
 	if got := len(a.Messages()); got != len(once) {
 		t.Errorf("compacted twice with no new measurement: %d -> %d", len(once), got)
+	}
+}
+
+// The summary is a real request to a real model. It is spend the person never
+// sees any output from, so if it does not reach the meter and the transcript,
+// GET /usage under-reports every compaction and the VM's cost quietly drifts
+// from what it actually was.
+func TestSummarySpendReachesTheMeterAndTheTranscript(t *testing.T) {
+	a := newTestAgent(t)
+	a.team = &Supervisor{meter: OpenMeter(t.TempDir())}
+
+	a.bookUsage(summaryModel, Usage{InputTokens: 4000, OutputTokens: 300})
+
+	rows := a.meter().Report().ByModel
+	found := false
+	for _, row := range rows {
+		if row.Model != summaryModel {
+			continue
+		}
+		found = true
+		if row.InputTokens != 4000 || row.OutputTokens != 300 {
+			t.Errorf("meter booked %d in / %d out, want 4000 / 300",
+				row.InputTokens, row.OutputTokens)
+		}
+	}
+	if !found {
+		t.Fatalf("the summary model is absent from the meter: %+v", rows)
+	}
+	if !loggedType(a, "usage") {
+		t.Error("the summary call left no usage event in the transcript")
 	}
 }

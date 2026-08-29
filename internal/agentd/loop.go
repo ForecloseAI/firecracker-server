@@ -571,11 +571,19 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 	a.mu.Lock()
 	a.lastInput = msg.Usage.InputTokens
 	a.mu.Unlock()
-	a.log.Append(Event{Type: "usage", Model: msg.Model, Usage: &used})
-	// The log is this agent's transcript; the meter is the machine's total. Both
-	// are written, because the host must not have to read every agent's log back
-	// to answer what the VM has cost.
-	a.meter().Record(msg.Model, used)
+	a.bookUsage(msg.Model, used)
+}
+
+// bookUsage puts one response's tokens in both places that account for spend.
+//
+// The log is this agent's transcript; the meter is the machine's total. Both are
+// written, because the host must not have to read every agent's log back to
+// answer what the VM has cost. Separate from record so that a call the person
+// never sees -- the compaction summary -- is still paid for in both, rather than
+// spending real tokens that /usage cannot account for.
+func (a *Agent) bookUsage(model string, used Usage) {
+	a.log.Append(Event{Type: "usage", Model: model, Usage: &used})
+	a.meter().Record(model, used)
 }
 
 // meter is the machine's spend counter, or nil when this agent has no team --
