@@ -198,6 +198,25 @@ type Record struct {
 	Task      *Task     `json:"task,omitempty"`
 }
 
+// Schedule is a standing instruction to message an agent at a given time.
+//
+// Task is the message itself, and it can be short and referential -- "check the
+// deploy queue again" -- because it lands in the conversation of the very agent
+// that asked for it, which is the whole reason firing into the agent's own inbox
+// is simpler than running it in isolation.
+type Schedule struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Agent string `json:"agent"`
+	Task  string `json:"task"`
+	Expr  string `json:"expr"`
+
+	NextRunAt time.Time `json:"next_run_at"`
+	LastFired time.Time `json:"last_fired_at,omitzero"`
+	Fires     int       `json:"fires"`
+	Enabled   bool      `json:"enabled"`
+}
+
 // Status is one agent as GET /agents reports it: identity plus what it is doing.
 type Status struct {
 	ID           string `json:"id"`

@@ -97,6 +97,10 @@ type Agent struct {
 type inbound struct {
 	text string
 	from string
+	// schedule names the timer that started this, and is empty for everything
+	// else. Deliberately not folded into from: that means "another agent on this
+	// machine", and a timer rendered as a colleague is a lie in the transcript.
+	schedule string
 	// file is something the person attached. Kept beside the text rather than
 	// pasted into it: the model needs to be told the path, and the transcript
 	// needs to show what they actually typed.
@@ -260,6 +264,20 @@ func (a *Agent) SendFile(text string, file *agentapi.File) error {
 	// runs, which reads as "my message did not send" -- and appending BEFORE the
 	// enqueue would do the opposite, showing a message the agent refused.
 	a.log.Append(Event{Type: "user", Text: text, File: file})
+	return nil
+}
+
+// SendScheduled queues a turn started by a timer rather than by the person.
+//
+// Logged as "scheduled" and not "user", because the transcript must never show
+// the person saying words they did not type. Event.Type is a free string and
+// TaskTitle already exists, so this needs nothing new on the wire and an older
+// client renders an unknown event rather than breaking.
+func (a *Agent) SendScheduled(name, text string) error {
+	if err := a.enqueue(inbound{text: text, schedule: name}); err != nil {
+		return err
+	}
+	a.log.Append(Event{Type: "scheduled", TaskTitle: name, Text: text})
 	return nil
 }
 
@@ -701,10 +719,25 @@ func frame(in inbound) string {
 	if in.file != nil {
 		return withFile(in.text, in.file)
 	}
+	if in.schedule != "" {
+		return scheduleNote(in.schedule) + "\n\n" + in.text
+	}
 	if in.from == "" {
 		return in.text
 	}
 	return "Message from the agent \"" + in.from + "\", a colleague on this machine:\n\n" + in.text
+}
+
+// scheduleNote tells the model a timer started this and nobody may be watching.
+//
+// The instruction to ask everything at once is the load-bearing part: an
+// approval raised here waits for the person rather than failing, so a run that
+// asks one question at a time spends a night per question.
+func scheduleNote(name string) string {
+	return "[Scheduled task \"" + name + "\" - a timer started this, not the person." +
+		" They may not be at the keyboard. If you need approval the run will wait" +
+		" for them, so ask for everything you need at once rather than one thing" +
+		" at a time.]"
 }
 
 // withFile tells the model where an attachment landed. The path is the only part

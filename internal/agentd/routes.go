@@ -27,6 +27,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
 	mux.HandleFunc("GET /agents/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /agents/{id}/shots/{name}", s.handleShot)
+	mux.HandleFunc("GET /schedules", s.handleListSchedules)
+	mux.HandleFunc("POST /schedules", s.handleCreateSchedule)
+	mux.HandleFunc("DELETE /schedules/{id}", s.handleDeleteSchedule)
 	mux.HandleFunc("GET /person", s.handleGetPerson)
 	mux.HandleFunc("PUT /person", s.handlePutPerson)
 	mux.HandleFunc("POST /files", s.handleUpload)
@@ -145,9 +148,15 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendReq is the body of POST /agents/{id}/messages.
+// ClientTime and TZ carry the person's timezone, which the guest cannot know on
+// its own -- it runs UTC, so "daily at 09:00" would otherwise mean 9am nowhere in
+// particular. Sent on every message because the client already makes this call
+// and the answer can change when they travel.
 type sendReq struct {
-	Text string         `json:"text"`
-	File *agentapi.File `json:"file,omitempty"`
+	Text       string         `json:"text"`
+	File       *agentapi.File `json:"file,omitempty"`
+	ClientTime string         `json:"client_time,omitempty"`
+	TZ         string         `json:"tz,omitempty"`
 }
 
 // handleMessage queues a user turn and returns immediately. The turn itself can
@@ -158,6 +167,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 		fail(w, http.StatusBadRequest, "bad_request", "text is required", "")
 		return
 	}
+	RememberZone(s.sup.stateDir, req.TZ, req.ClientTime)
 	id, replayed := s.nextMessageID(r.Header.Get("Idempotency-Key"))
 	if replayed {
 		reply(w, http.StatusOK, map[string]any{"message_id": id, "replayed": true})

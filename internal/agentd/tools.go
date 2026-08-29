@@ -43,7 +43,11 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := append(append(append(files, rest...), team...), browser...)
+	sched, err := scheduleTools(d)
+	if err != nil {
+		return nil, err
+	}
+	all := append(append(append(append(files, rest...), team...), browser...), sched...)
 	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
 
@@ -51,7 +55,12 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // Anything about the person belongs to all of them equally, and requiring six
 // profile files -- and every future one -- to remember a name is how a tool ends
 // up missing from exactly the agent that needed it.
-var alwaysAllowed = []string{"remember_about_person"}
+// Scheduling is here for the same reason: an agent that cannot put itself on a
+// timer has to ask the boss to do it, and the tool creating one is gated anyway,
+// so the person still agrees to every job whichever agent proposed it.
+var alwaysAllowed = []string{
+	"remember_about_person", "schedule_task", "list_schedules", "cancel_schedule",
+}
 
 // permitted expands what a profile allows with the tools it does not have to ask
 // for: the always-on ones, and the browser surface when it declares a browser.

@@ -55,6 +55,13 @@ type Supervisor struct {
 	// and an evicted agent must not take its share of the answer with it.
 	meter *Meter
 
+	// Standing instructions to message an agent at a given time. Machine-wide
+	// because the sweep has to see every agent's schedules in one pass, and
+	// because a schedule must outlive the agent being evicted.
+	schedules *ScheduleStore
+	sweepDone chan struct{}
+	sweepOnce sync.Once
+
 	// Every agent currently waiting on a person. Machine-wide, because a raised
 	// hand belongs to the team rather than to one agent's transcript, and the
 	// person answering it must be able to reach whichever agent raised it.
@@ -82,13 +89,27 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	if err := roster.EnsureBoss(BossID); err != nil {
 		return nil, err
 	}
-	return &Supervisor{
+	schedules, err := LoadSchedules(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	s := &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
-		meter: OpenMeter(stateDir), hub: NewInteractions(),
-	}, nil
+		meter: OpenMeter(stateDir), hub: NewInteractions(), schedules: schedules,
+		sweepDone: make(chan struct{}),
+	}
+	// Past occurrences are stepped over rather than fired: the VM was off, and a
+	// machine asleep for a week must not wake into a week of backlog.
+	s.rollForward(time.Now())
+	s.wg.Add(1)
+	go s.runSchedules()
+	return s, nil
 }
+
+// Schedules exposes the machine's schedules, for the HTTP surface and the tools.
+func (s *Supervisor) Schedules() *ScheduleStore { return s.schedules }
 
 // Interactions exposes the machine's raised hands, for the HTTP surface.
 func (s *Supervisor) Interactions() *Interactions { return s.hub }
@@ -303,6 +324,11 @@ func (s *Supervisor) stopLocked(id string) {
 // because a turn winding down can still need it -- reporting back to a
 // delegator goes through Deliver, which takes s.mu.
 func (s *Supervisor) Close() {
+	// Before the wait, and not left to s.ctx: the sweep is tracked by the same
+	// wg as the agents, and a caller whose context outlives the supervisor --
+	// every test builds one from context.Background() -- would otherwise wait
+	// on a goroutine with nothing to stop it.
+	s.stopSweep()
 	s.mu.Lock()
 	for id := range s.agents {
 		s.stopLocked(id)

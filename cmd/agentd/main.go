@@ -19,6 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	// The zoneinfo database, embedded. A schedule is stored in the person's own
+	// timezone, and the guest image is not required to ship /usr/share/zoneinfo
+	// -- without this a named zone would silently resolve to UTC and every
+	// "daily at 09:00" would fire at the wrong hour.
+	_ "time/tzdata"
+
 	"cracked/internal/agentd"
 )
 
