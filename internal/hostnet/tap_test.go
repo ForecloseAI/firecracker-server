@@ -1,6 +1,9 @@
 package hostnet
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // TestSlotAddrs checks the /30-per-VM arithmetic, including the 256 rollover.
 func TestSlotAddrs(t *testing.T) {
@@ -34,6 +37,41 @@ func TestSlotAddrsDistinct(t *testing.T) {
 				t.Fatalf("slot %d reuses %q from slot %d", i, key, prev)
 			}
 			seen[key] = i
+		}
+	}
+}
+
+// TestGuestIsHostPlusOneWithinTheSame24 pins the arithmetic scripts/vm-ssh.sh
+// depends on from the other side of a language boundary.
+//
+// That helper finds running VMs by reading live tap addresses and incrementing
+// the last octet, which is only safe because 4*slot+1 is always 1 mod 4: the
+// host octet is therefore at most 253 and the increment can never carry into
+// the next /24. MaxVMs makes that unreachable in production today; this makes
+// it unreachable for good, so a future change to SlotAddrs fails here rather
+// than turning vm-ssh into a tool that connects to the wrong machine.
+func TestGuestIsHostPlusOneWithinTheSame24(t *testing.T) {
+	for _, slot := range []int{0, 1, 4, 62, 63, 64, 127, 128, 255, 256, 1000} {
+		host, guest, _ := SlotAddrs(slot)
+		var ha, hb, hc, hd, ga, gb, gc, gd int
+		if _, err := fmt.Sscanf(host, "%d.%d.%d.%d", &ha, &hb, &hc, &hd); err != nil {
+			t.Fatalf("slot %d: unparseable host %q", slot, host)
+		}
+		if _, err := fmt.Sscanf(guest, "%d.%d.%d.%d", &ga, &gb, &gc, &gd); err != nil {
+			t.Fatalf("slot %d: unparseable guest %q", slot, guest)
+		}
+		if ha != ga || hb != gb || hc != gc {
+			t.Errorf("slot %d: %s and %s are in different /24s", slot, host, guest)
+		}
+		if gd != hd+1 {
+			t.Errorf("slot %d: guest %s is not host %s plus one", slot, guest, host)
+		}
+		if hd%4 != 1 {
+			t.Errorf("slot %d: host octet %d is not 1 mod 4, so vm-ssh's filter drops it",
+				slot, hd)
+		}
+		if hd > 253 {
+			t.Errorf("slot %d: host octet %d would carry on increment", slot, hd)
 		}
 	}
 }
