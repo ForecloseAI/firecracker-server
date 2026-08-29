@@ -208,6 +208,10 @@ func serverEnv() []string {
 		"CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1")
 }
 
+// label is what a failure message calls this server. Every existing message
+// read "the browser ...", and this keeps them byte-identical.
+func (s *browserServer) label() string { return "the browser" }
+
 // drop retires a session that has died, so the next call reconnects.
 func (s *browserServer) drop(dead *mcpsdk.ClientSession) {
 	s.mu.Lock()

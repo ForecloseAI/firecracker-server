@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"cracked/internal/agentapi"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	anthropicmcp "github.com/anthropics/anthropic-sdk-go/mcp"
@@ -14,7 +19,21 @@ import (
 // ever sees it.
 const snapshotToolName = "take_snapshot"
 
-// mcpTool is one chrome-devtools-mcp tool as the model sees it.
+// mcpSession is what a tool wrapper needs from whatever server owns it: a live
+// session, a way to retire a dead one, and a name to blame when neither works.
+//
+// browserServer already had the first two written exactly this way, so the
+// browser satisfies this with nothing but a label. The third is not decoration:
+// without it an agent whose Notion call fails is told "the browser is not
+// answering", and it acts on that by taking a snapshot.
+type mcpSession interface {
+	session(ctx context.Context) (*mcpsdk.ClientSession, error)
+	drop(dead *mcpsdk.ClientSession)
+	label() string
+}
+
+// mcpTool is one MCP tool as the model sees it, from the browser or from a
+// server the person registered.
 //
 // Deliberately not mcp.NewBetaTool. That helper binds a tool to one session and
 // drops most of the schema, and both are bugs we would otherwise ship: Tools()
@@ -22,11 +41,24 @@ const snapshotToolName = "take_snapshot"
 // leave every existing agent holding tools pointed at a corpse. This one
 // resolves the session on every call.
 type mcpTool struct {
-	name   string
+	// name is what the MODEL calls it: bare for the browser, namespaced for a
+	// registered server. wire is what the SERVER answers to.
+	//
+	// Two fields and not one. Sending the namespaced name back over the wire
+	// would make every registered tool fail with "unknown tool" at CALL time --
+	// after registration reported success, after the schema reached the model,
+	// and visible nowhere but a transcript.
+	name string
+	wire string
+
 	desc   string
 	schema anthropic.BetaToolInputSchemaParam
-	srv    *browserServer
+	srv    mcpSession
 	deps   toolDeps
+
+	// callTimeout bounds one call. Zero for the browser, which rides the turn's
+	// context exactly as it always has.
+	callTimeout time.Duration
 }
 
 func (t *mcpTool) Name() string        { return t.name }
@@ -64,11 +96,13 @@ func (t *mcpTool) Execute(ctx context.Context,
 // calling into a corpse, because a dead transport and a refusal arrive as the
 // same is_error text and it has no way to tell them apart.
 func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallToolResult, error) {
+	ctx, cancel := t.bounded(ctx)
+	defer cancel()
 	sess, err := t.srv.session(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the browser is not answering: %w", err)
+		return nil, fmt.Errorf("%s is not answering: %w", t.srv.label(), err)
 	}
-	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.name, Arguments: args})
+	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.wire, Arguments: args})
 	if err == nil {
 		return res, nil
 	}
@@ -76,27 +110,46 @@ func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallTo
 	return t.retry(ctx, args)
 }
 
+// bounded caps one call. CallTool has no timeout of its own and rides the turn's
+// context, so a server that accepts a connection and then says nothing would
+// hold the turn open until the person gave up. Zero leaves the browser where it
+// has always been.
+func (t *mcpTool) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if t.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, t.callTimeout)
+}
+
 // retry gets one more attempt on a freshly spawned server.
 func (t *mcpTool) retry(ctx context.Context, args map[string]any) (*mcpsdk.CallToolResult, error) {
 	sess, err := t.srv.session(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the browser stopped answering: %w", err)
+		return nil, fmt.Errorf("%s stopped answering: %w", t.srv.label(), err)
 	}
-	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.name, Arguments: args})
+	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.wire, Arguments: args})
 	if err != nil {
 		t.srv.drop(sess)
-		return nil, fmt.Errorf("the browser stopped answering: %w", err)
+		return nil, fmt.Errorf("%s stopped answering: %w", t.srv.label(), err)
 	}
 	return res, nil
 }
 
 // blocks converts the server's content, digesting a snapshot on the way past.
+//
+// StructuredContent is checked first because a third-party server may answer
+// with only that: the spec allows it, chrome-devtools-mcp never does it, and
+// without this the model would be handed an empty result and told nothing went
+// wrong.
 func (t *mcpTool) blocks(res *mcpsdk.CallToolResult) []anthropic.BetaToolResultBlockParamContentUnion {
+	if len(res.Content) == 0 && res.StructuredContent != nil {
+		return textBlocks(marshalOrNote(res.StructuredContent))
+	}
 	out := make([]anthropic.BetaToolResultBlockParamContentUnion, 0, len(res.Content))
 	for _, c := range res.Content {
 		block, err := anthropicmcp.ToBlock(c)
 		if err != nil {
-			return textBlocks("the browser sent something I cannot pass on: " + err.Error())
+			return textBlocks(t.srv.label() + " sent something I cannot pass on: " + err.Error())
 		}
 		out = append(out, block)
 	}
@@ -135,15 +188,77 @@ func digestSnapshotBlocks(blocks []anthropic.BetaToolResultBlockParamContentUnio
 	}
 }
 
-// wrapAll turns the server's tools into the surface the model is offered.
-func wrapAll(tools []*mcpsdk.Tool, srv *browserServer, d toolDeps) []anthropic.BetaTool {
+// wrapAll turns the browser's tools into the surface the model is offered.
+// Bare names, and name == wire: renaming them would invalidate every beats
+// entry and every profile's tools: list for no gain at all.
+func wrapAll(tools []*mcpsdk.Tool, srv mcpSession, d toolDeps) []anthropic.BetaTool {
 	out := make([]anthropic.BetaTool, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, &mcpTool{
-			name: t.Name, desc: t.Description, schema: schemaOf(t), srv: srv, deps: d,
+			name: t.Name, wire: t.Name, desc: t.Description, schema: schemaOf(t),
+			srv: srv, deps: d,
 		})
 	}
 	return out
+}
+
+// wrapSpecs turns one registered server's stored tools into the model's
+// surface, under names namespaced to the server that advertised them.
+//
+// Built from specs rather than a live listing: an agent must start when a
+// registered server is down, and these schemas were captured when the person
+// registered it. It carries no toolDeps -- a registered tool has no per-agent
+// state, so the wrappers are safe to build once and share.
+func wrapSpecs(specs []mcpToolSpec, srv mcpSession, id string, timeout time.Duration) []anthropic.BetaTool {
+	out := make([]anthropic.BetaTool, 0, len(specs))
+	for _, s := range specs {
+		name := modelName(id, s.Name)
+		if !validToolName(name) {
+			continue // refused at registration; belt and braces here
+		}
+		out = append(out, &mcpTool{
+			name: name, wire: s.Name, desc: s.Desc, schema: schemaOfRaw(s.Schema),
+			srv: srv, callTimeout: timeout,
+		})
+	}
+	return out
+}
+
+// maxToolName is the Messages API limit on a tool name: 1-128 characters,
+// letters, digits, underscores and hyphens.
+const maxToolName = 128
+
+var toolNameShape = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// modelName is the namespaced name a registered tool is offered under.
+func modelName(serverID, tool string) string {
+	return agentapi.MCPToolPrefix + serverID + "__" + tool
+}
+
+// validToolName reports whether the API will accept a name.
+//
+// Checked when the person registers, not when the model calls: the alternative
+// is a 400 on their next turn naming a tool they have never heard of.
+func validToolName(name string) bool {
+	return name != "" && len(name) <= maxToolName && toolNameShape.MatchString(name)
+}
+
+// schemaOfRaw revives a stored schema, keeping every key the server advertised.
+func schemaOfRaw(raw json.RawMessage) anthropic.BetaToolInputSchemaParam {
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return anthropic.BetaToolInputSchemaParam{}
+	}
+	return anthropic.BetaToolInputSchema(m)
+}
+
+// marshalOrNote renders a structured-only result, or says why it could not.
+func marshalOrNote(v any) string {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		return "this tool answered with something that could not be read"
+	}
+	return strings.TrimSpace(string(buf))
 }
 
 // schemaOf preserves the whole JSON schema the server advertised.

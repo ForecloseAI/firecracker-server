@@ -181,6 +181,63 @@ type Profile struct {
 	Prompt      string   `json:"-"`
 }
 
+// MCPToolPrefix marks a tool contributed by a server the person registered.
+//
+// Declared here because the guest MINTS these names and the host RENDERS them,
+// and two constants that have to agree are exactly what this package exists to
+// stop. Bare names belong to the browser and to this daemon's own tools.
+const MCPToolPrefix = "mcp__"
+
+// MCPServer is one registered server as a client sees it.
+//
+// There is no field holding a header VALUE anywhere in this struct, and that is
+// the point: the record on disk keeps the person's token, this does not, and
+// only agentd's redact() converts one to the other. A single type with a
+// write-only field would leave a secret one forgotten line away from the app.
+type MCPServer struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	Transport string    `json:"transport"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// HeaderKeys names the auth headers that are set, WITHOUT their values.
+	// Not a masked value: a client that read this and echoed it into a later
+	// write would put the literal mask into the Authorization header, and the
+	// server would start refusing every call with no sign anywhere of why.
+	HeaderKeys []string `json:"header_keys,omitempty"`
+
+	// Tools is what the last probe found, by MODEL-facing name, so the person
+	// is shown the names their agents will actually call.
+	Tools []string `json:"tools"`
+
+	// The LAST probe, never a fresh one: listing must not dial.
+	Reachable bool      `json:"reachable"`
+	Checked   time.Time `json:"checked,omitzero"`
+	Error     string    `json:"error,omitempty"`
+}
+
+// MCPRegistration is the body of POST /mcp. Headers carry secrets in the clear
+// on the way in and are never returned on the way out.
+type MCPRegistration struct {
+	Name      string            `json:"name"`
+	URL       string            `json:"url"`
+	Transport string            `json:"transport,omitempty"` // http (default) or sse
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+// MCPUpdate is the body of PATCH /mcp/{id}: the one field that may change after
+// registration. Changing a URL or a token is a delete and a re-add, so a live
+// session can never outlive the credentials that opened it.
+//
+// A pointer, not a bool. A client sending {} would otherwise be indistinguishable
+// from one asking to disable the server, and the person's tools would vanish on
+// an empty request.
+type MCPUpdate struct {
+	Enabled *bool `json:"enabled"`
+}
+
 // Task is a piece of work an agent has open.
 type Task struct {
 	Slug      string    `json:"slug"`
