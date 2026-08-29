@@ -382,6 +382,8 @@ func TestNewRoutesNeedAToken(t *testing.T) {
 		{"GET", "/v1/agent-types"}, {"POST", "/v1/agents"},
 		{"DELETE", "/v1/agents/coder"}, {"POST", "/v1/threads/boss/messages"},
 		{"DELETE", "/v1/account"},
+		{"GET", "/v1/mcp"}, {"POST", "/v1/mcp"},
+		{"PATCH", "/v1/mcp/notion"}, {"DELETE", "/v1/mcp/notion"},
 	} {
 		r := httptest.NewRequest(c.method, c.path, strings.NewReader("{}"))
 		w := httptest.NewRecorder()

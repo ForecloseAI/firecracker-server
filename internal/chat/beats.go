@@ -3,6 +3,8 @@ package chat
 import (
 	"encoding/json"
 	"strings"
+
+	"cracked/internal/agentapi"
 )
 
 // Beat labels come from tool names, not from model text: no extra model call,
@@ -88,10 +90,44 @@ func memoryBeat(path string) (label, detail string, ok bool) {
 // not worth narrating. Write and Edit are relabelled when they land in the
 // memory tree: remembering something should not read like saving a scratch file.
 func beatLabel(tool string, input json.RawMessage) (label, detail string) {
+	if strings.HasPrefix(tool, agentapi.MCPToolPrefix) {
+		return mcpBeat(tool), ""
+	}
 	if tool == "Write" || tool == "Edit" {
 		if label, detail, ok := memoryBeat(filePath(input)); ok {
 			return label, detail
 		}
 	}
 	return beats[tool], ""
+}
+
+// mcpBeat narrates a call into a server the person registered.
+//
+// The map above cannot hold an entry for these: the names are minted on the
+// guest when somebody registers a server, and are not knowable when this file is
+// compiled. The map's own rule is that a missing entry renders as SILENCE rather
+// than as a generic line -- so without this, every call to every server the
+// person went to the trouble of adding is a turn they watch go by with nothing
+// said at all.
+//
+// Everything goes in the LABEL. The page reads only the label and drops an empty
+// one, so a detail here would be invisible.
+func mcpBeat(tool string) string {
+	rest := strings.TrimPrefix(tool, agentapi.MCPToolPrefix)
+	server, action, ok := strings.Cut(rest, "__")
+	if !ok || server == "" || action == "" {
+		return "Using a connected app"
+	}
+	return displayID(server) + ": " + spaced(action)
+}
+
+// displayID renders a server id the way a person named it: notion -> Notion.
+// Ids are lowercase ASCII by construction, so indexing the first byte is safe.
+func displayID(id string) string {
+	return strings.ToUpper(id[:1]) + spaced(id[1:])
+}
+
+// spaced turns a tool name into words.
+func spaced(s string) string {
+	return strings.NewReplacer("_", " ", "-", " ").Replace(s)
 }

@@ -255,6 +255,56 @@ honouring it here would let whoever runs the service act as any account. Every
 `/v1` route answers **401** rather than redirecting, so a client never receives
 an HTML login page where it expected JSON.
 
+### Connecting MCP servers
+
+The app can give a person's agents tools from a **remote MCP server** — Linear,
+Notion, an in-house endpoint — under `/v1/mcp`. Registration is per machine, so
+every agent on it gets the tools; there is no per-agent switch, deliberately,
+because everyone on a machine works for the same person.
+
+```sh
+A() { curl -sS -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' "$@"; }
+
+A $H/v1/mcp                                        # list
+A -X POST $H/v1/mcp -d '{"name":"Notion",
+  "url":"https://mcp.notion.com/mcp","transport":"http",
+  "headers":{"Authorization":"Bearer <token>"}}'   # 201 + the tools it offers
+A -X PATCH  $H/v1/mcp/notion -d '{"enabled":false}'  # keep it, stop using it
+A -X DELETE $H/v1/mcp/notion                         # forget it entirely
+```
+
+`transport` is `http` (streamable, the default) or `sse`. **Only remote HTTP(S)
+servers** can be registered — there is no stdio form, so the app cannot make a
+guest run a command.
+
+Registering **probes the server**: it connects, reads every page of `tools/list`,
+and answers with the tools your agents will actually be offered. An unreachable
+server is a `502` and stores nothing, so a registration in the list is one that
+worked. Four refusals are distinct and mean different things — `400` fix the URL
+or the token, `409` you already have this one, `404` it is gone, `502` the server
+did not answer.
+
+Two things about the guest's network are worth knowing before you debug a
+refusal. Guests reach the public internet but the RFC1918 ranges and link-local
+are firewalled off, so a URL naming your laptop or the VPC can never work and is
+refused immediately rather than after a timeout. And a server that refuses the
+handshake says so in those words — that is a wrong token, not a server that is
+down.
+
+Tools arrive namespaced as `mcp__<server>__<tool>`, which is what keeps two
+servers offering `search` from shadowing each other. The browser's own tools stay
+bare.
+
+**Reads never dial.** `GET /v1/mcp` reports the last probe — `reachable`,
+`checked`, `error` — so an app polling it does not open a connection to somebody
+else's server on every tick. **Auth headers are stored on the overlay and never
+returned**: a read reports `header_keys` naming what is set, without the values.
+Changing a URL or a token is a delete and a re-add.
+
+A change takes effect on idle agents at once; one that is mid-turn keeps the
+tools it started with, and picks up the change when it next goes idle. Disabling
+or removing a server also stops it answering an agent that is already running.
+
 ### The built-in web page
 
 `/chat` and its `/api/*` routes are an operator tool, gated on `CRACKED_TOKEN`

@@ -53,3 +53,41 @@ func TestBeatLabel(t *testing.T) {
 		})
 	}
 }
+
+// TestARegisteredToolIsNarratedRatherThanWatchedInSilence is the one that
+// matters here. The beats map cannot name a tool that did not exist when this
+// was compiled, and a name it does not hold renders as nothing at all -- so the
+// person would watch a turn go by while their own connected app was being used.
+func TestARegisteredToolIsNarratedRatherThanWatchedInSilence(t *testing.T) {
+	cases := []struct{ tool, want string }{
+		{"mcp__notion__search_pages", "Notion: search pages"},
+		{"mcp__linear-eu__create_issue", "Linear eu: create issue"},
+		{"mcp__notion__", "Using a connected app"},
+		{"mcp__", "Using a connected app"},
+		{"mcp__nounderscores", "Using a connected app"},
+	}
+	for _, c := range cases {
+		got, _ := beatLabel(c.tool, nil)
+		if got != c.want {
+			t.Errorf("beatLabel(%q) = %q, want %q", c.tool, got, c.want)
+		}
+	}
+}
+
+// TestNoRegisteredToolEverRendersAsSilence states the invariant directly, so a
+// future change to the parsing cannot reintroduce the empty label.
+func TestNoRegisteredToolEverRendersAsSilence(t *testing.T) {
+	for _, tool := range []string{"mcp__", "mcp____", "mcp__a__b", "mcp__x", "mcp__ __ "} {
+		if got, _ := beatLabel(tool, nil); got == "" {
+			t.Errorf("beatLabel(%q) rendered as silence", tool)
+		}
+	}
+}
+
+// TestBrowserBeatsAreStillBare guards the decision not to namespace the browser,
+// which would have invalidated every entry in the map above.
+func TestBrowserBeatsAreStillBare(t *testing.T) {
+	if got, _ := beatLabel("take_snapshot", nil); got != "Reading the page" {
+		t.Errorf("the browser lost its label: %q", got)
+	}
+}

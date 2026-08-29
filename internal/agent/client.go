@@ -95,8 +95,7 @@ func (c *Client) get(path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return &StatusError{Code: resp.StatusCode, Path: path}
+		return refusal(path, resp)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -124,11 +123,28 @@ func (c *Client) post(path string, body any, hdr map[string]string) error {
 type StatusError struct {
 	Code int
 	Path string
+
+	// Message is the guest's own explanation, read off its apiError body.
+	//
+	// Without it "this address is on a private network, which this machine's
+	// agents cannot reach" arrives at the app as a bare 400 and the person is
+	// told nothing they can act on. Error() deliberately does not use it, so
+	// nothing that already formats a StatusError changes.
+	Message string
 }
 
 // Error renders the refusal.
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("agent %s: %d", e.Path, e.Code)
+}
+
+// refusal reads the guest's reason off a body that was previously discarded.
+func refusal(path string, resp *http.Response) *StatusError {
+	var out struct {
+		Message string `json:"message"`
+	}
+	json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&out)
+	return &StatusError{Code: resp.StatusCode, Path: path, Message: out.Message}
 }
 
 // write posts a JSON body on the longer timeout and decodes the reply. Used for
@@ -155,8 +171,7 @@ func (c *Client) decode(req *http.Request, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return &StatusError{Code: resp.StatusCode, Path: path}
+		return refusal(path, resp)
 	}
 	if out == nil {
 		return nil
@@ -276,6 +291,41 @@ func (c *Client) Person() (agentapi.Person, error) {
 // SetPerson replaces that profile with what onboarding collected.
 func (c *Client) SetPerson(p agentapi.Person) error {
 	return c.write(http.MethodPut, "/person", p, nil)
+}
+
+// MCPServers lists the remote MCP servers registered on this machine.
+//
+// The read client: the guest answers this off its own store and dials none of
+// them, so it is as cheap as any other poll.
+func (c *Client) MCPServers() ([]agentapi.MCPServer, error) {
+	var out []agentapi.MCPServer
+	err := c.get("/mcp", &out)
+	return out, err
+}
+
+// AddMCPServer registers a server and reports what it offers.
+//
+// The WRITE client, and not out of habit: the guest connects to the server and
+// lists its tools before answering. The 2s read client would cut that off, and
+// the failure would be the worst shape available -- the caller told it failed
+// while the guest has already stored it, so the person's retry is refused as a
+// duplicate of a server they were just told was not registered.
+func (c *Client) AddMCPServer(reg agentapi.MCPRegistration) (agentapi.MCPServer, error) {
+	var out agentapi.MCPServer
+	err := c.write(http.MethodPost, "/mcp", reg, &out)
+	return out, err
+}
+
+// SetMCPEnabled turns one registered server on or off.
+func (c *Client) SetMCPEnabled(id string, on bool) (agentapi.MCPServer, error) {
+	var out agentapi.MCPServer
+	err := c.write(http.MethodPatch, "/mcp/"+id, agentapi.MCPUpdate{Enabled: &on}, &out)
+	return out, err
+}
+
+// RemoveMCPServer forgets a server and closes whatever connection it had.
+func (c *Client) RemoveMCPServer(id string) error {
+	return c.write(http.MethodDelete, "/mcp/"+id, nil, nil)
 }
 
 // Upload streams a file into the guest's uploads folder and says where it landed.
