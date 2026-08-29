@@ -30,6 +30,8 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/threads/{id}/messages", s.apiGuard(s.sendMessage))
 	mux.HandleFunc("POST /v1/threads/{id}/files", s.apiGuard(s.uploadFile))
 	mux.HandleFunc("GET /v1/threads/{id}/shots/{name}", s.apiGuard(s.getShot))
+	mux.HandleFunc("GET /v1/schedules", s.apiGuard(s.listSchedules))
+	mux.HandleFunc("DELETE /v1/schedules/{id}", s.apiGuard(s.cancelSchedule))
 	mux.HandleFunc("GET /v1/profile", s.apiGuard(s.getProfile))
 	mux.HandleFunc("PUT /v1/profile", s.apiGuard(s.putProfile))
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
@@ -108,6 +110,53 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, user stri
 // so the text is for us and the number is the contract.
 func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// listSchedules reports every standing job on the person's machine.
+//
+// Machine-wide and not per-thread, unlike the rest of this surface: the question
+// the person asks is "what runs on its own while I am not here", and an answer
+// split across one call per agent could not be asked at all.
+func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user string) {
+	cl, err := guestOf(s, user)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	list, err := cl.Schedules()
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	// Never null: the client renders this straight into a list, and a null body
+	// is a crash where an empty one is an empty state.
+	if list == nil {
+		list = []agentapi.Schedule{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// cancelSchedule stops a standing job.
+//
+// Not gated by an approval, unlike the agent's own schedule_task tool: this
+// request IS the person, and undoing a commitment they made needs no permission
+// from them.
+func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user string) {
+	cl, err := guestOf(s, user)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := cl.DeleteSchedule(r.PathValue("id")); err != nil {
+		var se *agent.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			fail(w, http.StatusNotFound, "no such schedule")
+			return
+		}
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // guestOf resolves a person to their machine's daemon, booting the machine if

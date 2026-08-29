@@ -31,12 +31,30 @@ func projectMessage(ev agentapi.Event) (Message, bool) {
 		m.Kind, m.Text = kindText, ev.Text
 	case "delegation", "task_start", "agent_message":
 		m.Kind, m.Text = kindEvent, teamLine(ev)
+	case "scheduled":
+		m.Kind, m.Text = kindEvent, scheduleLine(ev)
+	case "compaction":
+		m.Kind, m.Text = kindEvent, ev.Message
 	case "approval_required", "question":
 		return askMessage(m, ev), true
 	default:
 		return Message{}, false
 	}
 	return m, true
+}
+
+// scheduleLine says which standing job just started a turn.
+//
+// An event and not a text message on purpose. A scheduled fire is the person's
+// own agent acting on a timer, not the person speaking, and rendering it as a
+// message from them would put words in the transcript they never typed. The
+// name is what makes it recognisable -- "check the deploy queue" arriving at
+// 3am means nothing without "morning sweep" attached to it.
+func scheduleLine(ev agentapi.Event) string {
+	if ev.TaskTitle == "" {
+		return "A scheduled task ran"
+	}
+	return "Scheduled: " + ev.TaskTitle
 }
 
 // askMessage renders a raised hand: what is being asked, the detail the person

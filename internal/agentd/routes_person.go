@@ -32,6 +32,11 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
 		return
 	}
+	// The zone is not part of the rendered profile -- it is machine state, not
+	// something an agent reads about the person -- so it is stored separately.
+	// Going through the supervisor rather than the plain function is what moves
+	// any existing clock schedules onto the new zone.
+	s.sup.RememberZone(p.TZ, "")
 	// Every running agent composed its prompt at start, so none of them can see
 	// this yet. Evicting is what makes onboarding take effect now rather than
 	// whenever an agent happens to be recycled.

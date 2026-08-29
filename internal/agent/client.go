@@ -278,6 +278,23 @@ func (c *Client) SetPerson(p agentapi.Person) error {
 	return c.write(http.MethodPut, "/person", p, nil)
 }
 
+// Schedules lists the standing jobs on the machine, across every agent.
+func (c *Client) Schedules() ([]agentapi.Schedule, error) {
+	var out []agentapi.Schedule
+	return out, c.get("/schedules", &out)
+}
+
+// DeleteSchedule cancels a standing job.
+//
+// There is deliberately no CreateSchedule here. Schedules are made by asking an
+// agent, which raises an approval the person answers -- a path that already
+// works end to end. A create route with no caller is a surface to keep working
+// for nothing, and agentd's own POST /schedules stays available for when a
+// client actually needs it.
+func (c *Client) DeleteSchedule(id string) error {
+	return c.write(http.MethodDelete, "/schedules/"+id, nil, nil)
+}
+
 // Upload streams a file into the guest's uploads folder and says where it landed.
 //
 // Streamed rather than buffered: 20 MB held in the gateway per upload is 20 MB
