@@ -304,12 +304,22 @@ func retirable(cl *agent.Client, id string) (int, string) {
 	return http.StatusNotFound, "no such agent"
 }
 
-// sendReqV1 is the body of POST /v1/threads/{id}/messages. The client's own time
-// is ignored -- the server stamps the message. File names something already
-// uploaded through POST /v1/threads/{id}/files, not the bytes themselves.
+// sendReqV1 is the body of POST /v1/threads/{id}/messages. File names something
+// already uploaded through POST /v1/threads/{id}/files, not the bytes
+// themselves.
+//
+// ClientTime does not stamp the message -- the server does that, so a device
+// with a wrong clock cannot reorder a transcript. It is here only to say where
+// the person is when they have no IANA name to send, and TZ for when they do:
+// the profile carries the zone once at onboarding, and a person who travels
+// afterwards would otherwise keep firing their 09:00 jobs on the zone they
+// signed up in. Both are optional, and neither erases what the guest already
+// knows.
 type sendReqV1 struct {
-	Text string         `json:"text"`
-	File *agentapi.File `json:"file,omitempty"`
+	Text       string         `json:"text"`
+	File       *agentapi.File `json:"file,omitempty"`
+	ClientTime string         `json:"client_time,omitempty"`
+	TZ         string         `json:"tz,omitempty"`
 }
 
 // sendMessage delivers one instruction and echoes it back as a stored message.
@@ -328,7 +338,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	sent, err := cl.PostFile(r.PathValue("id"), req.Text, req.File)
+	sent, err := cl.PostMessage(r.PathValue("id"), agent.Send{
+		Text: req.Text, File: req.File, ClientTime: req.ClientTime, TZ: req.TZ})
 	if err != nil {
 		sendError(w, err)
 		return

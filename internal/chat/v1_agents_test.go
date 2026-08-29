@@ -27,6 +27,7 @@ type fakeGuest struct {
 
 	sched  []agentapi.Schedule
 	person agentapi.Person // the last profile the gateway forwarded
+	zone   string          // the tz the last message carried
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -133,9 +134,13 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(g.sendStatus)
 		return
 	}
-	var req struct{ Text string }
+	var req struct {
+		Text string
+		TZ   string `json:"tz"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 	g.sent = append(g.sent, req.Text)
+	g.zone = req.TZ
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]any{
 		"message_id": "m_001", "session_state": "working", "last_event_id": 41 + len(g.sent)})
