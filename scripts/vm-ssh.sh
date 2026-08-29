@@ -49,6 +49,25 @@ resolve() {
   esac
 }
 
+# await waits for sshd to bind, but only while the guest is actively REFUSING.
+#
+# The control plane answers a create as soon as agentd is up, and sshd binds a
+# few seconds after that -- so an ssh immediately after POST /vms lands on a
+# closed port and reads as a broken image rather than as a machine that is not
+# quite ready. A refusal is instant and cheap to retry; a paused or wedged VM
+# does not refuse, it goes silent, and that case still fails fast on the
+# ConnectTimeout below rather than being retried for half a minute.
+await() {
+  local ip="$1" i
+  for i in $(seq 1 20); do
+    if bash -c "exec 3<>/dev/tcp/$ip/22" 2>/dev/null; then return; fi
+    [ "$i" = 1 ] && printf "vm-ssh: %s is not answering on 22 yet, waiting" "$ip" >&2
+    printf "." >&2
+    sleep 1
+  done
+  printf "\n" >&2
+}
+
 main() {
   local ip_only="" target=""
   [ "${1:-}" = "--ip" ] && { ip_only=1; shift; }
@@ -64,6 +83,7 @@ main() {
   [ -n "$target" ] || { echo "vm-ssh: no VM at ${1:-that slot}" >&2; exit 1; }
   [ -n "$ip_only" ] && { echo "$target"; return; }
   [ -r "$KEY" ] || { echo "vm-ssh: no key at $KEY; run host-setup.sh" >&2; exit 1; }
+  await "$target"
 
   # ConnectTimeout and ServerAlive*: a PAUSED VM's tap is still listed and looks
   # exactly like a live one, so without these a paused or half-booted machine

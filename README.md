@@ -174,6 +174,11 @@ guest. From a laptop it is one hop through the tunnel you already use:
 ssh -J ubuntu@localhost:2222 -i ~/.ssh/cracked_guest agent@172.16.0.2
 ```
 
+A VM answers `POST /vms` as soon as *agentd* is up, and sshd binds a few seconds
+after that, so `vm-ssh` waits for the port rather than reporting a machine that
+is not quite ready as a broken one. That wait is only for a guest actively
+refusing; a paused one goes silent instead and still fails fast.
+
 Two things that will look like bugs and are not. Host identity is deliberately
 not checked: slots are recycled, so `172.16.0.2` is a different workspace after
 a recreate, and a real `known_hosts` would cry man-in-the-middle on every routine
