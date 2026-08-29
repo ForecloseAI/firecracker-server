@@ -46,6 +46,20 @@ RUN userdel -r ubuntu 2>/dev/null || true \
  && mkdir -p /home/agent/Downloads /home/agent/workspace/uploads /home/agent/.config \
  && chown -R agent:agent /home/agent
 
+# sshd, so the host can open a real terminal on a guest rather than driving it
+# one 30-second command at a time through /debug/exec. Reachable ONLY from the
+# host that runs the VM -- each tap is a point-to-point /30 and the firewall has
+# no DNAT at all -- so this opens nothing to the internet.
+#
+# Its own layer, deliberately: appending to the apt line at the top would
+# invalidate Chrome, Node, the npm ci and the agentd copy on every iteration.
+# /run/sshd is created at runtime by the unit's RuntimeDirectory=, so without
+# the mkdir the `sshd -t` guards below fail with "Missing privilege separation
+# directory" for a reason that has nothing to do with the config.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd
+
 # overlay-init mounts /dev/vdb on /overlay and pivots with the old root at /rom.
 # Both must EXIST in the image: mount(8) does not create its mountpoint, and the
 # root is read-only at that stage so the script cannot mkdir them itself. Without
@@ -56,6 +70,8 @@ COPY files/overlay-init /sbin/overlay-init
 COPY files/resolvconf.service files/xvfb.service files/x11vnc.service \
      files/novnc.service files/openbox.service files/chrome.service \
      files/agentd.service /etc/systemd/system/
+COPY files/sshd_config.d/10-cracked.conf /etc/ssh/sshd_config.d/
+COPY files/ssh.service.d/10-cracked.conf /etc/systemd/system/ssh.service.d/
 RUN chmod 0755 /sbin/overlay-init
 
 # The one Node package left in the image. agentd drives Chrome through it as a
@@ -98,6 +114,31 @@ RUN systemctl set-default multi-user.target \
       apparmor.service systemd-timesyncd.service systemd-random-seed.service \
       e2scrub_reap.service
 
+# Which ssh unit 24.04's postinst enables is not safe to assume -- it ships
+# socket activation -- so choose one and then ASSERT the choice. Everything
+# below is a hypothesis that fails here in seconds rather than on a booted VM
+# that passes every health check and refuses every connection.
+#
+# `sshd -T` reports the EFFECTIVE config, so it catches a missing Include, a
+# mis-sorted drop-in filename and a typo'd keyword in one check. It must run
+# BEFORE the rm: sshd refuses to parse anything once there are no host keys.
+#
+# The host keys go for the same reason /etc/machine-id is truncated below --
+# every VM would otherwise share one identity. ssh.service.d/10-cracked.conf
+# mints a set per VM on first boot.
+RUN systemctl disable ssh.socket \
+ && systemctl enable ssh.service \
+ && test -L /etc/systemd/system/multi-user.target.wants/ssh.service \
+ && test ! -e /etc/systemd/system/sockets.target.wants/ssh.socket \
+ && test ! -e /etc/ssh/sshd_not_to_be_run \
+ && [ "$(grep -c '^ExecStartPre=' /usr/lib/systemd/system/ssh.service)" = 1 ] \
+ && sshd -T | grep -q '^passwordauthentication no$' \
+ && sshd -T | grep -q '^allowusers agent$' \
+ && sshd -T | grep -q '^usedns no$' \
+ && sshd -T | grep -q '^x11forwarding no$' \
+ && rm -f /etc/ssh/ssh_host_* \
+ && test ! -e /etc/ssh/ssh_host_ed25519_key
+
 # TODO(security): the API key lives in this image, so it is shared by every VM
 # built from it and readable by anything in the guest. The agent browses
 # untrusted pages with it present, so a prompt injection can exfiltrate it, and
@@ -109,6 +150,27 @@ ARG ANTHROPIC_API_KEY=""
 RUN printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > /etc/cracked-agent.env \
  && chmod 0640 /etc/cracked-agent.env \
  && chown root:agent /etc/cracked-agent.env
+
+# The operator's public key for reaching a guest over ssh. Unlike the API key
+# above this is safe to bake: the PRIVATE half never enters a guest, it stays on
+# the EC2 host, which is already fully privileged over every VM through the
+# control plane. `docker history` exposing this build arg exposes a public key.
+#
+# Warn rather than fail when it is empty: build-rootfs.sh is meant to run on a
+# builder box, where the host's key file does not exist, and a hard guard here
+# would break every off-host build. `ssh-keygen -l` beats `test -s` -- it
+# rejects a truncated or garbage value AND prints the fingerprint into the build
+# log, which is what you compare against on the host afterwards.
+ARG SSH_PUBKEY=""
+RUN if [ -n "$SSH_PUBKEY" ]; then \
+      install -d -m 0700 -o agent -g agent /home/agent/.ssh \
+   && printf '%s\n' "$SSH_PUBKEY" > /home/agent/.ssh/authorized_keys \
+   && chmod 0600 /home/agent/.ssh/authorized_keys \
+   && chown agent:agent /home/agent/.ssh/authorized_keys \
+   && ssh-keygen -l -f /home/agent/.ssh/authorized_keys ; \
+    else \
+      echo "WARN: SSH_PUBKEY is unset; no one will be able to ssh into a guest." ; \
+    fi
 
 # Docker bakes a machine-id into the image; every VM would otherwise share one
 # identity. Emptying it makes systemd mint a unique id on first boot, which
