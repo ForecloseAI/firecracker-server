@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,66 @@ func TestOnlyEnabledServersAreOfferedToAgents(t *testing.T) {
 	}
 	if len(s.List()) != 1 {
 		t.Error("disabling lost the registration instead of turning it off")
+	}
+}
+
+// TestAFailedWriteChangesNothingInMemory is the mutate-before-save trap.
+//
+// A change kept in memory after the save failed is worse than one that was
+// simply refused: the API reports failure, every later list and every agent
+// built after it sees the change anyway, and the next restart silently undoes
+// it. All three mutators are checked, because all three wrote before saving.
+func TestAFailedWriteChangesNothingInMemory(t *testing.T) {
+	s := newStore(t)
+	kept, err := s.Add(storedRecord("Notion", "https://mcp.notion.com/mcp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A path whose parent does not exist: every save from here on fails, the way
+	// a full or broken overlay does.
+	s.path = filepath.Join(t.TempDir(), "gone", "mcp-servers.json")
+
+	if _, err := s.Add(storedRecord("Linear", "https://mcp.linear.app/mcp")); err == nil {
+		t.Fatal("a registration that could not be saved reported success")
+	}
+	if got := s.List(); len(got) != 1 || got[0].ID != kept.ID {
+		t.Errorf("after a failed registration the store holds %d servers, want only the saved one", len(got))
+	}
+
+	if _, err := s.SetEnabled(kept.ID, false); err == nil {
+		t.Fatal("a disable that could not be saved reported success")
+	}
+	if len(s.Enabled()) != 1 {
+		t.Error("a disable that failed to save still took the server away from agents")
+	}
+
+	if err := s.Remove(kept.ID); err == nil {
+		t.Fatal("a removal that could not be saved reported success")
+	}
+	if len(s.List()) != 1 {
+		t.Error("a removal that failed to save still forgot the server")
+	}
+}
+
+// TestOneAddressCannotBeRegisteredTwiceEvenUnderARace closes the window between
+// the handler's check and the store's write.
+//
+// That check runs BEFORE a network probe that takes seconds, so two overlapping
+// registrations of one address -- a double submit, or a retry of a request the
+// person believed had failed -- both pass it. Without the recheck under the
+// store's own lock the id check alone would store them under two ids, and the
+// person would get every tool twice with no conflict reported anywhere.
+func TestOneAddressCannotBeRegisteredTwiceEvenUnderARace(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Add(storedRecord("Notion", "https://mcp.notion.com/mcp")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Add(storedRecord("Notion again", "https://mcp.notion.com/mcp"))
+	if !errors.Is(err, errDuplicateURL) {
+		t.Fatalf("the second registration of one address returned %v, want a duplicate", err)
+	}
+	if got := s.List(); len(got) != 1 {
+		t.Errorf("stored %d servers for one address, want 1", len(got))
 	}
 }
 

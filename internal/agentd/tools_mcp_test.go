@@ -85,7 +85,7 @@ func TestADisabledServerOffersNoTools(t *testing.T) {
 	if _, err := m.Store().SetEnabled(rec.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	m.Forget(rec.ID)
+	m.Refresh(rec.ID)
 	if got := len(m.Tools()); got != 0 {
 		t.Errorf("a disabled server still offers %d tools", got)
 	}
@@ -94,9 +94,14 @@ func TestADisabledServerOffersNoTools(t *testing.T) {
 // TestADisabledServerRefusesToReconnectMidTurn is the one that is easy to get
 // wrong.
 //
-// mcpTool.call retries through a FRESH dial by design, so closing the session
-// is not enough: a running agent's next call would quietly redial and disable
-// would be decorative until that agent happened to be recycled.
+// A registered server's tools no longer retry, but the holder still redials on
+// the NEXT call, so closing the session is not enough on its own: without the
+// flag a running agent would quietly reconnect and disable would be decorative
+// until that agent happened to be recycled.
+//
+// The store is written first and then Refresh is called, which is the order
+// handlePatchMCP uses -- Refresh reads what the store now says rather than
+// assuming every change is a retirement.
 func TestADisabledServerRefusesToReconnectMidTurn(t *testing.T) {
 	src := newFakeSource(t, namedTool("search_pages", "found"))
 	m, rec := managerWith(t, src, "search_pages")
@@ -105,10 +110,70 @@ func TestADisabledServerRefusesToReconnectMidTurn(t *testing.T) {
 	if got := textOf(runTool(t, tools, "mcp__notion__search_pages", `{}`)); got != "found" {
 		t.Fatalf("the tool did not work before being disabled: %q", got)
 	}
-	m.Forget(rec.ID)
+	if _, err := m.Store().SetEnabled(rec.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	m.Refresh(rec.ID)
 	got := textOf(runTool(t, tools, "mcp__notion__search_pages", `{}`))
 	if !strings.Contains(got, "turned off") {
 		t.Errorf("a disabled server answered a live agent with %q", got)
+	}
+}
+
+// TestReEnablingAServerRevivesTheAgentsAlreadyHoldingIt is the other half of
+// the disable path, and the one that bricks an agent rather than merely
+// inconveniencing it.
+//
+// A running agent's wrappers point at ONE holder object, because the surface is
+// frozen when the agent is built. Retiring that object on disable and building a
+// fresh one on re-enable leaves the agent bound to the retired one for the rest
+// of its life -- told that a server which is switched on has been turned off --
+// and nothing recycles an agent that never goes idle. The boss is exactly that
+// agent.
+func TestReEnablingAServerRevivesTheAgentsAlreadyHoldingIt(t *testing.T) {
+	src := newFakeSource(t, namedTool("search_pages", "found"))
+	m, rec := managerWith(t, src, "search_pages")
+	// A real dial opens a NEW connection; the fixture caches one, and the holder
+	// closes whatever it was given on every change.
+	m.dial = func(ctx context.Context, _ mcpRecord) (*mcpsdk.ClientSession, error) {
+		src.reconnect()
+		return src.session(ctx)
+	}
+	tools := m.Tools() // an agent now holds these, and keeps them
+
+	if _, err := m.Store().SetEnabled(rec.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	m.Refresh(rec.ID)
+	if got := textOf(runTool(t, tools, "mcp__notion__search_pages", `{}`)); !strings.Contains(got, "turned off") {
+		t.Fatalf("a disabled server answered a live agent with %q", got)
+	}
+
+	if _, err := m.Store().SetEnabled(rec.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	m.Refresh(rec.ID)
+	if got := textOf(runTool(t, tools, "mcp__notion__search_pages", `{}`)); got != "found" {
+		t.Errorf("after re-enabling, an agent that held the tools still gets %q", got)
+	}
+}
+
+// TestARemovedServerStaysGoneForALiveAgent is the case that must NOT be revived:
+// removal has no way back, so the holder is dropped and stays refusing.
+func TestARemovedServerStaysGoneForALiveAgent(t *testing.T) {
+	src := newFakeSource(t, namedTool("search_pages", "found"))
+	m, rec := managerWith(t, src, "search_pages")
+	tools := m.Tools()
+
+	if err := m.Store().Remove(rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	m.Refresh(rec.ID)
+	if got := textOf(runTool(t, tools, "mcp__notion__search_pages", `{}`)); !strings.Contains(got, "turned off") {
+		t.Errorf("a removed server answered a live agent with %q", got)
+	}
+	if got := len(m.Tools()); got != 0 {
+		t.Errorf("a removed server still offers %d tools to a new agent", got)
 	}
 }
 

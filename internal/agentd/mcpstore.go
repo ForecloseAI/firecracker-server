@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,6 +14,13 @@ import (
 
 	"cracked/internal/agentapi"
 )
+
+// errDuplicateURL is a second registration of an address already stored.
+//
+// A sentinel rather than a formatted string because the route has to tell it
+// apart from a write failure: one is the person's own duplicate submit and a
+// 409, the other is a broken disk and a 500.
+var errDuplicateURL = errors.New("this server is already registered on this machine")
 
 // MCPStore is this machine's registered remote MCP servers.
 //
@@ -98,18 +106,39 @@ func (s *MCPStore) Get(id string) (mcpRecord, bool) {
 func (s *MCPStore) HasURL(raw string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.freeURLLocked(raw) != nil
+}
+
+// freeURLLocked refuses an address that is already registered. Caller holds
+// s.mu.
+func (s *MCPStore) freeURLLocked(raw string) error {
 	for _, rec := range s.by {
 		if rec.URL == raw {
-			return true
+			return errDuplicateURL
 		}
 	}
-	return false
+	return nil
 }
 
 // Add registers a server, choosing a free id derived from its name.
+//
+// The address is rechecked HERE and not only in the handler. The handler's check
+// runs before a network probe that takes seconds, so two overlapping
+// registrations of one address -- a double submit, or a retry of a request the
+// person thought had failed -- both pass it, and the id check alone would then
+// store them under two ids: every tool twice in the surface, two sessions to the
+// same third party, and no 409 anywhere.
+//
+// Nothing survives in memory that did not reach disk. A record kept after a
+// failed save is worse than a lost one: the API reports the registration failed,
+// every later list and every agent built after it sees the server anyway, and it
+// vanishes at the next restart with nothing to explain either half.
 func (s *MCPStore) Add(rec mcpRecord) (mcpRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.freeURLLocked(rec.URL); err != nil {
+		return mcpRecord{}, err
+	}
 	id, err := s.freeIDLocked(rec.Name, rec.URL)
 	if err != nil {
 		return mcpRecord{}, err
@@ -117,10 +146,17 @@ func (s *MCPStore) Add(rec mcpRecord) (mcpRecord, error) {
 	rec.ID, rec.Enabled, rec.CreatedAt = id, true, time.Now().UTC()
 	stored := rec.clone()
 	s.by[id] = &stored
-	return rec, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		delete(s.by, id)
+		return mcpRecord{}, err
+	}
+	return rec, nil
 }
 
 // SetEnabled turns a server on or off, keeping everything else about it.
+//
+// The flag goes back if the save fails: rec is the live record, so the change is
+// already visible to Enabled() by the time the write is attempted.
 func (s *MCPStore) SetEnabled(id string, on bool) (mcpRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,19 +164,30 @@ func (s *MCPStore) SetEnabled(id string, on bool) (mcpRecord, error) {
 	if !ok {
 		return mcpRecord{}, fmt.Errorf("no server %s", id)
 	}
+	was := rec.Enabled
 	rec.Enabled = on
-	return rec.clone(), s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		rec.Enabled = was
+		return mcpRecord{}, err
+	}
+	return rec.clone(), nil
 }
 
-// Remove forgets a server entirely.
+// Remove forgets a server entirely, and puts it back if that could not be
+// written down.
 func (s *MCPStore) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.by[id]; !ok {
+	rec, ok := s.by[id]
+	if !ok {
 		return fmt.Errorf("no server %s", id)
 	}
 	delete(s.by, id)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.by[id] = rec
+		return err
+	}
+	return nil
 }
 
 // freeIDLocked derives an id from a name, falling back to the URL's host when

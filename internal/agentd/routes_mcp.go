@@ -47,9 +47,11 @@ func (s *Server) handleAddMCP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "mcp")
 		return
 	}
+	// The fast path: refuse a duplicate before spending a probe on it. Add
+	// rechecks under the store's own lock, which is what catches a second
+	// registration that arrives while this one is still dialling.
 	if s.sup.MCP().Store().HasURL(rec.URL) {
-		fail(w, http.StatusConflict, "conflict",
-			"this server is already registered on this machine", "mcp")
+		fail(w, http.StatusConflict, "conflict", errDuplicateURL.Error(), "mcp")
 		return
 	}
 	s.registerMCP(w, rec)
@@ -69,6 +71,13 @@ func (s *Server) registerMCP(w http.ResponseWriter, rec mcpRecord) {
 	}
 	rec.Tools, rec.ProbedAt = specs, time.Now().UTC()
 	stored, err := s.sup.MCP().Store().Add(rec)
+	if errors.Is(err, errDuplicateURL) {
+		// The handler's check passed and then this probe took seconds, during
+		// which another registration of the same address landed. Still a 409:
+		// the person sees the conflict they would have got had they not raced.
+		fail(w, http.StatusConflict, "conflict", err.Error(), "mcp")
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "mcp")
 		return
@@ -125,13 +134,16 @@ func (s *Server) handleRemoveMCP(w http.ResponseWriter, r *http.Request) {
 
 // applyMCP makes a change reach the agents.
 //
-// Two steps, and both are needed. Forget retires the live connection, so a
-// disabled or deleted server stops answering an agent that is mid-turn. Evicting
-// covers the frozen surface: tools are assembled once when an agent is built, so
-// without this the change reaches nobody until one happens to be recycled --
-// exactly what PUT /person already does, and for the same reason.
+// Two steps, and both are needed. Refresh retires the live connection and points
+// the holder at what the store now says, so a disabled or deleted server stops
+// answering an agent that is mid-turn and a re-enabled one starts again for that
+// same agent. Evicting covers the frozen surface: tools are assembled once when
+// an agent is built, so without this a change to WHICH tools exist reaches
+// nobody until one happens to be recycled -- exactly what PUT /person already
+// does, and for the same reason. An agent that is mid-turn is left alone by
+// EvictIdle and keeps its old surface until it is next recycled.
 func (s *Server) applyMCP(id string) {
-	s.sup.MCP().Forget(id)
+	s.sup.MCP().Refresh(id)
 	s.sup.EvictIdle()
 }
 

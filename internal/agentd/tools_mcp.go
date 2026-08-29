@@ -68,22 +68,47 @@ func (m *MCPManager) serverFor(rec mcpRecord) *remoteServer {
 	return s
 }
 
-// Forget retires a server's connection, for disable, for re-enable and for
-// removal alike.
+// Refresh makes a change to one registered server reach the agents that already
+// hold its tools, for add, disable, re-enable and removal alike.
 //
-// Two steps, and both matter. Dropping it from the map means the next build
-// reads the store fresh. Disabling the retired holder is what makes the change
-// bite MID-TURN: a running agent still holds wrappers pointing at this object,
-// and without the flag its next call would quietly redial.
-func (m *MCPManager) Forget(id string) {
+// The session always goes: a server that has just been disabled, removed or
+// re-enabled must not keep answering through a connection opened before the
+// change, and closing it is what makes the change bite MID-TURN rather than
+// whenever an agent happens to be recycled.
+//
+// What differs is the HOLDER, and that difference is the whole point. A running
+// agent's wrappers point at this one object -- the surface is frozen when the
+// agent is built -- so the holder is the only route a change has to an agent
+// that is already live. A REMOVED server's holder is dropped from the map and
+// left disabled, which is what makes its wrappers refuse from now on. A server
+// that is merely turned OFF keeps its holder: turning it back on revives that
+// same object, so an agent that was mid-turn across both changes works again.
+// Dropping it on disable and building a fresh one on re-enable would leave that
+// agent bound to the retired one for the rest of its life, told a server which
+// is switched on has been turned off -- and nothing recycles an agent that never
+// goes idle.
+// The store is read and the flag set under m.mu, so two changes racing each
+// other both decide from what the store finally says rather than from what it
+// said when each began -- otherwise a disable and a re-enable landing together
+// could leave the holder off while the store says on, which no later call would
+// correct. Closing the session is left outside: it is the one step that touches
+// the network, and holding the manager's lock across it would stall every agent
+// being built.
+func (m *MCPManager) Refresh(id string) {
 	m.mu.Lock()
-	s, ok := m.by[id]
-	delete(m.by, id)
-	m.mu.Unlock()
-	if !ok {
-		return
+	rec, registered := m.store.Get(id)
+	s, held := m.by[id]
+	if !registered {
+		delete(m.by, id)
 	}
-	s.setEnabled(false)
+	if held {
+		s.setEnabled(registered && rec.Enabled)
+	}
+	m.mu.Unlock()
+
+	if !held {
+		return // never dialled; the next build reads the store fresh anyway
+	}
 	s.Close()
 }
 

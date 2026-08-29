@@ -59,6 +59,22 @@ type mcpTool struct {
 	// callTimeout bounds one call. Zero for the browser, which rides the turn's
 	// context exactly as it always has.
 	callTimeout time.Duration
+
+	// retryable allows a second attempt through a fresh session when a call
+	// fails at the transport. TRUE FOR THE BROWSER ONLY.
+	//
+	// A transport that dies mid-call looks exactly the same whether the server
+	// ran the tool or not, so a retry is a decision about whether the operation
+	// is safe to repeat. For the browser it always is: Chrome restarts on
+	// Restart=always and takes the connection with it, the retry is what stops
+	// the model calling into a corpse, and clicking a button twice costs a page
+	// action. For a server the person registered it is not -- an arbitrary MCP
+	// operation may be create_issue or send_message, and replaying one files the
+	// issue twice with nothing anywhere reporting it. Those get one attempt and
+	// an answer that says the outcome is unknown, so the MODEL decides whether
+	// to repeat it. That judgement needs to know what the tool does, which is
+	// knowledge this layer does not have and the model does.
+	retryable bool
 }
 
 func (t *mcpTool) Name() string        { return t.name }
@@ -89,12 +105,13 @@ func (t *mcpTool) Execute(ctx context.Context,
 }
 
 // call runs the tool on a live session, once more through a fresh server if the
-// old one has gone.
+// old one has gone AND the tool is one that is safe to repeat.
 //
 // The server dying is not exotic: Chrome restarts on Restart=always and takes
 // the server's connection to it along. Without the retry the model would keep
 // calling into a corpse, because a dead transport and a refusal arrive as the
-// same is_error text and it has no way to tell them apart.
+// same is_error text and it has no way to tell them apart. See retryable for why
+// a registered server's tools do not get that second attempt.
 func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallToolResult, error) {
 	ctx, cancel := t.bounded(ctx)
 	defer cancel()
@@ -106,7 +123,14 @@ func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallTo
 	if err == nil {
 		return res, nil
 	}
+	// Dropped either way, retry or not. The session is dead, and leaving it
+	// cached would make every later call in the turn wait out its own failure
+	// against the same corpse rather than redialling.
 	t.srv.drop(sess)
+	if !t.retryable {
+		return nil, fmt.Errorf("%s did not answer this call, so it may or may not have run "+
+			"- check before running it again: %w", t.srv.label(), err)
+	}
 	return t.retry(ctx, args)
 }
 
@@ -196,7 +220,7 @@ func wrapAll(tools []*mcpsdk.Tool, srv mcpSession, d toolDeps) []anthropic.BetaT
 	for _, t := range tools {
 		out = append(out, &mcpTool{
 			name: t.Name, wire: t.Name, desc: t.Description, schema: schemaOf(t),
-			srv: srv, deps: d,
+			srv: srv, deps: d, retryable: true,
 		})
 	}
 	return out
@@ -209,6 +233,9 @@ func wrapAll(tools []*mcpsdk.Tool, srv mcpSession, d toolDeps) []anthropic.BetaT
 // registered server is down, and these schemas were captured when the person
 // registered it. It carries no toolDeps -- a registered tool has no per-agent
 // state, so the wrappers are safe to build once and share.
+//
+// retryable stays false here, deliberately and not by omission: this layer
+// cannot know whether somebody else's tool is safe to run twice.
 func wrapSpecs(specs []mcpToolSpec, srv mcpSession, id string, timeout time.Duration) []anthropic.BetaTool {
 	out := make([]anthropic.BetaTool, 0, len(specs))
 	for _, s := range specs {

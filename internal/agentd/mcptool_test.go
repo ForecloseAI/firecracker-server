@@ -74,6 +74,96 @@ func (f *fakeSource) drop(dead *mcpsdk.ClientSession) {
 	}
 }
 
+// reconnect forgets the cached session so the next one is new, which is what a
+// real dial does after a holder closed the connection it was given.
+func (f *fakeSource) reconnect() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sess = nil
+}
+
+// deadFirstSource hands out one session whose server side is already gone, and
+// healthy ones after that, so a test can see what a wrapper does when a call
+// fails at the TRANSPORT rather than at the tool -- the shape a restarted
+// server, or a connection dropped mid-call, actually takes.
+type deadFirstSource struct {
+	*fakeSource
+
+	mu    sync.Mutex
+	dials int
+}
+
+// dialCount is how many times a wrapper asked for a session. Two means it
+// retried.
+func (d *deadFirstSource) dialCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dials
+}
+
+func (d *deadFirstSource) session(ctx context.Context) (*mcpsdk.ClientSession, error) {
+	d.mu.Lock()
+	d.dials++
+	first := d.dials == 1
+	d.mu.Unlock()
+	if !first {
+		d.fakeSource.reconnect()
+		return d.fakeSource.session(ctx)
+	}
+	client, server := mcpsdk.NewInMemoryTransports()
+	serving, err := d.fakeSource.srv.Connect(ctx, server, nil)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil).
+		Connect(ctx, client, nil)
+	if err != nil {
+		return nil, err
+	}
+	serving.Close() // the far end goes away; the next call fails on the wire
+	return sess, nil
+}
+
+// TestARegisteredToolIsNotRunTwiceAfterATransportFailure is the duplicate side
+// effect.
+//
+// A transport that dies mid-call looks identical whether or not the server ran
+// the tool, so replaying an arbitrary MCP operation files the issue -- or sends
+// the message -- twice, with nothing anywhere reporting it. One attempt, and an
+// answer that tells the model the outcome is unknown so it can decide.
+func TestARegisteredToolIsNotRunTwiceAfterATransportFailure(t *testing.T) {
+	f := newFakeSource(t, namedTool("create_issue", "filed"))
+	src := &deadFirstSource{fakeSource: f}
+	tools := wrapSpecs([]mcpToolSpec{specFor("create_issue")}, src, "linear", 5*time.Second)
+
+	got := textOf(runTool(t, tools, "mcp__linear__create_issue", `{}`))
+	if n := src.dialCount(); n != 1 {
+		t.Errorf("the tool asked for %d sessions, want 1: a second one is a replayed call", n)
+	}
+	if asked := f.asked(); len(asked) != 0 {
+		t.Errorf("the server was asked for %v after a dead transport, want no replay", asked)
+	}
+	if !strings.Contains(got, "may or may not have run") {
+		t.Errorf("the model was told %q, which does not say the outcome is unknown", got)
+	}
+}
+
+// TestTheBrowserStillRetriesAfterATransportFailure is the behaviour the opt-out
+// above must not have taken away. Chrome restarts on Restart=always and takes
+// the connection with it; without the retry the model keeps calling a corpse.
+func TestTheBrowserStillRetriesAfterATransportFailure(t *testing.T) {
+	f := newFakeSource(t, namedTool("click", "clicked"))
+	src := &deadFirstSource{fakeSource: f}
+	tools := wrapAll([]*mcpsdk.Tool{namedTool("click", "clicked")}, src, toolDeps{})
+
+	if got := textOf(runTool(t, tools, "click", `{}`)); got != "clicked" {
+		t.Errorf("the browser did not recover from a restart: %q", got)
+	}
+	if n := src.dialCount(); n != 2 {
+		t.Errorf("the browser asked for %d sessions, want 2: it did not retry", n)
+	}
+}
+
 // asked reports the tool names the server was actually sent.
 func (f *fakeSource) asked() []string {
 	f.mu.Lock()
