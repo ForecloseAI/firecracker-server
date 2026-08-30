@@ -12,7 +12,7 @@ import (
 type (
 	scheduleInput struct {
 		Name string `json:"name" jsonschema:"required,description=A short name for this standing job such as morning inbox sweep"`
-		When string `json:"when" jsonschema:"required,description=One of - every 30m - daily at 09:00 - weekly on mon at 09:00 - once on 2026-09-02 at 11:00. Use the once form whenever the thing happens one time only at a known date and time. Never book a repeating job whose task text checks the date and does nothing on the other days. Times are read in the person's own timezone so write their local clock time and do not convert it. Nothing tighter than every 15m"`
+		When string `json:"when" jsonschema:"required,description=A base form - every 30m - every 2d - daily at 09:00 - daily at 09:00 and 17:00 - every weekday at 09:00 - every weekend at 10:00 - weekly on mon at 09:00 - monthly on the 1st at 09:00 - monthly on the last day at 18:00 - once on 2026-09-02 at 11:00 - once in 2h. Any repeating form may add - until 2026-12-31 - to stop on a date. Only every <duration> may add - between 09:00 and 17:00 - to stay inside working hours. Any form may add - in Asia/Kolkata - to pin it to one timezone instead of following the person as they travel. Use a once form whenever the thing happens one time only. Never book a repeating job whose task text checks the date and does nothing on the other days. Times are the person's own local clock so write what they would say and do not convert it. Nothing tighter than every 15m"`
 		Task string `json:"task" jsonschema:"required,description=The message to send yourself when it fires - you will read it in this same conversation"`
 	}
 	cancelScheduleInput struct {
@@ -107,7 +107,7 @@ func cancelScheduleTool(d toolDeps) (anthropic.BetaTool, error) {
 // here rather than in the tool so the approval and the write cannot drift apart.
 func (s *Supervisor) CreateSchedule(ctx context.Context, gate *Gate, self string, in scheduleInput) string {
 	loc := loadZone(s.stateDir)
-	sp, at, err := planSchedule(in.When, loc, time.Now())
+	sp, expr, at, err := planSchedule(in.When, loc, time.Now())
 	if err != nil {
 		return "That schedule is not valid: " + err.Error()
 	}
@@ -116,7 +116,7 @@ func (s *Supervisor) CreateSchedule(ctx context.Context, gate *Gate, self string
 		return err.Error() // the gate already words a refusal, including "do not retry"
 	}
 	sc, err := s.schedules.Add(Schedule{Name: in.Name, Agent: self, Task: in.Task,
-		Expr: in.When, NextRunAt: at})
+		Expr: expr, NextRunAt: at})
 	if err != nil {
 		return "Could not save that schedule: " + err.Error()
 	}

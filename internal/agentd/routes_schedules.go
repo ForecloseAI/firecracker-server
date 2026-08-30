@@ -47,14 +47,17 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "not_found", "no such agent", "agent")
 		return
 	}
-	_, at, err := planSchedule(req.Expr, loadZone(s.sup.stateDir), time.Now())
+	// The stored expression is what planSchedule hands back rather than what was
+	// posted: a relative one-off is resolved to the instant it named, so it does
+	// not mean something different on every sweep.
+	_, expr, at, err := planSchedule(req.Expr, loadZone(s.sup.stateDir), time.Now())
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "schedule")
 		return
 	}
 	sc, err := s.sup.Schedules().Add(Schedule{
 		Name: req.Name, Agent: orDefault(req.Agent, BossID), Task: req.Task,
-		Expr: req.Expr, NextRunAt: at,
+		Expr: expr, NextRunAt: at,
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "schedule")
