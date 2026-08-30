@@ -33,6 +33,15 @@ const (
 	// itself on the next tick; an armed timer wakes up late by however long the
 	// VM slept.
 	sweepEvery = 30 * time.Second
+
+	// oneShotGrace is how late a "once on ... at ..." schedule may still run.
+	//
+	// A repeating job that misses an occurrence has another one behind it, so
+	// the sweep spends it and moves on. A one-off has nothing behind it, so it
+	// stays due and waits for a free agent instead of being thrown away. It
+	// cannot wait forever: a reminder for an 11:00 ticket sale is worth having
+	// at 11:20 and is noise by the evening.
+	oneShotGrace = time.Hour
 )
 
 // ScheduleStore is this machine's persisted schedules, shaped like Roster.
@@ -170,6 +179,8 @@ func (s *ScheduleStore) saveLocked() error {
 // spec is a parsed schedule expression.
 type spec struct {
 	every  time.Duration // set by "every <dur>"; the clock fields are unused
+	once   bool          // set by "once on <date> at <time>"; at holds the instant
+	at     time.Time
 	hour   int
 	minute int
 	day    time.Weekday
@@ -183,15 +194,23 @@ var weekdays = map[string]time.Weekday{
 	"thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday,
 }
 
-// parseSchedule reads one of the three supported forms:
+// parseSchedule reads one of the four supported forms:
 //
 //	every 30m
 //	daily at 09:00
 //	weekly on mon at 09:00
+//	once on 2026-09-02 at 11:00
 //
 // Deliberately not cron. A parser for cron's ranges, steps and lists is sixty
 // lines that has to be right on every field, and a field silently mis-parsed
 // fires at the wrong hour forever.
+//
+// The one-off form is not a convenience. Without it, an agent asked for a single
+// event on a named day has no honest way to say so, and the nearest thing the
+// grammar accepts is a daily job carrying "do nothing unless today is the 2nd"
+// in its own task text. That fires every day forever, spends a turn each time
+// deciding not to act, and hangs the whole thing on the model re-reading a date
+// correctly on the one morning that matters.
 func parseSchedule(expr string, loc *time.Location) (spec, error) {
 	f := strings.Fields(strings.ToLower(strings.TrimSpace(expr)))
 	switch {
@@ -214,8 +233,31 @@ func parseSchedule(expr string, loc *time.Location) (spec, error) {
 		}
 		h, m, err := parseClock(f[4])
 		return spec{hour: h, minute: m, day: day, weekly: true, loc: loc}, err
+	case len(f) == 5 && f[0] == "once" && f[1] == "on" && f[3] == "at":
+		d, err := parseDate(f[2])
+		if err != nil {
+			return spec{}, err
+		}
+		h, m, err := parseClock(f[4])
+		if err != nil {
+			return spec{}, err
+		}
+		// Built in the person's location, like the clock forms, so the date and
+		// the time are read together as one wall-clock instant where they are.
+		return spec{once: true, loc: loc,
+			at: time.Date(d.Year(), d.Month(), d.Day(), h, m, 0, 0, loc)}, nil
 	}
-	return spec{}, errors.New(`use "every 30m", "daily at 09:00", or "weekly on mon at 09:00"`)
+	return spec{}, errors.New(`use "every 30m", "daily at 09:00", ` +
+		`"weekly on mon at 09:00", or "once on 2026-09-02 at 11:00"`)
+}
+
+// parseDate reads an ISO calendar date.
+func parseDate(s string) (time.Time, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%q is not a date such as 2026-09-02", s)
+	}
+	return t, nil
 }
 
 // parseClock reads a 24-hour HH:MM.
@@ -227,12 +269,19 @@ func parseClock(s string) (int, int, error) {
 	return t.Hour(), t.Minute(), nil
 }
 
-// next is the first firing strictly after the given time.
+// next is the first firing strictly after the given time, or the zero time when
+// the expression has no firing left -- which only a one-off can reach.
 //
 // The clock forms are built in the person's own location rather than by adding
 // 24h, so a day that is 23 or 25 hours long over a DST change still fires at the
 // stated wall-clock time.
 func (sp spec) next(after time.Time) time.Time {
+	if sp.once {
+		if sp.at.After(after) {
+			return sp.at
+		}
+		return time.Time{} // one occurrence, and it is behind us
+	}
 	if sp.every > 0 {
 		return after.Add(sp.every)
 	}
@@ -242,6 +291,27 @@ func (sp spec) next(after time.Time) time.Time {
 		at = at.AddDate(0, 0, 1)
 	}
 	return at
+}
+
+// planSchedule parses an expression and works out when a schedule built from it
+// now would first run.
+//
+// One call rather than parse-then-next at each creation site, because the one-off
+// form is where those two steps can disagree: "once on 2026-09-02 at 11:00" is
+// perfectly well-formed on the 3rd and still has no run to book, and a caller
+// that only checked the parse would store a schedule whose zero NextRunAt reads
+// as due on every sweep for the rest of the machine's life.
+func planSchedule(expr string, loc *time.Location, now time.Time) (spec, time.Time, error) {
+	sp, err := parseSchedule(expr, loc)
+	if err != nil {
+		return spec{}, time.Time{}, err
+	}
+	at := sp.next(now)
+	if at.IsZero() {
+		return spec{}, time.Time{}, fmt.Errorf("%s has already passed",
+			sp.at.In(loc).Format("2006-01-02 15:04"))
+	}
+	return sp, at, nil
 }
 
 // zonePath is where the client's timezone is remembered. One file for the
@@ -287,9 +357,11 @@ func (s *Supervisor) RememberZone(tz, clientTime string) {
 // rezone recomputes the next firing of every enabled clock schedule.
 //
 // "every 30m" is left alone: an interval is not anchored to a wall clock, so
-// moving it would only push the next run further out. A schedule whose
-// expression no longer parses is left for the sweep, which disables it and says
-// why rather than silently skipping it here.
+// moving it would only push the next run further out. A one-off does move, for
+// the same reason a daily does: "once on 2026-09-02 at 11:00" names a wall-clock
+// instant, and the person who wrote it means 11:00 where they are. A schedule
+// whose expression no longer parses is left for the sweep, which disables it and
+// says why rather than silently skipping it here.
 func (s *Supervisor) rezone(now time.Time) {
 	loc := loadZone(s.stateDir)
 	for _, sc := range s.schedules.List() {
@@ -300,7 +372,13 @@ func (s *Supervisor) rezone(now time.Time) {
 		if err != nil || sp.every > 0 {
 			continue
 		}
-		s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = sp.next(now) })
+		// A one-off whose instant has already passed has no next: leave the
+		// stored one alone so the sweep can still judge it against oneShotGrace.
+		at := sp.next(now)
+		if at.IsZero() {
+			continue
+		}
+		s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = at })
 	}
 }
 
@@ -358,16 +436,30 @@ func (s *Supervisor) sweep(now time.Time) {
 
 // fire advances a schedule past now and delivers it, unless the agent is busy.
 //
-// The advance happens FIRST and unconditionally. A skipped occurrence that
-// stayed due would come back on the next tick and every tick after it, which is
-// exactly the backlog that skipping a busy agent exists to avoid.
+// For a repeating job the advance happens FIRST and unconditionally. A skipped
+// occurrence that stayed due would come back on the next tick and every tick
+// after it, which is exactly the backlog that skipping a busy agent exists to
+// avoid.
+//
+// A one-off is the opposite case and is handled the opposite way. There is no
+// occurrence behind it to fall back on, so spending it on a busy agent would
+// mean the single thing the person asked for never happens at all. It is left
+// due and retried on each sweep instead -- bounded by oneShotGrace, because a
+// machine that is busy all afternoon should say the reminder was missed rather
+// than deliver it at midnight or hold it due forever.
 func (s *Supervisor) fire(sc Schedule, now time.Time) {
 	sp, err := parseSchedule(sc.Expr, loadZone(s.stateDir))
 	if err != nil {
 		s.disable(sc, "its schedule no longer parses: "+err.Error())
 		return
 	}
-	s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = sp.next(now) })
+	switch {
+	case !sp.once:
+		s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = sp.next(now) })
+	case now.Sub(sc.NextRunAt) > oneShotGrace:
+		s.disable(sc, "its one time came and went with nothing free to run it")
+		return
+	}
 	if _, ok := s.roster.Get(sc.Agent); !ok {
 		s.disable(sc, "the agent it belonged to is gone")
 		return
@@ -380,7 +472,13 @@ func (s *Supervisor) fire(sc Schedule, now time.Time) {
 		return // no capacity right now, which the next occurrence may well have
 	}
 	if a.SendScheduled(sc.Name, sc.Task) == nil {
-		s.schedules.Update(sc.ID, func(x *Schedule) { x.LastFired, x.Fires = now, x.Fires+1 })
+		s.schedules.Update(sc.ID, func(x *Schedule) {
+			x.LastFired, x.Fires = now, x.Fires+1
+			// A one-off is spent by the run it just had. Turned off rather than
+			// deleted, so the person opening the app sees that the thing they
+			// asked for did happen instead of finding an empty list.
+			x.Enabled = !sp.once
+		})
 	}
 }
 
@@ -422,6 +520,14 @@ func (s *Supervisor) rollForward(now time.Time) {
 		}
 		sp, err := parseSchedule(sc.Expr, loadZone(s.stateDir))
 		if err != nil {
+			continue
+		}
+		// A one-off is left exactly where it is. Its instant does not repeat, so
+		// there is nothing to skip forward to, and moving it would write a zero
+		// NextRunAt that reads as due on every sweep from here on. Whether the
+		// machine came back soon enough for it to still be worth running is the
+		// sweep's call, which is the one place that can turn it off and say why.
+		if sp.once {
 			continue
 		}
 		s.schedules.Update(sc.ID, func(x *Schedule) { x.NextRunAt = sp.next(now) })

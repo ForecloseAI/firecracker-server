@@ -47,14 +47,14 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "not_found", "no such agent", "agent")
 		return
 	}
-	sp, err := parseSchedule(req.Expr, loadZone(s.sup.stateDir))
+	_, at, err := planSchedule(req.Expr, loadZone(s.sup.stateDir), time.Now())
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "schedule")
 		return
 	}
 	sc, err := s.sup.Schedules().Add(Schedule{
 		Name: req.Name, Agent: orDefault(req.Agent, BossID), Task: req.Task,
-		Expr: req.Expr, NextRunAt: sp.next(time.Now()),
+		Expr: req.Expr, NextRunAt: at,
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "schedule")
