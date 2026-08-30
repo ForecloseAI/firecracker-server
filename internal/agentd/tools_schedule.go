@@ -12,7 +12,7 @@ import (
 type (
 	scheduleInput struct {
 		Name string `json:"name" jsonschema:"required,description=A short name for this standing job such as morning inbox sweep"`
-		When string `json:"when" jsonschema:"required,description=One of - every 30m - daily at 09:00 - weekly on mon at 09:00. Nothing tighter than every 15m"`
+		When string `json:"when" jsonschema:"required,description=A base form - every 30m - every 2d - daily at 09:00 - daily at 09:00 and 17:00 - every weekday at 09:00 - every weekend at 10:00 - weekly on mon at 09:00 - monthly on the 1st at 09:00 - monthly on the last day at 18:00 - once on 2026-09-02 at 11:00 - once in 2h. Any repeating form may add - until 2026-12-31 - to stop on a date. Only every <duration> may add - between 09:00 and 17:00 - to stay inside working hours. Any form may add - in Asia/Kolkata - to pin it to one timezone instead of following the person as they travel. Use a once form whenever the thing happens one time only. Never book a repeating job whose task text checks the date and does nothing on the other days. Times are the person's own local clock so write what they would say and do not convert it. Nothing tighter than every 15m"`
 		Task string `json:"task" jsonschema:"required,description=The message to send yourself when it fires - you will read it in this same conversation"`
 	}
 	cancelScheduleInput struct {
@@ -48,8 +48,9 @@ func scheduleTools(d toolDeps) ([]anthropic.BetaTool, error) {
 func scheduleTaskTool(d toolDeps) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[scheduleInput](
 		"schedule_task",
-		"Arrange to message yourself at a set time, over and over. The message arrives in "+
-			"this conversation, so write it as a note to yourself. Needs the person's approval.",
+		"Arrange to message yourself at a set time: over and over, or just once on a given "+
+			"date. The message arrives in this conversation, so write it as a note to "+
+			"yourself. Needs the person's approval.",
 		func(ctx context.Context, in scheduleInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
 			if d.team == nil {
 				return toolText(noSupervisor), nil
@@ -106,7 +107,7 @@ func cancelScheduleTool(d toolDeps) (anthropic.BetaTool, error) {
 // here rather than in the tool so the approval and the write cannot drift apart.
 func (s *Supervisor) CreateSchedule(ctx context.Context, gate *Gate, self string, in scheduleInput) string {
 	loc := loadZone(s.stateDir)
-	sp, err := parseSchedule(in.When, loc)
+	sp, expr, at, err := planSchedule(in.When, loc, time.Now())
 	if err != nil {
 		return "That schedule is not valid: " + err.Error()
 	}
@@ -115,11 +116,17 @@ func (s *Supervisor) CreateSchedule(ctx context.Context, gate *Gate, self string
 		return err.Error() // the gate already words a refusal, including "do not retry"
 	}
 	sc, err := s.schedules.Add(Schedule{Name: in.Name, Agent: self, Task: in.Task,
-		Expr: in.When, NextRunAt: sp.next(time.Now())})
+		Expr: expr, NextRunAt: at})
 	if err != nil {
 		return "Could not save that schedule: " + err.Error()
 	}
-	return "Scheduled as " + sc.ID + ". First run " + sc.NextRunAt.In(loc).Format(time.RFC1123) + "."
+	// Said differently for a one-off, so the model can see from the answer that
+	// it booked a single run and does not go on to add a cancellation of its own.
+	when := "First run "
+	if sp.once {
+		when = "Runs once at "
+	}
+	return "Scheduled as " + sc.ID + ". " + when + sc.NextRunAt.In(loc).Format(time.RFC1123) + "."
 }
 
 // renderSchedules lists one agent's schedules for the model to read.
