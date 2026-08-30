@@ -30,6 +30,8 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/threads/{id}/messages", s.apiGuard(s.sendMessage))
 	mux.HandleFunc("POST /v1/threads/{id}/files", s.apiGuard(s.uploadFile))
 	mux.HandleFunc("GET /v1/threads/{id}/shots/{name}", s.apiGuard(s.getShot))
+	mux.HandleFunc("GET /v1/schedules", s.apiGuard(s.listSchedules))
+	mux.HandleFunc("DELETE /v1/schedules/{id}", s.apiGuard(s.cancelSchedule))
 	mux.HandleFunc("GET /v1/profile", s.apiGuard(s.getProfile))
 	mux.HandleFunc("PUT /v1/profile", s.apiGuard(s.putProfile))
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
@@ -108,6 +110,53 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, user stri
 // so the text is for us and the number is the contract.
 func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// listSchedules reports every standing job on the person's machine.
+//
+// Machine-wide and not per-thread, unlike the rest of this surface: the question
+// the person asks is "what runs on its own while I am not here", and an answer
+// split across one call per agent could not be asked at all.
+func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user string) {
+	cl, err := guestOf(s, user)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	list, err := cl.Schedules()
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	// Never null: the client renders this straight into a list, and a null body
+	// is a crash where an empty one is an empty state.
+	if list == nil {
+		list = []agentapi.Schedule{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// cancelSchedule stops a standing job.
+//
+// Not gated by an approval, unlike the agent's own schedule_task tool: this
+// request IS the person, and undoing a commitment they made needs no permission
+// from them.
+func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user string) {
+	cl, err := guestOf(s, user)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := cl.DeleteSchedule(r.PathValue("id")); err != nil {
+		var se *agent.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			fail(w, http.StatusNotFound, "no such schedule")
+			return
+		}
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // guestOf resolves a person to their machine's daemon, booting the machine if
@@ -255,12 +304,22 @@ func retirable(cl *agent.Client, id string) (int, string) {
 	return http.StatusNotFound, "no such agent"
 }
 
-// sendReqV1 is the body of POST /v1/threads/{id}/messages. The client's own time
-// is ignored -- the server stamps the message. File names something already
-// uploaded through POST /v1/threads/{id}/files, not the bytes themselves.
+// sendReqV1 is the body of POST /v1/threads/{id}/messages. File names something
+// already uploaded through POST /v1/threads/{id}/files, not the bytes
+// themselves.
+//
+// ClientTime does not stamp the message -- the server does that, so a device
+// with a wrong clock cannot reorder a transcript. It is here only to say where
+// the person is when they have no IANA name to send, and TZ for when they do:
+// the profile carries the zone once at onboarding, and a person who travels
+// afterwards would otherwise keep firing their 09:00 jobs on the zone they
+// signed up in. Both are optional, and neither erases what the guest already
+// knows.
 type sendReqV1 struct {
-	Text string         `json:"text"`
-	File *agentapi.File `json:"file,omitempty"`
+	Text       string         `json:"text"`
+	File       *agentapi.File `json:"file,omitempty"`
+	ClientTime string         `json:"client_time,omitempty"`
+	TZ         string         `json:"tz,omitempty"`
 }
 
 // sendMessage delivers one instruction and echoes it back as a stored message.
@@ -279,7 +338,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	sent, err := cl.PostFile(r.PathValue("id"), req.Text, req.File)
+	sent, err := cl.PostMessage(r.PathValue("id"), agent.Send{
+		Text: req.Text, File: req.File, ClientTime: req.ClientTime, TZ: req.TZ})
 	if err != nil {
 		sendError(w, err)
 		return

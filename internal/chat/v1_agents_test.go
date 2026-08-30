@@ -24,6 +24,10 @@ type fakeGuest struct {
 	events        []agentapi.Event
 	resolved      []resolution
 	resolveStatus int // non-zero to make the next resolve fail with this code
+
+	sched  []agentapi.Schedule
+	person agentapi.Person // the last profile the gateway forwarded
+	zone   string          // the tz the last message carried
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -61,7 +65,19 @@ func (g *fakeGuest) routes() http.Handler {
 		json.NewEncoder(w).Encode(agentapi.EventsPage{Events: g.events, LastEventID: len(g.events)})
 	})
 	mux.HandleFunc("POST /approvals/{apid}", g.resolve)
+	mux.HandleFunc("GET /schedules", g.schedules)
+	mux.HandleFunc("DELETE /schedules/{id}", g.dropSchedule)
+	mux.HandleFunc("PUT /person", g.putPerson)
 	return mux
+}
+
+// putPerson records the profile the gateway forwarded, so a test can assert on
+// what actually reached the guest.
+func (g *fakeGuest) putPerson(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	json.NewDecoder(r.Body).Decode(&g.person)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resolve records what the gateway sent, or refuses with the configured status.
@@ -118,9 +134,13 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(g.sendStatus)
 		return
 	}
-	var req struct{ Text string }
+	var req struct {
+		Text string
+		TZ   string `json:"tz"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 	g.sent = append(g.sent, req.Text)
+	g.zone = req.TZ
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]any{
 		"message_id": "m_001", "session_state": "working", "last_event_id": 41 + len(g.sent)})

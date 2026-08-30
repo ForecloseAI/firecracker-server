@@ -140,6 +140,15 @@ type Person struct {
 	Work      string `json:"work"`
 	Notes     string `json:"notes,omitempty"`
 	Onboarded bool   `json:"onboarded"`
+
+	// TZ is the person's IANA timezone, as the client's own device reports it.
+	// Carried here because this is the one call a client already makes about
+	// who the person is, and the guest runs UTC: without it "daily at 09:00"
+	// means 9am nowhere in particular.
+	//
+	// Write-only. It is kept in its own file rather than in the rendered
+	// profile, so it does not come back on a read -- nothing needs it to.
+	TZ string `json:"tz,omitempty"`
 }
 
 // EventsPage is the body of GET /agents/{id}/events?poll=1.

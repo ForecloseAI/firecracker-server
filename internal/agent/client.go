@@ -203,21 +203,30 @@ type Sent struct {
 // deliberate repeat into silence, and a duplicate message is a far better
 // failure than one that vanishes with no error.
 func (c *Client) Post(agentID, text string) (Sent, error) {
-	return c.PostFile(agentID, text, nil)
+	return c.PostMessage(agentID, Send{Text: text})
 }
 
-// PostFile sends a message with a file the person attached.
-func (c *Client) PostFile(agentID, text string, file *agentapi.File) (Sent, error) {
+// PostMessage sends a turn with everything the client attached to it -- a file
+// the person picked, and the zone their own device reports.
+//
+// The zone rides on every message and not only on the profile call, because the
+// profile is written once at onboarding: a person who then travels would keep
+// their 09:00 jobs anchored to the zone they signed up in. The daemon re-reads
+// it per message and moves the clock schedules when it has actually changed, so
+// the usual case -- the same zone arriving again -- costs one file read.
+func (c *Client) PostMessage(agentID string, m Send) (Sent, error) {
 	var out Sent
-	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages",
-		sendBody{Text: text, File: file}, &out)
+	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages", m, &out)
 	return out, err
 }
 
-// sendBody is what the daemon reads on POST /agents/{id}/messages.
-type sendBody struct {
-	Text string         `json:"text"`
-	File *agentapi.File `json:"file,omitempty"`
+// Send is what the daemon reads on POST /agents/{id}/messages. An empty
+// ClientTime or TZ is not an erasure -- the daemon keeps the zone it has.
+type Send struct {
+	Text       string         `json:"text"`
+	File       *agentapi.File `json:"file,omitempty"`
+	ClientTime string         `json:"client_time,omitempty"`
+	TZ         string         `json:"tz,omitempty"`
 }
 
 // CreateAgent adds an agent of the given type to the roster. It does not start
@@ -276,6 +285,23 @@ func (c *Client) Person() (agentapi.Person, error) {
 // SetPerson replaces that profile with what onboarding collected.
 func (c *Client) SetPerson(p agentapi.Person) error {
 	return c.write(http.MethodPut, "/person", p, nil)
+}
+
+// Schedules lists the standing jobs on the machine, across every agent.
+func (c *Client) Schedules() ([]agentapi.Schedule, error) {
+	var out []agentapi.Schedule
+	return out, c.get("/schedules", &out)
+}
+
+// DeleteSchedule cancels a standing job.
+//
+// There is deliberately no CreateSchedule here. Schedules are made by asking an
+// agent, which raises an approval the person answers -- a path that already
+// works end to end. A create route with no caller is a surface to keep working
+// for nothing, and agentd's own POST /schedules stays available for when a
+// client actually needs it.
+func (c *Client) DeleteSchedule(id string) error {
+	return c.write(http.MethodDelete, "/schedules/"+id, nil, nil)
 }
 
 // Upload streams a file into the guest's uploads folder and says where it landed.
