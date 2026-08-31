@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 rootfs/files/agentd
 rootfs/files/mcp/node_modules/
+.DS_Store

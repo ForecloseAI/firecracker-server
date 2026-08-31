@@ -9,6 +9,14 @@ Requires=resolvconf.service
 [Service]
 User=agent
 Environment=HOME=/home/agent
+# The document libraries live in a venv, so it goes first on PATH and `python3`
+# in a Bash command means the one that can open a spreadsheet.
+#
+# The whole default chain is restated deliberately: systemd's Environment=PATH=
+# REPLACES rather than prepends, so naming only the venv would leave every bare
+# command in every Bash call unable to find /usr/bin. bashTool sets no cmd.Env,
+# so what is here is what every shell command an agent runs inherits.
+Environment=PATH=/opt/agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # A 4096 MiB guest that also runs Chrome. A soft limit makes the collector work
 # harder as it approaches the ceiling rather than letting the kernel's OOM killer
 # pick a victim -- and with swap off on the host, that reaps the whole VM.

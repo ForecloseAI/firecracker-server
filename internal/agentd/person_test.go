@@ -18,7 +18,7 @@ func TestWhatWeKnowAboutThePersonReachesTheSystemPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := ComposeSystemPrompt(Profile{Prompt: "role"}, t.TempDir(), state)
+	got := ComposeSystemPrompt(Profile{Prompt: "role"}, roots{own: t.TempDir()}, state, nil)
 	for _, want := range []string{"About the person", "Naman", "Founder"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the prompt never mentions %q", want)
@@ -29,7 +29,7 @@ func TestWhatWeKnowAboutThePersonReachesTheSystemPrompt(t *testing.T) {
 // An agent with no profile yet must get no section at all, rather than a heading
 // announcing that we know nothing -- which spends prefix tokens saying only that.
 func TestNoProfileAddsNothingToThePrompt(t *testing.T) {
-	got := ComposeSystemPrompt(Profile{Prompt: "role"}, t.TempDir(), t.TempDir())
+	got := ComposeSystemPrompt(Profile{Prompt: "role"}, roots{own: t.TempDir()}, t.TempDir(), nil)
 	if strings.Contains(got, "About the person") {
 		t.Error("an empty profile still added its heading to the prompt")
 	}

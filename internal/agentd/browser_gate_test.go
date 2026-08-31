@@ -14,8 +14,8 @@ import (
 // -- both come back as the same refusal, so it cannot tell which it made.
 func TestBrowserProfilesGetTheSnapshotRuleInTheirPrompt(t *testing.T) {
 	dir := t.TempDir()
-	with := ComposeSystemPrompt(Profile{Browser: true}, dir, "")
-	without := ComposeSystemPrompt(Profile{Browser: false}, dir, "")
+	with := ComposeSystemPrompt(Profile{Browser: true}, roots{own: dir}, "", nil)
+	without := ComposeSystemPrompt(Profile{Browser: false}, roots{own: dir}, "", nil)
 	if !strings.Contains(with, "Take a snapshot before you act") {
 		t.Error("a browser profile was not told the snapshot rule")
 	}
@@ -40,6 +40,14 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		`node -e 'new WebSocket("ws://127.0.0.1:9222/devtools/page/AB")'`,
 		"node /opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
 		"google-chrome --headless --dump-dom https://example.com",
+		"chromium --headless --screenshot=/tmp/x.png https://example.com",
+		// The name the .deb actually installs. A plain `chrome\s` alternation
+		// matches "google-chrome" and then wants whitespace where "-stable"
+		// sits, so the real browser in this image walks straight through.
+		"google-chrome-stable --headless --dump-dom https://bank.com",
+		"chromium-browser --headless --screenshot",
+		`"/opt/google/chrome/google-chrome" --headless x`,
+		"CHROME=$(which chromium); $CHROME --user-data-dir=/tmp/p",
 		"pkill -f chromium",
 		"xdotool key Return",
 	}
@@ -53,6 +61,21 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		"grep -r chrome /var/log",
 		"echo 'chrome is slow' >> notes.md",
 		"ls ~/.config/chromium",
+		// Found on a live VM. LibreOffice takes --headless for every document
+		// conversion, and the pdf/docx/xlsx/pptx skills lean on it constantly,
+		// so a bare --headless match blocked the whole document surface.
+		"soffice --headless --convert-to pdf --outdir . report.docx",
+		"libreoffice --headless --convert-to xlsx old.xls",
+		"timeout 60 soffice --headless --convert-to pdf deck.pptx",
+		// The filename, not the binary. `\bchrome\b` matches inside
+		// "chrome-notes.docx" because a hyphen is a word boundary, so the
+		// pattern needs the binary to be followed by whitespace.
+		"soffice --headless --convert-to pdf chrome-notes.docx",
+		"soffice --headless --convert-to pdf ./chromium-migration.pptx",
+		// & and a newline end a command as surely as | and ; do.
+		"cat chrome-notes.txt && soffice --headless --convert-to pdf a.docx",
+		"echo 'the chrome report' && soffice --headless --convert-to pdf a.docx",
+		"ls chrome\nsoffice --headless x.docx",
 		"go test ./...",
 	}
 	for _, cmd := range fine {

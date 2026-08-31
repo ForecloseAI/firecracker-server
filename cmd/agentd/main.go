@@ -39,7 +39,12 @@ func main() {
 	maxLive := flag.Int("max-live-agents", 8, "how many agents may hold a goroutine at once")
 	workspace := flag.String("workspace", ".", "directory the agent may read")
 	stateDir := flag.String("state-dir", "./agent-state", "where the log and conversation live")
+	skillsDir := flag.String("skills-dir", agentd.BuiltinSkillsDir,
+		"directory of built-in skills, shipped read-only in the guest image")
 	flag.Parse()
+	// Assigned rather than threaded through: every agent needs it and nothing
+	// chooses a different one, which is the same reason ChromeURL is a var.
+	agentd.BuiltinSkillsDir = *skillsDir
 
 	err := run(*once, *profile, *model, *workspace, *stateDir, *addr, *maxLive)
 	if err != nil {

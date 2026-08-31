@@ -61,7 +61,33 @@ var browserRoutes = []*regexp.Regexp{
 	regexp.MustCompile(`devtools/(browser|page)/`),
 	regexp.MustCompile(`puppeteer`),
 	regexp.MustCompile(`chrome-devtools-mcp`),
-	regexp.MustCompile(`--(remote-debugging|user-data-dir|headless)`),
+	regexp.MustCompile(`--(remote-debugging|user-data-dir)`),
+	// --headless is NOT Chrome's alone, so it only counts when a chrome BINARY
+	// is being run. LibreOffice takes the same flag for every document
+	// conversion, which the pdf, docx, xlsx and pptx skills call for constantly
+	// -- matching it bare sent every `soffice --headless --convert-to pdf` to
+	// the browser redirect, and a live agent burned twenty tool calls getting
+	// round it by hiding the flag in a shell variable.
+	//
+	// Every piece of this was measured against real commands, and each guards a
+	// case that a plainer pattern gets wrong:
+	//
+	//   -stable/-browser: the .deb installs /usr/bin/google-chrome-STABLE and
+	//   that is the name in this image, so a plain `chrome\s` alternation lets
+	//   the actual browser through -- the one thing this list exists to catch.
+	//
+	//   ["']? then a literal space or tab, NOT \s: the quote closes a quoted
+	//   path, and \s would match a NEWLINE, letting `ls chrome` on one line
+	//   bridge to `soffice --headless` on the next.
+	//
+	//   [^|;&\n]: & and newline end a command as surely as | and ;, so without
+	//   them `cat chrome-notes.txt && soffice --headless ...` is redirected --
+	//   the same false positive, one shell operator along.
+	//
+	// Only binary-before-flag: a binary precedes its flags, and the reverse
+	// order is what matched trailing filenames. Still narrower than the bare
+	// `chrome` match the list omits, so `grep -r chrome /var/log` is untouched.
+	regexp.MustCompile(`\b(google-chrome|chromium|chrome)(-stable|-browser)?["']?[ \t][^|;&\n]*--headless`),
 	regexp.MustCompile(`\b(pkill|killall)\b[^|;]*chrom`),
 	regexp.MustCompile(`\bxdotool\b`),
 }
