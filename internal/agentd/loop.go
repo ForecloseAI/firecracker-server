@@ -26,6 +26,16 @@ import (
 // 503 rather than blocking an HTTP handler on a model call.
 var ErrBusy = errors.New("agent queue is full")
 
+// ErrStopped is returned when a message is handed to an agent whose goroutine
+// has already been cancelled -- it was recycled or evicted between the caller
+// looking it up and the caller using it.
+//
+// Refusing is the whole point: this instance's inbox is never drained again, so
+// accepting would log the person's message into a transcript that gets no
+// reply. The supervisor turns it into a retry on the replacement instance, so
+// it should never reach a client.
+var ErrStopped = errors.New("agent was recycled")
+
 // inboxDepth is how many messages may wait while a turn runs. Small on
 // purpose: a person queueing a dozen instructions at an agent that is stuck is
 // better told so than silently buffered.
@@ -48,7 +58,15 @@ const maxTokens = 8192
 // which means UNLIMITED -- the runner loops until the model stops calling
 // tools. For an agent that runs unattended that is a runaway bill, so it is set
 // explicitly here rather than left at the default.
-const maxIterations = 40
+//
+// 100 rather than 40, because 40 was measured too low for the browser. One UI
+// action costs about three calls -- snapshot, act, screenshot -- so 40 bought
+// roughly thirteen actions, and a live booking ran out one click into a login
+// modal after five and a half minutes of real work. The turn ends where it
+// stands, so the cost of being too low is a job abandoned mid-way, which is
+// worse than the cost of being too high: the model stops on its own when it is
+// finished, and this only binds when something has gone wrong.
+const maxIterations = 100
 
 // Agent is one conversation: its own system prompt, tool set, history and log.
 //
@@ -79,11 +97,23 @@ type Agent struct {
 	cancel      context.CancelFunc
 	convBytes   int
 
+	// stopped is set when the supervisor cancels this agent's goroutine, and is
+	// what closes the window between a caller looking an agent up and enqueueing
+	// to it. Under the SAME lock as state and the inbox check, so a recycle
+	// cannot slip between "idle with nothing queued" and the message that would
+	// have made that false.
+	stopped bool
+
 	// What the last request actually cost in input tokens, which is what
 	// compaction triggers on. Read off the response rather than estimated from
 	// convBytes: the two diverge badly once a browsing agent's history fills
 	// with base64 the API is already clearing, and this is the number billed.
 	lastInput int64
+
+	// reload is shared with this agent's tools: create_skill sets it, and Run
+	// acts on it once the turn is over. Not guarded by a.mu -- it has its own
+	// lock, because a tool handler sets it from a goroutine the runner owns.
+	reload *reloadFlag
 
 	// How many people this agent is currently blocked on. A count rather than a
 	// flag because the runner calls tool handlers concurrently, so two questions
@@ -130,9 +160,15 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		// "an agent that did not start".
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
+	// Read once, then threaded. Everything downstream takes the directory as a
+	// parameter, so there is one source of truth for where built-in skills are.
+	r := roots{workspace: workspace, own: dir, builtin: BuiltinSkillsDir}
+	skills, problems := LoadSkills(r.builtin, dir)
+	reportBadSkills(log, problems)
 	gate := NewGate(log, hubOf(team), dir)
+	reload := &reloadFlag{}
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
-		stateDir: stateDirOf(team)}
+		stateDir: stateDirOf(team), reload: reload}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
 		// keeps every other tool, and the failure shows up in its log rather
@@ -141,15 +177,15 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 			log.Append(Event{Type: "error", Message: "no browser: " + err.Error()})
 		}
 	}
-	tools, err := Tools(roots{workspace: workspace, own: dir}, deps, p.Tools)
+	tools, err := Tools(r, deps, p.Tools)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
-		model: p.Model, system: ComposeSystemPrompt(p, dir, stateDirOf(team)),
+		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
-		inbox: make(chan inbound, inboxDepth),
+		inbox: make(chan inbound, inboxDepth), reload: reload,
 	}
 	// Wired after the agent exists, because the gate is built before it and the
 	// gate is what knows when a person has become the thing this agent is doing.
@@ -232,8 +268,44 @@ func (a *Agent) Run(ctx context.Context) {
 			// is bookkeeping between turns, and Interrupt must not appear to
 			// stop it. On the agent's own context, so shutdown still does.
 			a.compactIfNeeded(ctx)
+			a.recycleIfStale()
 		}
 	}
+}
+
+// recycleIfStale asks the supervisor to drop this agent when its prompt no
+// longer matches what is on disk, so the next message rebuilds it.
+//
+// Placed at the turn boundary and nowhere else. Inside `turn`, a.save() is the
+// LAST statement -- after finish and after report -- so this is the only point
+// at which the event log and conversation.json are both settled. It is also
+// safe from here: the lock order in the supervisor is one-way, and report()
+// already calls back into it from this same goroutine on every delegated turn.
+//
+// Recycle does the deciding, because whether an agent may go depends on state
+// only the supervisor can check without racing.
+func (a *Agent) recycleIfStale() {
+	if !a.reload.take() {
+		return
+	}
+	if a.team == nil {
+		return // a unit test, which has no supervisor to recycle it
+	}
+	// The note is appended by Recycle, while the supervisor still owns this
+	// agent: after the entry is dropped, a message arriving in that window
+	// starts a second instance, and OpenLog reads the last id off DISK -- so an
+	// append made after that read hands out an id the new log is about to reuse,
+	// and SSE replay needs them unique.
+	if a.team.Recycle(a.id, func() {
+		a.log.Append(Event{Type: "skill", Message: "reloading so a new skill is available"})
+	}) {
+		return
+	}
+	// Refused because a message arrived while the turn was ending. Put the
+	// request back rather than dropping it: the queued turn runs on the old
+	// prompt either way, but without this the skill the agent just wrote stays
+	// invisible until some unrelated eviction. The next turn boundary tries again.
+	a.reload.set()
 }
 
 // runTurn executes one turn under a cancellable child context, so Interrupt can
@@ -305,13 +377,51 @@ func (a *Agent) deliver(in inbound) error {
 }
 
 // enqueue puts one message on the inbox without blocking.
+//
+// Under a.mu, and not because the channel needs it: the lock is what makes the
+// refusal above meaningful. quiesce checks the inbox and marks the agent
+// stopped while holding the same lock, so a message either lands before the
+// recycle -- which then refuses -- or is refused itself. Nothing can fall
+// between the two. The send never blocks, so holding the lock across it cannot
+// stall a turn.
 func (a *Agent) enqueue(in inbound) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped {
+		return ErrStopped
+	}
 	select {
 	case a.inbox <- in:
 		return nil
 	default:
 		return ErrBusy
 	}
+}
+
+// quiesce marks the agent stopped if it is idle with an empty inbox, reporting
+// whether it did. The supervisor calls it before cancelling.
+//
+// Both guards live here rather than in the supervisor so that they are checked
+// under the lock enqueue takes. Reading len(inbox) from outside proves nothing:
+// a caller holding a pointer from a moment ago can push onto it between that
+// read and the cancel, and the message would then sit in the person's
+// transcript with no reply ever coming.
+func (a *Agent) quiesce() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || a.state != "idle" || len(a.inbox) > 0 {
+		return false
+	}
+	a.stopped = true
+	return true
+}
+
+// stop marks the agent as no longer running, so a caller still holding it is
+// told to look it up again rather than enqueueing into a dead inbox.
+func (a *Agent) stop() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopped = true
 }
 
 // Interrupt cancels the in-flight turn, reporting whether there was one.

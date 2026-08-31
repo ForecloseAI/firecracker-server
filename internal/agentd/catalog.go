@@ -85,19 +85,32 @@ func (c *Catalog) List() []Profile {
 // the Anthropic SDK -- depending on that directly would tie this file to
 // somebody else's dependency graph for no gain.
 func parseProfile(text string) (Profile, error) {
-	rest, ok := strings.CutPrefix(strings.TrimSpace(text), "---")
-	if !ok {
-		return Profile{}, fmt.Errorf("missing front matter")
-	}
-	front, body, ok := strings.Cut(rest, "\n---")
-	if !ok {
-		return Profile{}, fmt.Errorf("unterminated front matter")
+	front, body, err := cutFrontMatter(text)
+	if err != nil {
+		return Profile{}, err
 	}
 	p := Profile{Prompt: strings.TrimSpace(body)}
 	for _, line := range strings.Split(front, "\n") {
 		applyField(&p, line)
 	}
 	return p, nil
+}
+
+// cutFrontMatter splits a "---" delimited header from the body that follows it.
+//
+// Shared with skills, which use the same shape for the same reason: a handful
+// of scalar keys do not justify pulling a YAML parser in, and the one available
+// here arrived as a transitive dependency of the Anthropic SDK.
+func cutFrontMatter(text string) (front, body string, err error) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(text), "---")
+	if !ok {
+		return "", "", fmt.Errorf("missing front matter")
+	}
+	front, body, ok = strings.Cut(rest, "\n---")
+	if !ok {
+		return "", "", fmt.Errorf("unterminated front matter")
+	}
+	return front, body, nil
 }
 
 // applyField sets one "key: value" line on a profile, ignoring anything else.

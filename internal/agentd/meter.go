@@ -153,18 +153,22 @@ func (m *Meter) save() {
 		log.Printf("agentd: cannot encode usage total: %v", err)
 		return
 	}
-	writeAtomic(m.path, buf)
+	if err := writeAtomic(m.path, buf); err != nil {
+		log.Printf("agentd: cannot write %s: %v", m.path, err)
+	}
 }
 
 // writeAtomic replaces a file via a temp file and a rename, so a crash mid-write
 // leaves the previous contents rather than a truncated one.
-func writeAtomic(path string, buf []byte) {
+//
+// Reports the failure rather than logging it, because the callers want
+// different things from one: the meter carries on with a stale file on disk,
+// while a tool has to tell the model its write did not happen. Swallowing it
+// here would make create_skill report a success it never had.
+func writeAtomic(path string, buf []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, buf, 0o640); err != nil {
-		log.Printf("agentd: cannot write %s: %v", path, err)
-		return
+		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		log.Printf("agentd: cannot replace %s: %v", path, err)
-	}
+	return os.Rename(tmp, path)
 }

@@ -169,7 +169,12 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 		reply(w, http.StatusOK, map[string]any{"message_id": id, "replayed": true})
 		return
 	}
-	if err := a.SendFile(req.Text, req.File); err != nil {
+	// Queued through the supervisor, and the agent it hands back is the one that
+	// took the message: the instance resolved above can be recycled out from
+	// under this request, in which case the message goes to its replacement and
+	// the reply must report THAT instance's state and last event id.
+	a, err := s.sup.SendFile(r.PathValue("id"), req.Text, req.File)
+	if err != nil {
 		s.sendFailed(w, err)
 		return
 	}
@@ -180,9 +185,19 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 
 // sendFailed maps a queueing failure onto a status.
 func (s *Server) sendFailed(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrBusy) {
+	// ErrStopped is transient in exactly the way ErrBusy is -- the agent was
+	// being rebuilt -- so it gets the same "come back in a moment" rather than
+	// a 500 that reads as a broken guest.
+	if errors.Is(err, ErrBusy) || errors.Is(err, ErrStopped) {
 		w.Header().Set("Retry-After", "5")
 		fail(w, http.StatusServiceUnavailable, "busy", err.Error(), "agent")
+		return
+	}
+	// Reachable from here as well as from the lookup: an agent recycled between
+	// the two is started again by the send, and by then the machine may be full.
+	if errors.Is(err, ErrNoCapacity) {
+		w.Header().Set("Retry-After", "10")
+		fail(w, http.StatusServiceUnavailable, "capacity_exhausted", err.Error(), "agents")
 		return
 	}
 	fail(w, http.StatusInternalServerError, "internal", err.Error(), "")

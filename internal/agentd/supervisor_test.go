@@ -247,6 +247,189 @@ func TestNoCapacityWhenEverythingIsBusy(t *testing.T) {
 	}
 }
 
+// liveWithoutGoroutine registers an agent with the supervisor but does NOT run
+// it, so a test can leave a message sitting in its inbox.
+//
+// A running agent drains its inbox in microseconds and would then take a real
+// turn against the API, so the queued-message guard cannot be tested any other
+// way. The returned flag reports whether the agent's context was cancelled.
+func liveWithoutGoroutine(t *testing.T, sup *Supervisor, id string) (*Agent, *bool) {
+	t.Helper()
+	a, err := New(id, t.TempDir(), t.TempDir(), testProfile(), sup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	sup.mu.Lock()
+	sup.agents[id] = &live{agent: a, cancel: func() { stopped = true }, lastUsed: time.Now()}
+	sup.mu.Unlock()
+	return a, &stopped
+}
+
+// An idle agent with nothing queued is dropped, so the next message to it
+// rebuilds the prompt and picks up whatever it just learned.
+func TestRecycleDropsAnIdleAgent(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	_, stopped := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper", nil) {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	if !*stopped {
+		t.Error("the agent's context was never cancelled, so its goroutine would live on")
+	}
+	if _, ok := sup.liveAgent("helper"); ok {
+		t.Error("the agent is still in the live map, so the next message reuses the stale prompt")
+	}
+}
+
+// THE guard that matters. Cancelling a goroutine abandons its inbox, and a
+// message is logged when it ARRIVES -- so a message lost here sits in the
+// person's transcript with no reply ever coming. Refusing costs nothing,
+// because the next start picks the skill up anyway.
+func TestRecycleRefusesWhenBusyOrQueued(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	working, workingStopped := liveWithoutGoroutine(t, sup, "working")
+	working.setState("working")
+	if sup.Recycle("working", nil) || *workingStopped {
+		t.Error("an agent mid-turn was recycled, losing the work the person is waiting on")
+	}
+	queued, queuedStopped := liveWithoutGoroutine(t, sup, "queued")
+	queued.inbox <- inbound{text: "already logged as theirs"}
+	if sup.Recycle("queued", nil) || *queuedStopped {
+		t.Error("an agent with a queued message was recycled; that message would never be answered")
+	}
+	if sup.Recycle("never-existed", nil) {
+		t.Error("recycled an agent that is not running")
+	}
+	// A refused agent must still take messages: quiesce only marks the ones it
+	// actually stopped.
+	if err := queued.Send("and another"); err != nil {
+		t.Errorf("Send to an agent that was NOT recycled = %v, want it queued", err)
+	}
+}
+
+// The window the inbox check alone cannot close: a caller looks an agent up,
+// the agent is recycled, and only then does the caller enqueue. The message has
+// to bounce rather than land in an inbox nothing will ever drain -- otherwise it
+// sits in the person's transcript with no reply coming.
+func TestSendToARecycledAgentIsRefusedRatherThanLost(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	stale, _ := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper", nil) {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	if err := stale.Send("did this reach anybody?"); !errors.Is(err, ErrStopped) {
+		t.Fatalf("Send through a recycled agent = %v, want ErrStopped", err)
+	}
+	if len(stale.inbox) != 0 {
+		t.Error("the message was queued onto an agent whose goroutine is gone")
+	}
+	events, err := stale.Log().ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == "user" {
+			t.Error("a refused message was still logged as the person's, so they wait on a reply nobody will send")
+		}
+	}
+}
+
+// ...and the person never sees that bounce, because the supervisor puts the
+// message on the instance that replaced the one it lost.
+func TestSendToRetriesOntoTheReplacement(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	stale, _ := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper", nil) {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	// Registered again by hand rather than by letting Get start it: a real
+	// goroutine would take the message straight to the API, which an offline
+	// test has no key for. What is under test is that sendTo looks the agent up
+	// AGAIN after a refusal, not what the replacement then does with it.
+	var fresh *Agent
+	sup.mu.Lock()
+	sup.agents["helper"] = &live{agent: stale, cancel: func() {}, lastUsed: time.Now()}
+	sup.mu.Unlock()
+	took, err := sup.sendTo("helper", func(a *Agent) error {
+		err := a.Send("did this reach anybody?")
+		if errors.Is(err, ErrStopped) {
+			fresh, _ = liveWithoutGoroutine(t, sup, "helper") // as a restart would
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("sendTo after a recycle = %v, want the message taken by the replacement", err)
+	}
+	if took != fresh {
+		t.Fatal("sendTo returned the recycled instance, so the reply would report a state nobody is in")
+	}
+	if len(fresh.inbox) != 1 {
+		t.Error("the replacement never got the message")
+	}
+}
+
+// The reload note is appended while the supervisor still owns the agent. After
+// the entry goes, a message can start a second instance, and OpenLog takes its
+// next event id from disk -- so an append made after that read hands out an id
+// the new log has already given to something else, and SSE replay needs them
+// unique.
+func TestRecycleLogsBeforeTheSlotIsFree(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	liveWithoutGoroutine(t, sup, "helper")
+	noted := false
+	sup.Recycle("helper", func() {
+		noted = true
+		if _, ok := sup.agents["helper"]; !ok { // safe: Recycle holds the lock
+			t.Error("the agent was already out of the map, so a restart could be racing this append")
+		}
+	})
+	if !noted {
+		t.Fatal("the note was never appended")
+	}
+}
+
+// Every cancel path has to check the inbox, not just the state. A message sits
+// on the inbox from the moment enqueue returns until the goroutine picks it up,
+// and the agent reads "idle" for that whole window -- so an eviction there
+// drops a message already logged as the person's, with no reply ever coming.
+func TestEvictionSparesAnAgentWithAQueuedMessage(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	_, quietStopped := liveWithoutGoroutine(t, sup, "quiet")
+	queued, queuedStopped := liveWithoutGoroutine(t, sup, "queued")
+	queued.inbox <- inbound{text: "already logged as theirs"}
+
+	sup.EvictIdle()
+	if !*quietStopped {
+		t.Error("an idle agent with an empty inbox survived eviction")
+	}
+	if *queuedStopped {
+		t.Error("EvictIdle dropped an agent holding an unanswered message")
+	}
+}
+
+// Same guard on the capacity path: making room must not free a slot by
+// throwing away a message someone is waiting on.
+func TestMakingRoomSparesAnAgentWithAQueuedMessage(t *testing.T) {
+	sup := supervisorWith(t, 2)
+	busy, busyStopped := liveWithoutGoroutine(t, sup, "busy")
+	busy.inbox <- inbound{text: "already logged as theirs"}
+	_, spareStopped := liveWithoutGoroutine(t, sup, "spare")
+
+	sup.mu.Lock()
+	err := sup.makeRoomLocked("newcomer")
+	sup.mu.Unlock()
+	if err != nil {
+		t.Fatalf("makeRoomLocked: %v, want it to free the spare", err)
+	}
+	if *busyStopped {
+		t.Error("made room by dropping an agent holding an unanswered message")
+	}
+	if !*spareStopped {
+		t.Error("the genuinely idle agent was not the one evicted")
+	}
+}
+
 // A task folder is dated where the person is, not where the guest booted.
 //
 // AdoptZone sets time.Local at startup, so a machine onboarded since is still

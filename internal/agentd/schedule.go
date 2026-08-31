@@ -974,19 +974,17 @@ func (s *Supervisor) fire(sc Schedule, now time.Time) {
 	if !s.idle(sc.Agent) {
 		return // busy with this or with the person's own work; catch it next time
 	}
-	a, err := s.Get(sc.Agent)
+	_, err = s.sendTo(sc.Agent, func(a *Agent) error { return a.SendScheduled(sc.Name, sc.Task) })
 	if err != nil {
 		return // no capacity right now, which the next occurrence may well have
 	}
-	if a.SendScheduled(sc.Name, sc.Task) == nil {
-		s.schedules.Update(sc.ID, func(x *Schedule) {
-			x.LastFired, x.Fires = now, x.Fires+1
-			// A schedule with nothing after this run is spent by it. Turned off
-			// rather than deleted, so the person opening the app sees that the
-			// thing they asked for did happen instead of finding an empty list.
-			x.Enabled = !last
-		})
-	}
+	s.schedules.Update(sc.ID, func(x *Schedule) {
+		x.LastFired, x.Fires = now, x.Fires+1
+		// A schedule with nothing after this run is spent by it. Turned off
+		// rather than deleted, so the person opening the app sees that the
+		// thing they asked for did happen instead of finding an empty list.
+		x.Enabled = !last
+	})
 }
 
 // disable stops a schedule that can never run again.

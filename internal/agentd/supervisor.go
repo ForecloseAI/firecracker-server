@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 )
 
 // ErrNoCapacity is returned when the live-agent ceiling is reached and every
@@ -210,6 +213,39 @@ func (s *Supervisor) Get(id string) (*Agent, error) {
 	return s.start(rec)
 }
 
+// SendFile queues a message from the person, returning the agent that took it.
+//
+// Through here rather than Get-then-Send, because the message has to reach the
+// agent that is actually running: recycling can cancel the instance a caller
+// just looked up, and the reply reports the taker's state and last event id.
+func (s *Supervisor) SendFile(id, text string, file *agentapi.File) (*Agent, error) {
+	return s.sendTo(id, func(a *Agent) error { return a.SendFile(text, file) })
+}
+
+// sendTo enqueues onto a live agent, starting it again if it was stopped
+// between the lookup and the enqueue.
+//
+// One retry is enough: only an idle agent is ever recycled, and the fresh
+// instance cannot be recycled again before it has taken a turn. The retry has
+// to happen out here rather than inside enqueue because the log entry for the
+// message belongs to whichever instance accepted it -- an event appended
+// through the old instance's log would reuse an id the new one already gave out.
+func (s *Supervisor) sendTo(id string, put func(*Agent) error) (*Agent, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		a, err := s.Get(id)
+		if err != nil {
+			return nil, err
+		}
+		if err := put(a); !errors.Is(err, ErrStopped) {
+			if err != nil {
+				return nil, err
+			}
+			return a, nil
+		}
+	}
+	return nil, ErrStopped
+}
+
 // start builds an agent and its goroutine, making room first if needed.
 func (s *Supervisor) start(rec Record) (*Agent, error) {
 	profile, err := s.profileFor(rec)
@@ -265,20 +301,33 @@ func (s *Supervisor) makeRoomLocked(want string) error {
 	if len(s.agents) < s.maxLive || want == BossID {
 		return nil
 	}
-	var oldest string
+	// Through quiesce, like every other cancel path. State() alone says only
+	// that no turn is RUNNING: a message sits on the inbox from the moment
+	// enqueue returns until the goroutine picks it up, and the agent reads
+	// "idle" for that whole window. Cancelling there drops a message already
+	// logged as the person's, which is the failure Recycle refuses to risk.
+	for _, id := range s.idleByAgeLocked() {
+		if s.agents[id].agent.quiesce() {
+			s.stopLocked(id)
+			return nil
+		}
+	}
+	return ErrNoCapacity
+}
+
+// idleByAgeLocked lists the agents reporting idle, least recently used first.
+// Caller holds s.mu.
+func (s *Supervisor) idleByAgeLocked() []string {
+	var out []string
 	for id, l := range s.agents {
-		if l.agent.State() != "idle" {
-			continue
-		}
-		if oldest == "" || l.lastUsed.Before(s.agents[oldest].lastUsed) {
-			oldest = id
+		if l.agent.State() == "idle" {
+			out = append(out, id)
 		}
 	}
-	if oldest == "" {
-		return ErrNoCapacity
-	}
-	s.stopLocked(oldest)
-	return nil
+	sort.Slice(out, func(i, j int) bool {
+		return s.agents[out[i]].lastUsed.Before(s.agents[out[j]].lastUsed)
+	})
+	return out
 }
 
 // Create adds an agent of the given type and starts nothing: it runs when it
@@ -308,11 +357,16 @@ func (s *Supervisor) Delete(id string, purge bool) error {
 }
 
 // stopLocked ends one agent's goroutine. Caller holds s.mu.
+//
+// The agent is marked stopped as well as cancelled, because the pointer outlives
+// the map entry: a caller that looked it up a moment ago must be told to look it
+// up again rather than dropping its message into an inbox nothing will drain.
 func (s *Supervisor) stopLocked(id string) {
 	l, ok := s.agents[id]
 	if !ok {
 		return
 	}
+	l.agent.stop()
 	l.cancel()
 	delete(s.agents, id)
 }
@@ -351,11 +405,48 @@ func (s *Supervisor) Close() {
 func (s *Supervisor) EvictIdle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// quiesce rather than State(), for the reason makeRoomLocked gives: an
+	// agent with a message already on its inbox still reports idle, and
+	// cancelling it there loses that message for good.
 	for id, l := range s.agents {
-		if l.agent.State() == "idle" {
+		if l.agent.quiesce() {
 			s.stopLocked(id)
 		}
 	}
+}
+
+// Recycle stops one agent so the next message to it rebuilds its prompt,
+// reporting whether it actually did.
+//
+// The narrow version of EvictIdle: a skill belongs to the agent that wrote it,
+// so recycling the whole machine to pick one up would throw away five other
+// agents' warm state for nothing.
+//
+// Both guards matter, and both are checked by quiesce under the agent's OWN
+// lock. A working agent must not be interrupted mid-task. And an agent with a
+// queued message must not be dropped either: cancelling the goroutine abandons
+// its inbox, and Send logs the person's message when it ARRIVES, so a message
+// lost here would sit in their transcript with no reply coming, forever.
+// Checking from out here would not be enough -- a caller holding a pointer from
+// a moment ago can enqueue between the check and the cancel. Refusing is free:
+// the next start picks the skill up anyway.
+//
+// note, when set, is appended while the agent is still in the map. The window
+// after the delete belongs to whichever instance a new message starts, and
+// OpenLog takes its next event id from disk: an append made in that window
+// duplicates an id the new log has already handed out.
+func (s *Supervisor) Recycle(id string, note func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.agents[id]
+	if !ok || !l.agent.quiesce() {
+		return false
+	}
+	if note != nil {
+		note()
+	}
+	s.stopLocked(id)
+	return true
 }
 
 // LiveCount is how many agents currently hold a goroutine, for /debug/memstats.
@@ -374,11 +465,8 @@ func (s *Supervisor) Deliver(from, to, text string) error {
 	if from == to {
 		return fmt.Errorf("an agent cannot message itself")
 	}
-	target, err := s.Get(to)
-	if err != nil {
-		return err
-	}
-	return target.Deliver(from, text)
+	_, err := s.sendTo(to, func(target *Agent) error { return target.Deliver(from, text) })
+	return err
 }
 
 // Delegation is one piece of work handed from the boss to a specialist.
@@ -398,11 +486,8 @@ func (s *Supervisor) Delegate(from string, d Delegation) error {
 	if _, ok := s.roster.Get(d.To); !ok {
 		return fmt.Errorf("no agent %s; create one first or check list_agents", d.To)
 	}
-	target, err := s.Get(d.To)
-	if err != nil {
-		return err
-	}
-	if err := target.DeliverWork(from, delegationBrief(from, d)); err != nil {
+	brief := delegationBrief(from, d)
+	if _, err := s.sendTo(d.To, func(target *Agent) error { return target.DeliverWork(from, brief) }); err != nil {
 		return err
 	}
 	s.logFor(from, Event{Type: "delegation", To: d.To, TaskTitle: d.Title, TaskDir: d.TaskDir})

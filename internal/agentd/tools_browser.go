@@ -63,10 +63,16 @@ func browserTools(d toolDeps) ([]anthropic.BetaTool, error) {
 	return tools, nil
 }
 
-// logTo records a line in the agent's log when it has one.
+// logTo records an error line in the agent's log when it has one.
 func logTo(d toolDeps, message string) {
+	logEvent(d, Event{Type: "error", Message: message})
+}
+
+// logEvent records any event in the agent's log when it has one. A unit test
+// builds tool deps without a log, so this must stay nil-safe.
+func logEvent(d toolDeps, e Event) {
 	if d.log != nil {
-		d.log.Append(Event{Type: "error", Message: message})
+		d.log.Append(e)
 	}
 }
 
