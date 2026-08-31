@@ -1,7 +1,6 @@
 package agentd
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -763,40 +762,128 @@ func absoluteForm(at time.Time, loc *time.Location) string {
 // machine, like about-the-person.md: everyone here works for the same person.
 func zonePath(stateDir string) string { return filepath.Join(stateDir, "timezone") }
 
-// RememberZone records where the person is, from whatever the client sent.
+// RememberZone records where the person says they are.
 //
-// An IANA name is preferred over a stamp because they are not equivalent: an
-// offset is only true for the instant it was sampled, so a schedule stored from
-// +05:30 in July keeps firing at July's offset after a daylight-saving change,
-// while a named zone stays correct. Failure is silent -- not knowing the zone
-// costs UTC, and it must never fail a person's message.
-func RememberZone(stateDir, tz, clientTime string) {
-	if _, err := time.LoadLocation(tz); err == nil && tz != "" {
-		os.WriteFile(zonePath(stateDir), []byte(tz), 0o640)
+// An IANA name and nothing else. The app asks for a country at onboarding and
+// resolves it to a zone before it gets here, so there is no stamp to fall back
+// on and no reason to want one: an offset is only true for the instant it was
+// sampled, so a schedule stored from +05:30 in July keeps firing at July's
+// offset after a daylight-saving change, while a named zone stays correct.
+//
+// An unresolvable name is ignored rather than stored. Failure is silent -- not
+// knowing the zone costs UTC, and it must never fail the person's onboarding.
+// Reports whether it stored anything, which is what tells the caller the zone
+// actually moved. Unexported: outside this file the only way to set a zone is
+// the Supervisor method below, which is what carries the adoption with it.
+func rememberZone(stateDir, tz string) bool {
+	if tz == readZoneFile(stateDir) || validZone(tz) != nil {
+		return false
+	}
+	return os.WriteFile(zonePath(stateDir), []byte(tz), 0o640) == nil
+}
+
+// validZone reports whether this is a name the machine can adopt, and is the
+// one place that rule lives -- the HTTP handler refuses what it refuses, so a
+// zone cannot be accepted with a 204 and then silently dropped here.
+//
+// An IANA name and nothing else. "Local" resolves but means whatever zone the
+// process happens to be in, which is the ambient answer this whole design
+// exists to remove; "" resolves to UTC, which is the absence of an answer
+// rather than one.
+func validZone(tz string) error {
+	if tz == "" || tz == "Local" {
+		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
+	}
+	return nil
+}
+
+// RememberZone records the zone and, when it has actually changed, adopts it:
+// the daemon's own TZ moves, and the clock schedules move with it.
+//
+// Moving the schedules is the point. A stored NextRunAt is an absolute instant,
+// so a person who books "daily at 09:00" in London and then changes their
+// country to the United States would get one firing at the old 9am -- 01:00
+// where they now are -- before the schedule settled onto the new zone.
+// Re-saving the same profile writes nothing and moves nothing.
+func (s *Supervisor) RememberZone(tz string) bool {
+	if !rememberZone(s.stateDir, tz) {
+		return false
+	}
+	exportZone(tz)
+	s.rezone(time.Now())
+	return true
+}
+
+// AdoptZone puts the whole guest on the person's clock, and is called once at
+// startup before anything else runs.
+//
+// This is what makes the zone a property of the machine rather than something
+// threaded through every request. The VM belongs to one person -- its id is
+// derived from their account -- so "the local time here" is a coherent idea in
+// a way it never is on a shared host, and once the guest is on their clock,
+// every reader is right for free: `date` in a bash tool, a file mtime an agent
+// lists, the date a task folder is named after.
+//
+// Called from main before the supervisor exists, so the assignment to
+// time.Local cannot race a goroutine reading it. A later change comes in
+// through RememberZone, which moves TZ for the subprocesses that care and
+// leaves time.Local alone until the next restart: assigning it under a running
+// daemon would race the sweep and every live turn, and restarting to avoid that
+// would drop the calls onboarding makes right after saving the profile.
+//
+// So nothing in the daemon may depend on time.Local for its answer: everything
+// that needs the person's clock takes it from loadZone, which is correct the
+// moment onboarding writes the file.
+func AdoptZone(stateDir string) {
+	zone := readZoneFile(stateDir)
+	if zone == "" {
 		return
 	}
-	if _, err := time.Parse(time.RFC3339, clientTime); err == nil {
-		os.WriteFile(zonePath(stateDir), []byte(clientTime), 0o640)
+	// loadZone rather than LoadLocation, so a machine still holding the old
+	// offset form moves with everything else that reads it. Resolving the name
+	// here on its own would leave the daemon on UTC while its own schedules ran
+	// on the person's offset -- and that cohort is the only reason the fallback
+	// in loadZone exists.
+	time.Local = loadZone(stateDir)
+	// TZ takes a name only: glibc cannot read an offset stamp, and handing it one
+	// would put every subprocess on something neither side meant.
+	if validZone(zone) == nil {
+		exportZone(zone)
 	}
 }
 
-// RememberZone records the zone and, when it has actually changed, moves the
-// clock schedules onto it.
+// exportZone puts the zone in the environment, where the processes an agent
+// starts will find it.
 //
-// The method rather than the function is what the HTTP handlers call, because a
-// stored NextRunAt is an absolute instant: a person who books "daily at 09:00"
-// in London and then opens the app in Los Angeles would get one firing at the
-// old 9am -- 01:00 where they now are -- before the schedule settled onto the
-// new zone. The file's own bytes decide whether anything changed, so the usual
-// case, the same zone arriving on every message, costs one read and no writes.
-func (s *Supervisor) RememberZone(tz, clientTime string) {
-	before, _ := os.ReadFile(zonePath(s.stateDir))
-	RememberZone(s.stateDir, tz, clientTime)
-	after, _ := os.ReadFile(zonePath(s.stateDir))
-	if bytes.Equal(before, after) {
-		return
+// A bash tool inherits this daemon's environment at exec time, and glibc reads
+// TZ before it reads /etc/localtime -- which matters because agentd runs as
+// `agent` and cannot write /etc/localtime anyway. So this one setenv is what
+// makes `date` inside a turn print the person's time instead of UTC.
+func exportZone(zone string) {
+	os.Setenv("TZ", zone)
+}
+
+// personNow is the current time on the person's own clock.
+//
+// The one accessor for it, so a person-facing date is never accidentally the
+// guest's. Reads the stored zone rather than time.Local, which AdoptZone sets
+// at boot and which is therefore still UTC on a machine onboarded since.
+func personNow(stateDir string) time.Time {
+	return time.Now().In(loadZone(stateDir))
+}
+
+// readZoneFile returns the stored zone name, or "" when there is not one yet.
+// Trimmed here so no caller has to defend against the trailing newline a hand
+// edit of the file would leave.
+func readZoneFile(stateDir string) string {
+	buf, err := os.ReadFile(zonePath(stateDir))
+	if err != nil {
+		return ""
 	}
-	s.rezone(time.Now())
+	return strings.TrimSpace(string(buf))
 }
 
 // rezone recomputes the next firing of every enabled clock schedule.
@@ -832,14 +919,22 @@ func (s *Supervisor) rezone(now time.Time) {
 
 // loadZone resolves the remembered timezone, falling back to UTC.
 func loadZone(stateDir string) *time.Location {
-	buf, err := os.ReadFile(zonePath(stateDir))
-	if err != nil {
-		return time.UTC
-	}
-	v := strings.TrimSpace(string(buf))
+	v := readZoneFile(stateDir)
 	if loc, err := time.LoadLocation(v); err == nil {
 		return loc
 	}
+	// A machine onboarded before the zone became a name may hold an RFC3339
+	// stamp, which is what the old code stored when a client sent no IANA name.
+	// Read it rather than dropping to UTC: that machine's schedules are anchored
+	// to this offset, and falling back would silently re-anchor every one of them
+	// at the next boot with no way left to say where the person is.
+	//
+	// Nothing writes this form any more -- rememberZone refuses it. Those
+	// machines convert themselves: the stamp comes back on GET /person, the app
+	// cannot name a country for it and shows "Not set", and one tap stores a real
+	// name. This branch is deletable once that cohort has been through the app,
+	// and not before -- it is a read path only, so leaving it costs one failed
+	// LoadLocation on machines that no longer need it.
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
 		return t.Location()
 	}

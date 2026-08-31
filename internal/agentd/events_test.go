@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Ids must continue across a restart. If a reopened log restarted at 1, an SSE
@@ -108,5 +109,27 @@ func TestUnsubscribeDetaches(t *testing.T) {
 	log.Append(Event{Type: "text", Text: "after"})
 	if len(ch) != 0 {
 		t.Error("an unsubscribed channel still received an event")
+	}
+}
+
+// Stored timestamps stay UTC even though the guest itself runs on the person's
+// clock.
+//
+// This is the rule AdoptZone quietly depends on. Once time.Local is the
+// person's zone, a time.Now() that forgot its .UTC() would start writing
+// local-stamped lines into a transcript that is otherwise all UTC -- and the
+// two only disagree by an offset, so nothing would look broken until a reader
+// sorted them together or the person moved. Cheaper to assert it here than to
+// find it in a transcript months later.
+func TestAppendStampsInUTCWhateverTheLocalZone(t *testing.T) {
+	// time.Local is already pinned away from UTC by TestMain, which is the whole
+	// point: the stamp must be UTC regardless of what the process is running.
+
+	log, err := OpenLog(t.TempDir(), "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := log.Append(Event{Type: "user", Text: "hello"}).TS.Location(); got != time.UTC {
+		t.Errorf("event stamped in %v, want UTC: a stored time must not follow time.Local", got)
 	}
 }

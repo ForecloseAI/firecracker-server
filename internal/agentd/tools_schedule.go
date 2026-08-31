@@ -67,7 +67,8 @@ func listSchedulesTool(d toolDeps) (anthropic.BetaTool, error) {
 			if d.team == nil {
 				return toolText(noSupervisor), nil
 			}
-			return toolText(renderSchedules(d.team.Schedules().List(), d.self)), nil
+			loc := loadZone(d.stateDir)
+			return toolText(renderSchedules(d.team.Schedules().List(), d.self, loc)), nil
 		})
 }
 
@@ -130,13 +131,17 @@ func (s *Supervisor) CreateSchedule(ctx context.Context, gate *Gate, self string
 }
 
 // renderSchedules lists one agent's schedules for the model to read.
-func renderSchedules(all []Schedule, self string) string {
+//
+// Times in the person's zone, like the confirmation above: a stored NextRunAt
+// is an absolute instant, so rendering it raw tells the model a job booked for
+// 09:00 in Kolkata runs at 03:30 -- and the model repeats that to the person.
+func renderSchedules(all []Schedule, self string, loc *time.Location) string {
 	var out []string
 	for _, sc := range all {
 		if sc.Agent != self {
 			continue
 		}
-		line := sc.ID + " " + sc.Name + " (" + sc.Expr + ") next " + sc.NextRunAt.Format(time.RFC1123)
+		line := sc.ID + " " + sc.Name + " (" + sc.Expr + ") next " + sc.NextRunAt.In(loc).Format(time.RFC1123)
 		if !sc.Enabled {
 			line += " [off]"
 		}

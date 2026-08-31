@@ -132,8 +132,9 @@ func TestCancellingAMissingScheduleIs404(t *testing.T) {
 	}
 }
 
-// The guest runs UTC and cannot know whose 9am is meant, so the one call the
-// app already makes about the person has to carry it.
+// The profile is the only way a zone reaches the guest. The country picked at
+// onboarding resolves to an IANA name here, and the guest puts itself on that
+// clock -- so this one call is what decides whose 9am "daily at 09:00" means.
 func TestProfileCarriesTheTimezone(t *testing.T) {
 	s, g, u := newFake(t)
 	code := call(t, s, u, "PUT", "/v1/profile",
@@ -146,28 +147,21 @@ func TestProfileCarriesTheTimezone(t *testing.T) {
 	}
 }
 
-// The profile is written once, at onboarding. A person who travels afterwards
-// keeps sending messages, so the zone has to ride those too -- otherwise their
-// "daily at 09:00" goes on firing at the 9am of the city they signed up in.
-func TestAMessageCarriesTheTimezone(t *testing.T) {
+// A message carries no zone, and an old client that still sends one is ignored
+// rather than obeyed.
+//
+// This is the invariant the whole design rests on: one writer. A zone arriving
+// on ordinary traffic is a second source for a fact the profile already owns,
+// and it is the one that drifts -- a VPN, a second device or a wrong clock
+// would silently re-anchor every "daily at 09:00" the person had booked.
+func TestAMessageNeverCarriesATimezone(t *testing.T) {
 	s, g, u := newFake(t)
 	code := call(t, s, u, "POST", "/v1/threads/boss/messages",
 		`{"text":"ship it","tz":"America/Los_Angeles"}`).Code
 	if code != http.StatusOK {
 		t.Fatalf("post message = %d, want 200", code)
 	}
-	if g.zone != "America/Los_Angeles" {
-		t.Errorf("the guest received tz %q, want America/Los_Angeles", g.zone)
-	}
-}
-
-// A client that sends no zone must not erase the one the guest already has: the
-// daemon keeps its stored zone on an empty field, and the gateway has to leave
-// the field empty rather than inventing UTC on the person's behalf.
-func TestAMessageWithoutATimezoneSendsNone(t *testing.T) {
-	s, g, u := newFake(t)
-	call(t, s, u, "POST", "/v1/threads/boss/messages", `{"text":"ship it"}`)
-	if g.zone != "" {
-		t.Errorf("the guest received tz %q, want none", g.zone)
+	if strings.Contains(g.body, "tz") {
+		t.Errorf("the guest was sent %s, which still carries a zone: only the profile may set it", g.body)
 	}
 }

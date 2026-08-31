@@ -145,7 +145,10 @@ func TestStartTaskMakesADatedFolderAndRecordsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := time.Now().Format("2006-01-02") + "-csv-export"
+	// The machine's clock, not the test process's: StartTask dates the folder
+	// from the stored zone, and computing the expectation from time.Local made
+	// this pass or fail on where the host happened to be.
+	want := sup.localDate(time.Now()) + "-csv-export"
 	if filepath.Base(task.Dir) != want {
 		t.Errorf("folder = %q, want %q", filepath.Base(task.Dir), want)
 	}
