@@ -66,22 +66,28 @@ var browserRoutes = []*regexp.Regexp{
 	// is being run. LibreOffice takes the same flag for every document
 	// conversion, which the pdf, docx, xlsx and pptx skills call for constantly
 	// -- matching it bare sent every `soffice --headless --convert-to pdf` to
-	// the browser redirect. Found on a live VM: the agent spent a minute and
-	// twenty tool calls before getting round it by hiding the flag in a shell
-	// variable, which worked and reads like a fight with its own tools.
+	// the browser redirect, and a live agent burned twenty tool calls getting
+	// round it by hiding the flag in a shell variable.
 	//
-	// The trailing \s is what makes it a binary rather than a word: without it
-	// `soffice --headless --convert-to pdf chrome-notes.docx` matches on the
-	// FILENAME and the same surface breaks again for any document with chrome
-	// in its name. \b would not do -- a hyphen is a word boundary, so
-	// `\bchrome\b` matches inside `chrome-notes.docx`.
+	// Every piece of this was measured against real commands, and each guards a
+	// case that a plainer pattern gets wrong:
 	//
-	// Only this direction, deliberately. A binary comes before its flags, so
-	// the reverse order buys nothing and is precisely the pattern that matched
-	// trailing filenames. Still narrower than the bare `chrome` match the list
-	// omits: this needs the binary AND the flag, so `grep -r chrome /var/log`
-	// is untouched.
-	regexp.MustCompile(`\b(google-chrome|chromium|chrome)\s[^|;]*--headless`),
+	//   -stable/-browser: the .deb installs /usr/bin/google-chrome-STABLE and
+	//   that is the name in this image, so a plain `chrome\s` alternation lets
+	//   the actual browser through -- the one thing this list exists to catch.
+	//
+	//   ["']? then a literal space or tab, NOT \s: the quote closes a quoted
+	//   path, and \s would match a NEWLINE, letting `ls chrome` on one line
+	//   bridge to `soffice --headless` on the next.
+	//
+	//   [^|;&\n]: & and newline end a command as surely as | and ;, so without
+	//   them `cat chrome-notes.txt && soffice --headless ...` is redirected --
+	//   the same false positive, one shell operator along.
+	//
+	// Only binary-before-flag: a binary precedes its flags, and the reverse
+	// order is what matched trailing filenames. Still narrower than the bare
+	// `chrome` match the list omits, so `grep -r chrome /var/log` is untouched.
+	regexp.MustCompile(`\b(google-chrome|chromium|chrome)(-stable|-browser)?["']?[ \t][^|;&\n]*--headless`),
 	regexp.MustCompile(`\b(pkill|killall)\b[^|;]*chrom`),
 	regexp.MustCompile(`\bxdotool\b`),
 }

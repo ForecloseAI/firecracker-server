@@ -388,3 +388,44 @@ func TestRecycleLogsBeforeTheSlotIsFree(t *testing.T) {
 		t.Fatal("the note was never appended")
 	}
 }
+
+// Every cancel path has to check the inbox, not just the state. A message sits
+// on the inbox from the moment enqueue returns until the goroutine picks it up,
+// and the agent reads "idle" for that whole window -- so an eviction there
+// drops a message already logged as the person's, with no reply ever coming.
+func TestEvictionSparesAnAgentWithAQueuedMessage(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	_, quietStopped := liveWithoutGoroutine(t, sup, "quiet")
+	queued, queuedStopped := liveWithoutGoroutine(t, sup, "queued")
+	queued.inbox <- inbound{text: "already logged as theirs"}
+
+	sup.EvictIdle()
+	if !*quietStopped {
+		t.Error("an idle agent with an empty inbox survived eviction")
+	}
+	if *queuedStopped {
+		t.Error("EvictIdle dropped an agent holding an unanswered message")
+	}
+}
+
+// Same guard on the capacity path: making room must not free a slot by
+// throwing away a message someone is waiting on.
+func TestMakingRoomSparesAnAgentWithAQueuedMessage(t *testing.T) {
+	sup := supervisorWith(t, 2)
+	busy, busyStopped := liveWithoutGoroutine(t, sup, "busy")
+	busy.inbox <- inbound{text: "already logged as theirs"}
+	_, spareStopped := liveWithoutGoroutine(t, sup, "spare")
+
+	sup.mu.Lock()
+	err := sup.makeRoomLocked("newcomer")
+	sup.mu.Unlock()
+	if err != nil {
+		t.Fatalf("makeRoomLocked: %v, want it to free the spare", err)
+	}
+	if *busyStopped {
+		t.Error("made room by dropping an agent holding an unanswered message")
+	}
+	if !*spareStopped {
+		t.Error("the genuinely idle agent was not the one evicted")
+	}
+}

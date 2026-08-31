@@ -33,6 +33,14 @@ func (f *reloadFlag) set() {
 // take reports whether a reload is wanted, clearing the flag.
 func (f *reloadFlag) take() bool { return f != nil && f.want.Swap(false) }
 
+// descriptionCap bounds one skill's description, in bytes.
+//
+// The whole index shares a 16 kB budget, so without a per-skill cap one
+// runaway description silently pushes every other skill -- the built-ins
+// included -- out of the prompt, which is precisely what that budget exists to
+// prevent. A description is a sentence or two; this is generous for one.
+const descriptionCap = 600
+
 // createSkillInput is the create_skill tool's argument.
 //
 // Never put a comma in a description: comma separates jsonschema tag options,
@@ -85,7 +93,11 @@ func checkSkill(r roots, name string, in createSkillInput) string {
 	case name == "":
 		return fmt.Sprintf("%q will not work as a skill name. Use lowercase letters numbers and "+
 			"hyphens - something like expense-filing.", in.Name)
-	case strings.TrimSpace(in.Description) == "":
+	// Through scalarValue, because that is what the LOADER will run on it.
+	// TrimSpace alone accepts "5" or "->", which the loader reads as a YAML
+	// block indicator and discards -- so the tool would report Saved, the agent
+	// would recycle itself for nothing, and the skill would come back invisible.
+	case scalarValue(in.Description) == "":
 		return "a skill needs a description saying what it does and when to use it. Without one it " +
 			"sits on disk and never triggers, because the description is all you see until you read it."
 	case strings.TrimSpace(in.Body) == "":
@@ -119,7 +131,7 @@ func isBuiltinSkill(builtinDir, name string) bool {
 // one typo away.
 func composeSkill(name string, in createSkillInput) string {
 	return fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n",
-		name, oneLine(in.Description), strings.TrimSpace(in.Body))
+		name, capTextAt(oneLine(in.Description), descriptionCap), strings.TrimSpace(in.Body))
 }
 
 // oneLine flattens a description onto a single line. The front matter parser

@@ -71,11 +71,11 @@ type roots struct {
 }
 
 // fileTools returns the file tools, confined to the given roots.
-func fileTools(r roots) ([]anthropic.BetaTool, error) {
+func fileTools(r roots, reload *reloadFlag) ([]anthropic.BetaTool, error) {
 	return buildTools(
 		func() (anthropic.BetaTool, error) { return readTool(r) },
-		func() (anthropic.BetaTool, error) { return writeTool(r) },
-		func() (anthropic.BetaTool, error) { return editTool(r) },
+		func() (anthropic.BetaTool, error) { return writeTool(r, reload) },
+		func() (anthropic.BetaTool, error) { return editTool(r, reload) },
 		func() (anthropic.BetaTool, error) { return globTool(r) },
 		func() (anthropic.BetaTool, error) { return grepTool(r) },
 	)
@@ -111,7 +111,7 @@ func readTool(r roots) (anthropic.BetaTool, error) {
 }
 
 // writeTool creates or overwrites a file, making parent directories as needed.
-func writeTool(r roots) (anthropic.BetaTool, error) {
+func writeTool(r roots, reload *reloadFlag) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[writeInput](
 		"Write", "Create or overwrite a file with the given contents.",
 		func(ctx context.Context, in writeInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
@@ -125,12 +125,13 @@ func writeTool(r roots) (anthropic.BetaTool, error) {
 			if err := os.WriteFile(full, []byte(in.Content), 0o640); err != nil {
 				return toolText(err.Error()), nil
 			}
+			noteSkillChange(r, full, reload)
 			return toolText(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path)), nil
 		})
 }
 
 // editTool replaces exact text in a file.
-func editTool(r roots) (anthropic.BetaTool, error) {
+func editTool(r roots, reload *reloadFlag) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[editInput](
 		"Edit", "Replace exact text in a file. Fails unless old_string appears exactly once, unless replace_all is set.",
 		func(ctx context.Context, in editInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
@@ -138,8 +139,26 @@ func editTool(r roots) (anthropic.BetaTool, error) {
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
-			return toolText(applyEdit(full, in)), nil
+			out := applyEdit(full, in)
+			noteSkillChange(r, full, reload)
+			return toolText(out), nil
 		})
+}
+
+// noteSkillChange marks the prompt stale when a write lands in the agent's own
+// skills folder.
+//
+// create_skill is the documented way in and sets this itself, but Write and
+// Edit reach the same directory -- it is a writable root, so it has to be for
+// an agent to refine a skill at all. Without this an agent that writes a
+// SKILL.md directly is told the write succeeded and reasonably assumes the
+// skill is live, when in fact it stays out of the index until some unrelated
+// eviction. A body edit needs no reload, but this cannot tell the two apart
+// from a path, and a redundant recycle costs one cold start.
+func noteSkillChange(r roots, full string, reload *reloadFlag) {
+	if dir := ownSkillsDir(r.own); dir != "" && under(full, []string{dir}) {
+		reload.set()
+	}
 }
 
 // applyEdit performs the replacement, reporting what happened.
@@ -266,7 +285,10 @@ func grepTree(root, base string, re *regexp.Regexp) []string {
 // "../.." that names nothing the model can then Read.
 func relTo(root, p string) string {
 	rel, err := filepath.Rel(root, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	// The separator matters: a bare ".." prefix also matches a file honestly
+	// named "..notes.txt", which would then be reported by absolute path while
+	// every neighbouring hit stayed relative.
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return p
 	}
 	return rel

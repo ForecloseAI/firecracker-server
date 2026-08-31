@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -300,20 +301,33 @@ func (s *Supervisor) makeRoomLocked(want string) error {
 	if len(s.agents) < s.maxLive || want == BossID {
 		return nil
 	}
-	var oldest string
+	// Through quiesce, like every other cancel path. State() alone says only
+	// that no turn is RUNNING: a message sits on the inbox from the moment
+	// enqueue returns until the goroutine picks it up, and the agent reads
+	// "idle" for that whole window. Cancelling there drops a message already
+	// logged as the person's, which is the failure Recycle refuses to risk.
+	for _, id := range s.idleByAgeLocked() {
+		if s.agents[id].agent.quiesce() {
+			s.stopLocked(id)
+			return nil
+		}
+	}
+	return ErrNoCapacity
+}
+
+// idleByAgeLocked lists the agents reporting idle, least recently used first.
+// Caller holds s.mu.
+func (s *Supervisor) idleByAgeLocked() []string {
+	var out []string
 	for id, l := range s.agents {
-		if l.agent.State() != "idle" {
-			continue
-		}
-		if oldest == "" || l.lastUsed.Before(s.agents[oldest].lastUsed) {
-			oldest = id
+		if l.agent.State() == "idle" {
+			out = append(out, id)
 		}
 	}
-	if oldest == "" {
-		return ErrNoCapacity
-	}
-	s.stopLocked(oldest)
-	return nil
+	sort.Slice(out, func(i, j int) bool {
+		return s.agents[out[i]].lastUsed.Before(s.agents[out[j]].lastUsed)
+	})
+	return out
 }
 
 // Create adds an agent of the given type and starts nothing: it runs when it
@@ -391,8 +405,11 @@ func (s *Supervisor) Close() {
 func (s *Supervisor) EvictIdle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// quiesce rather than State(), for the reason makeRoomLocked gives: an
+	// agent with a message already on its inbox still reports idle, and
+	// cancelling it there loses that message for good.
 	for id, l := range s.agents {
-		if l.agent.State() == "idle" {
+		if l.agent.quiesce() {
 			s.stopLocked(id)
 		}
 	}

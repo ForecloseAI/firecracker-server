@@ -179,3 +179,71 @@ func TestARefusedRecycleKeepsTheReloadRequest(t *testing.T) {
 		t.Error("the reload request was lost, so the new skill stays out of the prompt")
 	}
 }
+
+// A description the LOADER will discard must be refused up front. scalarValue
+// reads "5" or "->" as a YAML block indicator, so accepting one meant telling
+// the model "Saved", recycling the agent for nothing, and coming back with the
+// skill invisible.
+func TestCreateSkillRefusesADescriptionTheLoaderWouldDrop(t *testing.T) {
+	builtin := withBuiltinSkills(t)
+	agentDir := t.TempDir()
+	tools, reload := skillTools(t, builtin, agentDir)
+
+	for _, bad := range []string{"5", "2024", "->", "-1"} {
+		got := call(t, tools, "create_skill", createSkillInput{
+			Name: "thing", Description: bad, Body: "steps",
+		})
+		if !strings.Contains(got, "description") {
+			t.Errorf("description %q was accepted: %s", bad, got)
+		}
+	}
+	if reload.take() {
+		t.Error("a refused skill asked for a reload")
+	}
+	if skills, _ := LoadSkills(builtin, agentDir); len(skills) != 0 {
+		t.Errorf("skills = %+v, want nothing written", skills)
+	}
+}
+
+// One skill must not be able to push the others out of the prompt. The index
+// shares a 16 kB budget, so an unbounded description evicts the built-ins.
+func TestALongDescriptionCannotCrowdOutOtherSkills(t *testing.T) {
+	builtin := withBuiltinSkills(t)
+	writeSkill(t, builtin, "pdf", "description: Read a PDF. Use when one arrives.")
+	agentDir := t.TempDir()
+	tools, _ := skillTools(t, builtin, agentDir)
+
+	call(t, tools, "create_skill", createSkillInput{
+		Name: "aaa-hog", Description: "Use when " + strings.Repeat("x", 40_000), Body: "steps",
+	})
+	skills, _ := LoadSkills(builtin, agentDir)
+	out := RenderSkillsSection(skills, roots{own: agentDir, builtin: builtin})
+	if !strings.Contains(out, "pdf") {
+		t.Errorf("the built-in was crowded out of the prompt:\n%s", out[:min(len(out), 400)])
+	}
+	if len(out) > skillsCap {
+		t.Errorf("section is %d bytes, over the %d budget", len(out), skillsCap)
+	}
+}
+
+// Write reaches the skills folder too -- it has to, or an agent could not
+// refine a skill. Without flagging a reload it is told the write succeeded
+// while the skill stays out of the index until an unrelated eviction.
+func TestWritingASkillDirectlyStillAsksForAReload(t *testing.T) {
+	builtin := withBuiltinSkills(t)
+	agentDir := t.TempDir()
+	tools, reload := skillTools(t, builtin, agentDir)
+
+	call(t, tools, "Write", writeInput{
+		Path:    filepath.Join(ownSkillsDir(agentDir), "by-hand", "SKILL.md"),
+		Content: "---\nname: by-hand\ndescription: Written by hand. Use when testing.\n---\n\nsteps\n",
+	})
+	if !reload.take() {
+		t.Error("a skill written with Write did not flag a reload, so it would stay invisible")
+	}
+	// An ordinary workspace write must NOT trigger one.
+	call(t, tools, "Write", writeInput{Path: "notes.md", Content: "hello"})
+	if reload.take() {
+		t.Error("an ordinary file write asked for a recycle")
+	}
+}

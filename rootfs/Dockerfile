@@ -136,12 +136,17 @@ RUN python3 -m venv /opt/agent/venv \
 # because this image is opened read-only by every VM at once and the host page
 # cache holds one copy for all of them. Seeding instead would pay for the same
 # files per agent, per start, and leave existing VMs on a stale copy forever.
-# Read-only is also what stops one agent rewriting what every other agent is
-# told to do; an agent's own skills live on its overlay.
+# Keeping them out of an agent's own writable tree is also what stops one agent
+# rewriting what every other agent is told to do; an agent's own skills live
+# beside its memory instead.
 #
-# Note this lands AFTER the chown above, so these stay root-owned and the kernel
-# refuses a write from the agent user whatever the daemon's own path checks do.
-# That is the belt to resolveWrite's braces, not a replacement for it.
+# Note this lands AFTER the chown above, so these stay root-owned: an ordinary
+# write by the agent user is refused by the kernel whatever the daemon's path
+# checks do. It is NOT a security boundary -- the agent has passwordless sudo
+# and / is an overlayfs with a writable upper, so `sudo tee` here succeeds and
+# shadows the image file (verified on a live guest). Like the destructive
+# denylist, this stops an honest mistake, not a determined one; the containment
+# is that the overlay belongs to one disposable VM.
 #
 # After the npm layer on purpose: editing a skill must not reinstall node_modules.
 COPY files/skills /opt/agent/skills

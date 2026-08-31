@@ -41,6 +41,12 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		"node /opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
 		"google-chrome --headless --dump-dom https://example.com",
 		"chromium --headless --screenshot=/tmp/x.png https://example.com",
+		// The name the .deb actually installs. A plain `chrome\s` alternation
+		// matches "google-chrome" and then wants whitespace where "-stable"
+		// sits, so the real browser in this image walks straight through.
+		"google-chrome-stable --headless --dump-dom https://bank.com",
+		"chromium-browser --headless --screenshot",
+		`"/opt/google/chrome/google-chrome" --headless x`,
 		"CHROME=$(which chromium); $CHROME --user-data-dir=/tmp/p",
 		"pkill -f chromium",
 		"xdotool key Return",
@@ -66,6 +72,10 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		// pattern needs the binary to be followed by whitespace.
 		"soffice --headless --convert-to pdf chrome-notes.docx",
 		"soffice --headless --convert-to pdf ./chromium-migration.pptx",
+		// & and a newline end a command as surely as | and ; do.
+		"cat chrome-notes.txt && soffice --headless --convert-to pdf a.docx",
+		"echo 'the chrome report' && soffice --headless --convert-to pdf a.docx",
+		"ls chrome\nsoffice --headless x.docx",
 		"go test ./...",
 	}
 	for _, cmd := range fine {

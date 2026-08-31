@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // BuiltinSkillsDir is where the rootfs image puts the skills every agent gets.
@@ -190,7 +191,24 @@ func RenderSkillsSection(skills []Skill, r roots) string {
 	for _, s := range skills {
 		lines = append(lines, "- `"+s.Name+"` - "+s.Description+"\n  Read: "+s.Path)
 	}
-	return capTextAt(strings.Join(lines, "\n"), skillsCap)
+	// readCapped's truncation, not capTextAt's: this lands in the system prompt,
+	// and a byte-offset cut through a multi-byte character would put a
+	// replacement rune into the cached prefix. Descriptions are capped
+	// individually too, so reaching this at all takes a great many skills.
+	return capRunes(strings.Join(lines, "\n"), skillsCap)
+}
+
+// capRunes truncates to a byte budget, pulled back to a rune boundary so the
+// cut cannot leave a broken UTF-8 sequence behind.
+func capRunes(s string, budget int) string {
+	if len(s) <= budget {
+		return s
+	}
+	cut := s[:budget]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "\n[truncated: too many skills to list]"
 }
 
 // skillsHeader explains what the list below it is for.

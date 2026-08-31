@@ -163,6 +163,12 @@ func TestShippedSkillsAllParse(t *testing.T) {
 		t.Fatal("no skills ship with the image")
 	}
 	for _, e := range entries {
+		// The same guard readSkillDir has. Without it a .DS_Store beside the
+		// skills fails this test with "not a directory", which says nothing
+		// about the skills it is supposed to be checking.
+		if !e.IsDir() {
+			continue
+		}
 		buf, err := os.ReadFile(filepath.Join(dir, e.Name(), "SKILL.md"))
 		if err != nil {
 			t.Errorf("%s: %v", e.Name(), err)

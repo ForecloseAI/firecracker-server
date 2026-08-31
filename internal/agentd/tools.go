@@ -23,7 +23,7 @@ type askInput struct {
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
 func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
-	files, err := fileTools(r)
+	files, err := fileTools(r, d.reload)
 	if err != nil {
 		return nil, err
 	}

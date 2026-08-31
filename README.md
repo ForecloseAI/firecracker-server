@@ -384,7 +384,14 @@ per agent. It also means built-ins are always exactly what the image shipped —
 no seeding, and no VM stuck on a stale copy. Read-only is load-bearing too:
 built-ins are shared, so a writable one would let any agent rewrite what every
 other agent is told to do. `Write` and `Edit` refuse them by name, and
-`resolve()` in `tools_file.go` is where that split lives.
+`resolveWrite()` in `tools_file.go` is where that split lives — `resolve()` is
+the read path, and deliberately allows them.
+
+That is a guard against an honest mistake, not a security boundary. The image
+files are root-owned so an ordinary write is refused, but the agent has
+passwordless sudo and `/` is an overlayfs with a writable upper, so a
+determined `sudo tee` does land — in that one VM's overlay, which is thrown
+away with it.
 
 An agent's own skills are private to it and sit on the overlay, so they survive
 `DELETE` and die on `?purge=true`, exactly like its memory. An agent's own skill
