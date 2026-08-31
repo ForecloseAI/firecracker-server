@@ -148,15 +148,12 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendReq is the body of POST /agents/{id}/messages.
-// ClientTime and TZ carry the person's timezone, which the guest cannot know on
-// its own -- it runs UTC, so "daily at 09:00" would otherwise mean 9am nowhere in
-// particular. Sent on every message because the client already makes this call
-// and the answer can change when they travel.
+//
+// No timezone rides along here. The guest is already on the person's clock --
+// PUT /person set it, AdoptZone applied it -- so a message is just a message.
 type sendReq struct {
-	Text       string         `json:"text"`
-	File       *agentapi.File `json:"file,omitempty"`
-	ClientTime string         `json:"client_time,omitempty"`
-	TZ         string         `json:"tz,omitempty"`
+	Text string         `json:"text"`
+	File *agentapi.File `json:"file,omitempty"`
 }
 
 // handleMessage queues a user turn and returns immediately. The turn itself can
@@ -167,7 +164,6 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, a *Agent)
 		fail(w, http.StatusBadRequest, "bad_request", "text is required", "")
 		return
 	}
-	s.sup.RememberZone(req.TZ, req.ClientTime)
 	id, replayed := s.nextMessageID(r.Header.Get("Idempotency-Key"))
 	if replayed {
 		reply(w, http.StatusOK, map[string]any{"message_id": id, "replayed": true})

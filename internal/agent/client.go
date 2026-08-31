@@ -206,27 +206,23 @@ func (c *Client) Post(agentID, text string) (Sent, error) {
 	return c.PostMessage(agentID, Send{Text: text})
 }
 
-// PostMessage sends a turn with everything the client attached to it -- a file
-// the person picked, and the zone their own device reports.
+// PostMessage sends a turn with everything the client attached to it, which is
+// a file the person picked and nothing else.
 //
-// The zone rides on every message and not only on the profile call, because the
-// profile is written once at onboarding: a person who then travels would keep
-// their 09:00 jobs anchored to the zone they signed up in. The daemon re-reads
-// it per message and moves the clock schedules when it has actually changed, so
-// the usual case -- the same zone arriving again -- costs one file read.
+// Deliberately not a place to carry the timezone. The guest runs on the
+// person's own clock, set once from the country they chose at onboarding, so a
+// message that also described where they were would be a second source for one
+// fact -- and the one that arrives on every request is the one that drifts.
 func (c *Client) PostMessage(agentID string, m Send) (Sent, error) {
 	var out Sent
 	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages", m, &out)
 	return out, err
 }
 
-// Send is what the daemon reads on POST /agents/{id}/messages. An empty
-// ClientTime or TZ is not an erasure -- the daemon keeps the zone it has.
+// Send is what the daemon reads on POST /agents/{id}/messages.
 type Send struct {
-	Text       string         `json:"text"`
-	File       *agentapi.File `json:"file,omitempty"`
-	ClientTime string         `json:"client_time,omitempty"`
-	TZ         string         `json:"tz,omitempty"`
+	Text string         `json:"text"`
+	File *agentapi.File `json:"file,omitempty"`
 }
 
 // CreateAgent adds an agent of the given type to the roster. It does not start

@@ -27,7 +27,7 @@ type fakeGuest struct {
 
 	sched  []agentapi.Schedule
 	person agentapi.Person // the last profile the gateway forwarded
-	zone   string          // the tz the last message carried
+	zone   string          // any tz the last message carried, which must be none
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert

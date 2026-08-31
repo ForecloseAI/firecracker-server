@@ -141,10 +141,15 @@ type Person struct {
 	Notes     string `json:"notes,omitempty"`
 	Onboarded bool   `json:"onboarded"`
 
-	// TZ is the person's IANA timezone, as the client's own device reports it.
-	// Carried here because this is the one call a client already makes about
-	// who the person is, and the guest runs UTC: without it "daily at 09:00"
-	// means 9am nowhere in particular.
+	// TZ is the person's IANA timezone, resolved from the country they pick at
+	// onboarding rather than sniffed off the device.
+	//
+	// This call is the ONLY way a zone reaches the machine, and the guest puts
+	// itself on that clock when it starts. A zone that also rode along on
+	// ordinary messages would be a second source for one fact, and the one
+	// arriving on every request is the one that drifts: a VPN, a second device
+	// or a wrong clock would silently re-anchor every schedule the person had
+	// booked.
 	//
 	// Write-only. It is kept in its own file rather than in the rendered
 	// profile, so it does not come back on a read -- nothing needs it to.

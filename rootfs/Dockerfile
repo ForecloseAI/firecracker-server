@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-liberation fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji \
       libnss3 libxss1 libasound2t64 \
       python3 python3-venv python3-pip e2fsprogs iproute2 iputils-ping procps \
+      tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 # Chrome stable; apt resolves the .deb's own dependencies.

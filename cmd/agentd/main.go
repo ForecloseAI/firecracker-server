@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	// The zoneinfo database, embedded. A schedule is stored in the person's own
+	// The zoneinfo database, embedded. The whole guest runs on the person's own
 	// timezone, and the guest image is not required to ship /usr/share/zoneinfo
 	// -- without this a named zone would silently resolve to UTC and every
 	// "daily at 09:00" would fire at the wrong hour.
@@ -52,6 +52,9 @@ func main() {
 func run(once, profile, model, workspace, stateDir, addr string, maxLive int) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// First, and before any goroutine exists: this assigns time.Local, and the
+	// guest spends the rest of its life on the person's clock rather than UTC.
+	agentd.AdoptZone(stateDir)
 	catalog, err := agentd.LoadCatalog(filepath.Join(stateDir, "agent-types"))
 	if err != nil {
 		return err

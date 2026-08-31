@@ -11,16 +11,13 @@ const scheduleBodyCap = 32 << 10
 
 // scheduleReq is the body of POST /schedules.
 //
-// ClientTime and TZ ride along here as well as on a message, because the first
-// thing a new client may do is create a schedule, and "daily at 09:00" needs to
-// know whose 9am before it is stored.
+// "daily at 09:00" still needs to know whose 9am, but it no longer has to be
+// told: loadZone below reads the zone onboarding stored on this machine.
 type scheduleReq struct {
-	Name       string `json:"name"`
-	Agent      string `json:"agent"`
-	Task       string `json:"task"`
-	Expr       string `json:"expr"`
-	ClientTime string `json:"client_time,omitempty"`
-	TZ         string `json:"tz,omitempty"`
+	Name  string `json:"name"`
+	Agent string `json:"agent"`
+	Task  string `json:"task"`
+	Expr  string `json:"expr"`
 }
 
 // handleListSchedules reports every schedule on this machine.
@@ -38,7 +35,6 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, scheduleBodyCap, &req) {
 		return
 	}
-	s.sup.RememberZone(req.TZ, req.ClientTime)
 	if req.Name == "" || req.Task == "" || req.Expr == "" {
 		fail(w, http.StatusBadRequest, "bad_request", "name, task and expr are required", "")
 		return

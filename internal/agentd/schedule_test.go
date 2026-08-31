@@ -506,27 +506,27 @@ func TestAmPmTimesAreReadCorrectly(t *testing.T) {
 	}
 }
 
-// The zone cannot be guessed in the guest, which runs UTC. A named zone beats a
-// stamp because an offset is only true for the instant it was sampled.
-func TestRememberZonePrefersTheNameOverTheOffset(t *testing.T) {
+// The country picked at onboarding resolves to an IANA name, and that name is
+// what the machine keeps.
+func TestRememberZoneStoresTheName(t *testing.T) {
 	dir := t.TempDir()
-	RememberZone(dir, "Asia/Kolkata", "2026-08-29T14:03:11+09:00")
+	RememberZone(dir, "Asia/Kolkata")
 	if got := loadZone(dir).String(); got != "Asia/Kolkata" {
-		t.Errorf("zone = %q, want Asia/Kolkata: the name must win over the stamp", got)
+		t.Errorf("zone = %q, want Asia/Kolkata", got)
 	}
 }
 
-// A client that can only send a stamp still gets its own hours.
-func TestRememberZoneFallsBackToTheOffset(t *testing.T) {
+// The stored name is what the schedule math reads, with no client involved.
+func TestScheduleUsesTheStoredZone(t *testing.T) {
 	dir := t.TempDir()
-	RememberZone(dir, "", "2026-08-29T14:03:11+05:30")
+	RememberZone(dir, "Asia/Kolkata")
 	sp, err := parseSchedule("daily at 09:00", loadZone(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := sp.next(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)).UTC()
 	if got.Hour() != 3 || got.Minute() != 30 {
-		t.Errorf("09:00 at +05:30 = %v UTC, want 03:30", got)
+		t.Errorf("09:00 in Asia/Kolkata = %v UTC, want 03:30", got)
 	}
 }
 
@@ -536,9 +536,58 @@ func TestZoneDefaultsToUTC(t *testing.T) {
 	if got := loadZone(dir); got != time.UTC {
 		t.Errorf("zone with no file = %v, want UTC", got)
 	}
-	RememberZone(dir, "Mars/Olympus", "not a time")
+	RememberZone(dir, "Mars/Olympus")
 	if got := loadZone(dir); got != time.UTC {
 		t.Errorf("zone after nonsense = %v, want UTC", got)
+	}
+}
+
+// An offset is not a zone. A client sending one used to have it stored verbatim,
+// which pinned every "daily at 09:00" to the offset in force the day it was
+// sampled and fired an hour out after the next daylight-saving change.
+func TestRememberZoneRefusesAnOffset(t *testing.T) {
+	dir := t.TempDir()
+	RememberZone(dir, "Asia/Kolkata")
+	RememberZone(dir, "2026-08-29T14:03:11+09:00")
+	if got := loadZone(dir).String(); got != "Asia/Kolkata" {
+		t.Errorf("zone = %q, want Asia/Kolkata: a stamp must not replace a name", got)
+	}
+}
+
+// AdoptZone is what puts the guest itself on the person's clock: the daemon's
+// own time.Local moves, and TZ is exported so a bash tool's `date` agrees.
+func TestAdoptZoneMovesTheProcess(t *testing.T) {
+	dir := t.TempDir()
+	before, hadTZ := os.LookupEnv("TZ")
+	local := time.Local
+	t.Cleanup(func() {
+		time.Local = local
+		if hadTZ {
+			os.Setenv("TZ", before)
+			return
+		}
+		os.Unsetenv("TZ")
+	})
+
+	RememberZone(dir, "Asia/Kolkata")
+	AdoptZone(dir)
+
+	if got := time.Local.String(); got != "Asia/Kolkata" {
+		t.Errorf("time.Local = %q, want Asia/Kolkata", got)
+	}
+	if got := os.Getenv("TZ"); got != "Asia/Kolkata" {
+		t.Errorf("TZ = %q, want Asia/Kolkata: subprocesses read this, not time.Local", got)
+	}
+}
+
+// A machine that has never been onboarded must boot, not panic or wander off
+// the host's own zone.
+func TestAdoptZoneWithNoZoneIsANoOp(t *testing.T) {
+	local := time.Local
+	t.Cleanup(func() { time.Local = local })
+	AdoptZone(t.TempDir())
+	if time.Local != local {
+		t.Errorf("time.Local moved to %v with no zone stored", time.Local)
 	}
 }
 
@@ -874,7 +923,7 @@ func TestARelativeOneOffIsStoredAsTheInstantItNamed(t *testing.T) {
 // the person got on a plane: "in two hours" is a fixed instant, not a wall clock.
 func TestARelativeOneOffDoesNotFollowThePerson(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Asia/Kolkata", "")
+	sup.RememberZone("Asia/Kolkata")
 	gate := NewGate(mustLog(t), sup.Interactions(), t.TempDir())
 	in := scheduleInput{Name: "call back", When: "once in 2h", Task: "ring them"}
 
@@ -884,7 +933,7 @@ func TestARelativeOneOffDoesNotFollowThePerson(t *testing.T) {
 	<-done
 
 	sc := sup.Schedules().List()[0]
-	sup.RememberZone("America/Los_Angeles", "")
+	sup.RememberZone("America/Los_Angeles")
 
 	if got := byID(t, sup, sc.ID).NextRunAt; !got.Equal(sc.NextRunAt) {
 		t.Errorf("a relative one-off moved from %v to %v when the person did", sc.NextRunAt, got)
@@ -895,7 +944,7 @@ func TestARelativeOneOffDoesNotFollowThePerson(t *testing.T) {
 // opening at 11:00 in Kolkata -- stays put when they fly somewhere else.
 func TestAPinnedScheduleDoesNotFollowThePerson(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	pinned, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr:      "daily at 11:00 in Asia/Kolkata",
 		NextRunAt: nextOf(t, "daily at 11:00 in Asia/Kolkata", mustZone(t, "Europe/London"))})
@@ -908,7 +957,7 @@ func TestAPinnedScheduleDoesNotFollowThePerson(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("America/Los_Angeles", "")
+	sup.RememberZone("America/Los_Angeles")
 
 	if got := byID(t, sup, pinned.ID).NextRunAt; !got.Equal(pinned.NextRunAt) {
 		t.Errorf("a pinned schedule moved from %v to %v", pinned.NextRunAt, got)
@@ -930,7 +979,7 @@ func TestAPinnedScheduleDoesNotFollowThePerson(t *testing.T) {
 // without saying so. That is the whole of what the pinned check in rezone buys.
 func TestAZoneChangeDoesNotSkipAPendingPinnedRun(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	overdue := time.Now().Add(-2 * time.Minute)
 	pinned, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr: "daily at 11:00 in Asia/Kolkata", NextRunAt: overdue})
@@ -943,7 +992,7 @@ func TestAZoneChangeDoesNotSkipAPendingPinnedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("America/Los_Angeles", "")
+	sup.RememberZone("America/Los_Angeles")
 
 	if got := byID(t, sup, pinned.ID).NextRunAt; !got.Equal(overdue) {
 		t.Errorf("a due pinned run moved from %v to %v; that occurrence is now lost",
@@ -1218,7 +1267,7 @@ func TestCancelOnlyReachesTheCallersOwnSchedules(t *testing.T) {
 // local unless it is recomputed when the zone lands.
 func TestAChangedZoneMovesTheClockSchedules(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	daily, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
 	if err != nil {
@@ -1230,7 +1279,7 @@ func TestAChangedZoneMovesTheClockSchedules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("America/Los_Angeles", "")
+	sup.RememberZone("America/Los_Angeles")
 
 	la := mustZone(t, "America/Los_Angeles")
 	got := byID(t, sup, daily.ID).NextRunAt.In(la)
@@ -1250,7 +1299,7 @@ func TestAChangedZoneMovesTheClockSchedules(t *testing.T) {
 // lands in Kolkata means 11:00 where they now are.
 func TestAChangedZoneMovesAOneOff(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	london := mustZone(t, "Europe/London")
 	expr := "once on " + time.Now().In(london).AddDate(0, 0, 30).Format("2006-01-02") + " at 11:00"
 	sc, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
@@ -1259,7 +1308,7 @@ func TestAChangedZoneMovesAOneOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("Asia/Kolkata", "")
+	sup.RememberZone("Asia/Kolkata")
 
 	got := byID(t, sup, sc.ID).NextRunAt.In(mustZone(t, "Asia/Kolkata"))
 	if got.Hour() != 11 || got.Minute() != 0 {
@@ -1272,7 +1321,7 @@ func TestAChangedZoneMovesAOneOff(t *testing.T) {
 // the sweep would read as due and hold forever.
 func TestAChangedZoneLeavesAPastOneOffAlone(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	missed := time.Now().Add(-time.Minute)
 	sc, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr: oneOffAt(missed), NextRunAt: missed})
@@ -1280,7 +1329,7 @@ func TestAChangedZoneLeavesAPastOneOffAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("Asia/Kolkata", "")
+	sup.RememberZone("Asia/Kolkata")
 
 	if got := byID(t, sup, sc.ID).NextRunAt; !got.Equal(missed) {
 		t.Errorf("next run moved from %v to %v; a past one-off has no next", missed, got)
@@ -1292,14 +1341,14 @@ func TestAChangedZoneLeavesAPastOneOffAlone(t *testing.T) {
 // at a time and it would never fire.
 func TestAnUnchangedZoneLeavesSchedulesAlone(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sup.RememberZone("Europe/London", "")
+	sup.RememberZone("Europe/London")
 	sc, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sup.RememberZone("Europe/London", "2026-08-29T14:03:11+01:00")
+	sup.RememberZone("Europe/London")
 
 	if got := byID(t, sup, sc.ID).NextRunAt; !got.Equal(sc.NextRunAt) {
 		t.Errorf("next run moved from %v to %v with no change of zone", sc.NextRunAt, got)
@@ -1334,18 +1383,20 @@ func byID(t *testing.T, sup *Supervisor, id string) Schedule {
 func TestScheduleRoutesRoundTrip(t *testing.T) {
 	sup := newTestSupervisor(t)
 	srv := NewServer(sup)
+	// Onboarding already put the machine on a zone. The request itself says
+	// nothing about where the person is, and must not need to.
+	sup.RememberZone("Asia/Kolkata")
 
 	w := do(t, srv, "POST", "/schedules",
-		`{"name":"sweep","agent":"boss","task":"check the deploy","expr":"every 30m","tz":"Asia/Kolkata"}`)
+		`{"name":"sweep","agent":"boss","task":"check the deploy","expr":"every 30m"}`)
 	if w.Code != 201 {
 		t.Fatalf("create = %d, want 201: %s", w.Code, w.Body)
 	}
 	if got := do(t, srv, "GET", "/schedules", ""); !strings.Contains(got.Body.String(), "sweep") {
 		t.Errorf("the created schedule is not listed: %s", got.Body)
 	}
-	// The zone came in on the request, so it must now be what schedules use.
 	if got := loadZone(sup.stateDir).String(); got != "Asia/Kolkata" {
-		t.Errorf("zone = %q, want the one the client sent", got)
+		t.Errorf("zone = %q, want the one onboarding stored", got)
 	}
 
 	id := sup.Schedules().List()[0].ID
@@ -1361,26 +1412,28 @@ func TestScheduleRoutesRoundTrip(t *testing.T) {
 }
 
 // The app can book a one-off too, and the route has to store the instant the
-// person's own zone makes of it rather than the guest's UTC.
+// person's own zone makes of it rather than the guest's default UTC -- reading
+// that zone off the machine, since the request no longer carries one.
 func TestScheduleRoutesBookAOneOff(t *testing.T) {
 	sup := newTestSupervisor(t)
 	srv := NewServer(sup)
+	sup.RememberZone("Asia/Kolkata")
 
 	kolkata := mustZone(t, "Asia/Kolkata")
 	day := time.Now().In(kolkata).AddDate(0, 0, 30).Format("2006-01-02")
 
 	w := do(t, srv, "POST", "/schedules", `{"name":"sale","agent":"boss","task":"queue up",`+
-		`"expr":"once on `+day+` at 11:00","tz":"Asia/Kolkata"}`)
+		`"expr":"once on `+day+` at 11:00"}`)
 
 	if w.Code != 201 {
 		t.Fatalf("create = %d, want 201: %s", w.Code, w.Body)
 	}
 	got := sup.Schedules().List()[0].NextRunAt
 	if in := got.In(kolkata); in.Hour() != 11 || in.Minute() != 0 || in.Format("2006-01-02") != day {
-		t.Errorf("next run = %v, want %s 11:00 in the zone the client sent", in, day)
+		t.Errorf("next run = %v, want %s 11:00 in the zone onboarding stored", in, day)
 	}
 	if in := got.UTC(); in.Hour() != 5 || in.Minute() != 30 {
-		t.Errorf("next run = %v UTC, want 05:30: the guest's own UTC was used", in)
+		t.Errorf("next run = %v UTC, want 05:30: the guest's default UTC was used", in)
 	}
 }
 
