@@ -14,8 +14,8 @@ import (
 // -- both come back as the same refusal, so it cannot tell which it made.
 func TestBrowserProfilesGetTheSnapshotRuleInTheirPrompt(t *testing.T) {
 	dir := t.TempDir()
-	with := ComposeSystemPrompt(Profile{Browser: true}, dir, "")
-	without := ComposeSystemPrompt(Profile{Browser: false}, dir, "")
+	with := ComposeSystemPrompt(Profile{Browser: true}, roots{own: dir}, "", nil)
+	without := ComposeSystemPrompt(Profile{Browser: false}, roots{own: dir}, "", nil)
 	if !strings.Contains(with, "Take a snapshot before you act") {
 		t.Error("a browser profile was not told the snapshot rule")
 	}
@@ -61,6 +61,11 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		"soffice --headless --convert-to pdf --outdir . report.docx",
 		"libreoffice --headless --convert-to xlsx old.xls",
 		"timeout 60 soffice --headless --convert-to pdf deck.pptx",
+		// The filename, not the binary. `\bchrome\b` matches inside
+		// "chrome-notes.docx" because a hyphen is a word boundary, so the
+		// pattern needs the binary to be followed by whitespace.
+		"soffice --headless --convert-to pdf chrome-notes.docx",
+		"soffice --headless --convert-to pdf ./chromium-migration.pptx",
 		"go test ./...",
 	}
 	for _, cmd := range fine {

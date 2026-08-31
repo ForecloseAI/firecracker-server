@@ -7,16 +7,12 @@ import (
 	"testing"
 )
 
-// withBuiltinSkills points the built-in skills directory at a temp dir for the
-// duration of one test. BuiltinSkillsDir is a package var for exactly this, the
-// way ChromeURL is, and restoring it matters: tests share a process.
+// withBuiltinSkills returns a temp directory to use as the built-in skills
+// root. The dir is threaded as a value everywhere, so nothing global is swapped
+// and these tests could run in parallel.
 func withBuiltinSkills(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	was := BuiltinSkillsDir
-	BuiltinSkillsDir = dir
-	t.Cleanup(func() { BuiltinSkillsDir = was })
-	return dir
+	return t.TempDir()
 }
 
 // writeSkill puts one SKILL.md on disk with the given front matter and body.
@@ -40,7 +36,7 @@ func TestLoadSkillsReadsBuiltinsAndOwn(t *testing.T) {
 	writeSkill(t, builtin, "pdf", "name: pdf\ndescription: Read a PDF. Use when the person sends one.")
 	writeSkill(t, ownSkillsDir(agentDir), "expense-filing", "name: expense-filing\ndescription: File an expense.")
 
-	skills, problems := LoadSkills(agentDir)
+	skills, problems := LoadSkills(builtin, agentDir)
 	if len(problems) != 0 {
 		t.Fatalf("problems = %v, want none", problems)
 	}
@@ -60,7 +56,7 @@ func TestOwnSkillOverridesBuiltin(t *testing.T) {
 	writeSkill(t, builtin, "pdf", "description: the shipped one")
 	writeSkill(t, ownSkillsDir(agentDir), "pdf", "description: the local one")
 
-	skills, _ := LoadSkills(agentDir)
+	skills, _ := LoadSkills(builtin, agentDir)
 	if len(skills) != 1 {
 		t.Fatalf("skills = %+v, want one", skills)
 	}
@@ -76,12 +72,12 @@ func TestOwnSkillOverridesBuiltin(t *testing.T) {
 // to the model and nothing errors, so it looks exactly like a skill whose
 // description never matched. Being skipped AND named is what makes it findable.
 func TestSkillWithoutDescriptionIsSkippedAndReported(t *testing.T) {
-	withBuiltinSkills(t)
+	builtin := withBuiltinSkills(t)
 	agentDir := t.TempDir()
 	writeSkill(t, ownSkillsDir(agentDir), "silent", "name: silent")
 	writeSkill(t, ownSkillsDir(agentDir), "folded", "description: >")
 
-	skills, problems := LoadSkills(agentDir)
+	skills, problems := LoadSkills(builtin, agentDir)
 	if len(skills) != 0 {
 		t.Fatalf("skills = %+v, want none loadable", skills)
 	}
@@ -102,7 +98,7 @@ func TestDirectoryWithoutSkillFileIsNotAProblem(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(builtin, "scripts"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	skills, problems := LoadSkills("")
+	skills, problems := LoadSkills(builtin, "")
 	if len(skills) != 0 || len(problems) != 0 {
 		t.Errorf("skills = %+v problems = %v, want both empty", skills, problems)
 	}
@@ -114,7 +110,8 @@ func TestRenderSkillsSectionListsWithoutBodies(t *testing.T) {
 	builtin := withBuiltinSkills(t)
 	writeSkill(t, builtin, "pdf", "description: Read a PDF.")
 
-	out := RenderSkillsSection(t.TempDir())
+	skills, _ := LoadSkills(builtin, "")
+	out := RenderSkillsSection(skills, roots{builtin: builtin})
 	for _, want := range []string{"pdf", "Read a PDF.", filepath.Join(builtin, "pdf", "SKILL.md")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("section is missing %q:\n%s", want, out)
@@ -128,8 +125,9 @@ func TestRenderSkillsSectionListsWithoutBodies(t *testing.T) {
 // A machine with no skills at all injects nothing, rather than a block whose
 // only content is that there is nothing. Same rule the memory section follows.
 func TestRenderSkillsSectionIsEmptyWithNoSkills(t *testing.T) {
-	withBuiltinSkills(t)
-	if out := RenderSkillsSection(t.TempDir()); out != "" {
+	builtin := withBuiltinSkills(t)
+	skills, _ := LoadSkills(builtin, t.TempDir())
+	if out := RenderSkillsSection(skills, roots{builtin: builtin}); out != "" {
 		t.Errorf("section = %q, want empty", out)
 	}
 }
@@ -142,7 +140,8 @@ func TestSkillsHeaderScopesTheInstructionException(t *testing.T) {
 	agentDir := t.TempDir()
 	writeSkill(t, builtin, "pdf", "description: Read a PDF.")
 
-	out := RenderSkillsSection(agentDir)
+	skills, _ := LoadSkills(builtin, agentDir)
+	out := RenderSkillsSection(skills, roots{own: agentDir, builtin: builtin})
 	if !strings.Contains(out, builtin) || !strings.Contains(out, ownSkillsDir(agentDir)) {
 		t.Errorf("header does not name both skill directories:\n%s", out)
 	}
@@ -181,5 +180,41 @@ func TestShippedSkillsAllParse(t *testing.T) {
 		if len(s.Description) < 60 || !strings.Contains(strings.ToLower(s.Description), "when") {
 			t.Errorf("%s description does not say when to reach for it: %q", e.Name(), s.Description)
 		}
+	}
+}
+
+// A file sitting beside the skills is not a skill and not a problem. Before the
+// IsDir guard this cost a doomed open() and logged noise on every single start.
+func TestNonDirectoryBesideSkillsIsIgnored(t *testing.T) {
+	builtin := withBuiltinSkills(t)
+	writeSkill(t, builtin, "pdf", "description: Read a PDF.")
+	for _, junk := range []string{"README.md", ".DS_Store"} {
+		if err := os.WriteFile(filepath.Join(builtin, junk), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skills, problems := LoadSkills(builtin, "")
+	if len(skills) != 1 || len(problems) != 0 {
+		t.Errorf("skills = %+v problems = %v, want just pdf and no noise", skills, problems)
+	}
+}
+
+// The built-in directory is threaded, not read from a global at call time. Two
+// sources of truth could disagree: resolveWrite would protect one directory
+// while the prompt named another as the read-only one.
+func TestSkillsDirIsThreadedNotGlobal(t *testing.T) {
+	builtin := withBuiltinSkills(t)
+	writeSkill(t, builtin, "pdf", "description: Read a PDF.")
+	was := BuiltinSkillsDir
+	BuiltinSkillsDir = t.TempDir() // a decoy nothing should consult
+	t.Cleanup(func() { BuiltinSkillsDir = was })
+
+	skills, _ := LoadSkills(builtin, "")
+	out := RenderSkillsSection(skills, roots{builtin: builtin})
+	if len(skills) != 1 || !strings.Contains(out, builtin) {
+		t.Errorf("skills = %+v, section names the wrong dir:\n%s", skills, out)
+	}
+	if strings.Contains(out, BuiltinSkillsDir) {
+		t.Error("the prompt named the global rather than the directory it was given")
 	}
 }

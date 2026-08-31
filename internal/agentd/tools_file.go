@@ -81,29 +81,16 @@ func fileTools(r roots) ([]anthropic.BetaTool, error) {
 	)
 }
 
-// readable is the roots a path may be read from, skipping any that is unset.
+// readable is the roots a path may be read from.
 func (r roots) readable() []string {
-	return nonEmpty(r.workspace, r.own, r.builtin)
+	return []string{r.workspace, r.own, r.builtin}
 }
 
 // writable is the roots a path may be written to. Deliberately not readable
 // minus nothing: builtin is missing, which is what makes built-in skills
 // read-only.
 func (r roots) writable() []string {
-	return nonEmpty(r.workspace, r.own)
-}
-
-// nonEmpty drops the roots this agent does not have. A unit test builds an
-// agent with only a workspace, and a machine with no built-in skills directory
-// is a normal machine rather than a broken one.
-func nonEmpty(dirs ...string) []string {
-	out := make([]string, 0, len(dirs))
-	for _, d := range dirs {
-		if d != "" {
-			out = append(out, d)
-		}
-	}
-	return out
+	return []string{r.workspace, r.own}
 }
 
 // readTool reads a text file.
@@ -349,7 +336,7 @@ func resolveWrite(r roots, path string) (string, error) {
 	if under(full, r.writable()) {
 		return full, nil
 	}
-	if under(full, nonEmpty(r.builtin)) {
+	if under(full, []string{r.builtin}) {
 		return "", fmt.Errorf("%s is a built-in skill and is read-only - "+
 			"write your own version with create_skill instead", path)
 	}
@@ -369,8 +356,16 @@ func absolute(workspace, path string) (string, error) {
 }
 
 // under reports whether an absolute path sits at or inside one of the dirs.
+//
+// An unset root is skipped rather than filtered out by the caller. It has to
+// be: filepath.Abs("") resolves to the working directory, so an agent built
+// without a state dir -- which every unit test does -- would otherwise get the
+// whole cwd as a root.
 func under(full string, dirs []string) bool {
 	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
 		base, err := filepath.Abs(dir)
 		if err != nil {
 			continue

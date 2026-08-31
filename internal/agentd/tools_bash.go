@@ -62,19 +62,26 @@ var browserRoutes = []*regexp.Regexp{
 	regexp.MustCompile(`puppeteer`),
 	regexp.MustCompile(`chrome-devtools-mcp`),
 	regexp.MustCompile(`--(remote-debugging|user-data-dir)`),
-	// --headless is NOT Chrome's alone, so it only counts beside a chrome
-	// binary. LibreOffice uses the same flag for every document conversion,
-	// which the pdf, docx, xlsx and pptx skills call for constantly -- matching
-	// it bare sent every `soffice --headless --convert-to pdf` to the browser
-	// redirect. Found on a live VM: the agent spent a minute and twenty tool
-	// calls before getting round it by hiding the flag in a shell variable,
-	// which worked and reads like a fight with its own tools.
+	// --headless is NOT Chrome's alone, so it only counts when a chrome BINARY
+	// is being run. LibreOffice takes the same flag for every document
+	// conversion, which the pdf, docx, xlsx and pptx skills call for constantly
+	// -- matching it bare sent every `soffice --headless --convert-to pdf` to
+	// the browser redirect. Found on a live VM: the agent spent a minute and
+	// twenty tool calls before getting round it by hiding the flag in a shell
+	// variable, which worked and reads like a fight with its own tools.
 	//
-	// Still narrower than the bare `chrome` match the list deliberately omits:
-	// this needs the binary AND the flag, so `grep -r chrome /var/log` is
-	// untouched.
-	regexp.MustCompile(`\bchrom[a-z-]*\b[^|;]*--headless`),
-	regexp.MustCompile(`--headless[^|;]*\bchrom`),
+	// The trailing \s is what makes it a binary rather than a word: without it
+	// `soffice --headless --convert-to pdf chrome-notes.docx` matches on the
+	// FILENAME and the same surface breaks again for any document with chrome
+	// in its name. \b would not do -- a hyphen is a word boundary, so
+	// `\bchrome\b` matches inside `chrome-notes.docx`.
+	//
+	// Only this direction, deliberately. A binary comes before its flags, so
+	// the reverse order buys nothing and is precisely the pattern that matched
+	// trailing filenames. Still narrower than the bare `chrome` match the list
+	// omits: this needs the binary AND the flag, so `grep -r chrome /var/log`
+	// is untouched.
+	regexp.MustCompile(`\b(google-chrome|chromium|chrome)\s[^|;]*--headless`),
 	regexp.MustCompile(`\b(pkill|killall)\b[^|;]*chrom`),
 	regexp.MustCompile(`\bxdotool\b`),
 }

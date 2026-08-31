@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/toolrunner"
@@ -20,32 +20,18 @@ import (
 // the end of the turn. A pointer because toolDeps is copied by value into every
 // tool closure, so a plain bool on the struct would be set on a dead copy --
 // the same reason gate.onWait is wired onto the gate rather than into deps.
-type reloadFlag struct {
-	mu   sync.Mutex
-	want bool
-}
+// The nil guards are load-bearing: several tests build toolDeps with no reload.
+type reloadFlag struct{ want atomic.Bool }
 
 // set marks the prompt stale.
 func (f *reloadFlag) set() {
-	if f == nil {
-		return
+	if f != nil {
+		f.want.Store(true)
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.want = true
 }
 
 // take reports whether a reload is wanted, clearing the flag.
-func (f *reloadFlag) take() bool {
-	if f == nil {
-		return false
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	want := f.want
-	f.want = false
-	return want
-}
+func (f *reloadFlag) take() bool { return f != nil && f.want.Swap(false) }
 
 // createSkillInput is the create_skill tool's argument.
 //
@@ -104,9 +90,9 @@ func checkSkill(r roots, name string, in createSkillInput) string {
 			"sits on disk and never triggers, because the description is all you see until you read it."
 	case strings.TrimSpace(in.Body) == "":
 		return "a skill needs a body: the steps to follow when it applies."
-	case ownSkillsDir(r.own) == "":
+	case r.own == "":
 		return "there is nowhere to save a skill on this machine."
-	case isBuiltinSkill(name):
+	case isBuiltinSkill(r.builtin, name):
 		return fmt.Sprintf("%q is already a built-in skill on this machine. Read it first - if it is "+
 			"genuinely missing something choose a different name for yours.", name)
 	}
@@ -119,8 +105,11 @@ func checkSkill(r roots, name string, in createSkillInput) string {
 // so the person can fix one that is wrong -- but it should be deliberate. A
 // half-written note that silently replaced the pdf skill would be diagnosed as
 // the pdf skill having broken.
-func isBuiltinSkill(name string) bool {
-	_, err := os.Stat(filepath.Join(BuiltinSkillsDir, name, "SKILL.md"))
+func isBuiltinSkill(builtinDir, name string) bool {
+	if builtinDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(builtinDir, name, "SKILL.md"))
 	return err == nil
 }
 

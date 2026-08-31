@@ -1,7 +1,6 @@
 package agentd
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,10 +9,10 @@ import (
 )
 
 // skillTools builds the tool surface for an agent rooted at agentDir.
-func skillTools(t *testing.T, agentDir string) ([]anthropic.BetaTool, *reloadFlag) {
+func skillTools(t *testing.T, builtin, agentDir string) ([]anthropic.BetaTool, *reloadFlag) {
 	t.Helper()
 	reload := &reloadFlag{}
-	r := roots{workspace: t.TempDir(), own: agentDir, builtin: BuiltinSkillsDir}
+	r := roots{workspace: t.TempDir(), own: agentDir, builtin: builtin}
 	tools, err := Tools(r, toolDeps{
 		gate:   NewGate(mustLog(t), NewInteractions(), t.TempDir()),
 		reload: reload,
@@ -24,37 +23,24 @@ func skillTools(t *testing.T, agentDir string) ([]anthropic.BetaTool, *reloadFla
 	return tools, reload
 }
 
-// mustText pulls the text out of one tool result.
-func mustText(t *testing.T, out []anthropic.BetaToolResultBlockParamContentUnion) string {
-	t.Helper()
-	var b strings.Builder
-	for _, c := range out {
-		if c.OfText != nil {
-			b.WriteString(c.OfText.Text)
-		}
-	}
-	return b.String()
-}
-
 // THE one that matters. create_skill composes the front matter itself, so the
 // property to hold is that whatever it writes, the loader reads back. A skill
 // the loader rejects is invisible with no error anywhere.
 func TestCreateSkillRoundTripsThroughTheLoader(t *testing.T) {
-	withBuiltinSkills(t)
+	builtin := withBuiltinSkills(t)
 	agentDir := t.TempDir()
-	tools, reload := skillTools(t, agentDir)
+	tools, reload := skillTools(t, builtin, agentDir)
 
-	args, _ := json.Marshal(createSkillInput{
+	got := call(t, tools, "create_skill", createSkillInput{
 		Name:        "Expense Filing",
 		Description: "File an expense.\nUse when the person sends a receipt.",
 		Body:        "1. Read the receipt\n2. File it",
 	})
-	got := mustText(t, runTool(t, tools, "create_skill", string(args)))
 	if !strings.Contains(got, "expense-filing") {
 		t.Fatalf("result = %q, want the normalised name", got)
 	}
 
-	skills, problems := LoadSkills(agentDir)
+	skills, problems := LoadSkills(builtin, agentDir)
 	if len(problems) != 0 {
 		t.Fatalf("problems = %v, want the written skill to parse cleanly", problems)
 	}
@@ -77,7 +63,7 @@ func TestCreateSkillRefusalsExplainThemselves(t *testing.T) {
 	builtin := withBuiltinSkills(t)
 	writeSkill(t, builtin, "pdf", "description: the shipped one")
 	agentDir := t.TempDir()
-	tools, reload := skillTools(t, agentDir)
+	tools, reload := skillTools(t, builtin, agentDir)
 
 	cases := map[string]struct {
 		in   createSkillInput
@@ -89,8 +75,7 @@ func TestCreateSkillRefusalsExplainThemselves(t *testing.T) {
 		"shadows builtin": {createSkillInput{Name: "pdf", Description: "d", Body: "b"}, "built-in"},
 	}
 	for name, tc := range cases {
-		args, _ := json.Marshal(tc.in)
-		got := mustText(t, runTool(t, tools, "create_skill", string(args)))
+		got := call(t, tools, "create_skill", tc.in)
 		if !strings.Contains(got, tc.want) {
 			t.Errorf("%s: result = %q, want it to mention %q", name, got, tc.want)
 		}
@@ -98,7 +83,7 @@ func TestCreateSkillRefusalsExplainThemselves(t *testing.T) {
 	if reload.take() {
 		t.Error("a refused skill still asked for a reload, which would recycle the agent for nothing")
 	}
-	if skills, _ := LoadSkills(agentDir); len(skills) != 1 || skills[0].Description != "the shipped one" {
+	if skills, _ := LoadSkills(builtin, agentDir); len(skills) != 1 || skills[0].Description != "the shipped one" {
 		t.Errorf("skills = %+v, want the built-in untouched and nothing written", skills)
 	}
 }
@@ -106,7 +91,7 @@ func TestCreateSkillRefusalsExplainThemselves(t *testing.T) {
 // Every profile gets create_skill whether or not it names it. An agent that
 // cannot record what it worked out has to rediscover it every time.
 func TestCreateSkillIsAlwaysAllowed(t *testing.T) {
-	tools, _ := skillTools(t, t.TempDir())
+	tools, _ := skillTools(t, t.TempDir(), t.TempDir())
 	narrow, err := Tools(roots{workspace: t.TempDir()},
 		toolDeps{gate: NewGate(mustLog(t), NewInteractions(), t.TempDir())}, []string{"Read"})
 	if err != nil {
@@ -126,18 +111,15 @@ func TestBuiltinSkillsAreReadableButNotWritable(t *testing.T) {
 	builtin := withBuiltinSkills(t)
 	writeSkill(t, builtin, "pdf", "description: the shipped one")
 	path := filepath.Join(builtin, "pdf", "SKILL.md")
-	tools, _ := skillTools(t, t.TempDir())
+	tools, _ := skillTools(t, builtin, t.TempDir())
 
-	args, _ := json.Marshal(readInput{Path: path})
-	if got := mustText(t, runTool(t, tools, "Read", string(args))); !strings.Contains(got, "steps go here") {
+	if got := call(t, tools, "Read", readInput{Path: path}); !strings.Contains(got, "steps go here") {
 		t.Errorf("Read = %q, want the built-in's contents", got)
 	}
-	writeArgs, _ := json.Marshal(writeInput{Path: path, Content: "mine now"})
-	if got := mustText(t, runTool(t, tools, "Write", string(writeArgs))); !strings.Contains(got, "read-only") {
+	if got := call(t, tools, "Write", writeInput{Path: path, Content: "mine now"}); !strings.Contains(got, "read-only") {
 		t.Errorf("Write = %q, want a refusal naming the rule", got)
 	}
-	editArgs, _ := json.Marshal(editInput{Path: path, OldString: "steps", NewString: "no"})
-	if got := mustText(t, runTool(t, tools, "Edit", string(editArgs))); !strings.Contains(got, "read-only") {
+	if got := call(t, tools, "Edit", editInput{Path: path, OldString: "steps", NewString: "no"}); !strings.Contains(got, "read-only") {
 		t.Errorf("Edit = %q, want a refusal naming the rule", got)
 	}
 }
@@ -146,14 +128,12 @@ func TestBuiltinSkillsAreReadableButNotWritable(t *testing.T) {
 // the agent ask to be recycled once the turn is over, which is what puts the
 // new skill in its prompt without a rebuild or a restart of anything.
 func TestSkillWrittenDuringATurnRecyclesTheAgent(t *testing.T) {
-	withBuiltinSkills(t)
 	sup := supervisorWith(t, 8)
 	a, stopped := liveWithoutGoroutine(t, sup, "helper")
 
-	args, _ := json.Marshal(createSkillInput{
+	call(t, a.tools, "create_skill", createSkillInput{
 		Name: "expense-filing", Description: "File an expense.", Body: "1. Read it",
 	})
-	runTool(t, a.tools, "create_skill", string(args))
 	if *stopped {
 		t.Fatal("the agent was recycled mid-turn, which would drop the work in flight")
 	}
@@ -163,7 +143,9 @@ func TestSkillWrittenDuringATurnRecyclesTheAgent(t *testing.T) {
 		t.Fatal("the turn ended and the agent was not recycled, so the skill stays invisible")
 	}
 	// And the freshly composed prompt is the one that carries it.
-	if !strings.Contains(ComposeSystemPrompt(testProfile(), a.dir, ""), "expense-filing") {
+	skills, _ := LoadSkills("", a.dir)
+	prompt := ComposeSystemPrompt(testProfile(), roots{own: a.dir}, "", skills)
+	if !strings.Contains(prompt, "expense-filing") {
 		t.Error("a rebuilt prompt does not list the new skill")
 	}
 	// Once taken, the flag is clear: a second turn must not recycle again.

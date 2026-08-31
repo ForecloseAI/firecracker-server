@@ -133,13 +133,18 @@ Do not try to reach the host machine or any other virtual machine.`
 // the cached prefix stable, and why an evicted agent comes back with a fresh
 // view of its own memory. Anything deeper it reads on demand by following links
 // from the index.
+// Skills arrive already loaded rather than being read here: the caller needs
+// the same load to report what it had to skip, and reading twice would walk
+// every skill file twice on a path an agent can now trigger itself.
+//
 // The stateDir is the machine's, not the agent's: what we know about the person
 // is one file everyone shares, so a fact learned by the boss is not missing from
 // the accountant. It is composed here with everything else, which means an edit
 // reaches a running agent on its next start rather than mid-session -- the same
 // refresh-by-eviction rule memory already has, and what keeps the cached prefix
 // stable.
-func ComposeSystemPrompt(p Profile, agentDir, stateDir string) string {
+func ComposeSystemPrompt(p Profile, r roots, stateDir string, skills []Skill) string {
+	agentDir := r.own
 	parts := []string{BaseIdentity}
 	if p.Browser {
 		parts = append(parts, BrowserGuidance)
@@ -153,11 +158,9 @@ func ComposeSystemPrompt(p Profile, agentDir, stateDir string) string {
 	if mem := RenderMemorySection(agentDir); mem != "" {
 		parts = append(parts, mem)
 	}
-	// After memory and before the agent's own instructions. Memory is what it
-	// knows and skills are how a job is done, so the facts come first; the
-	// instructions stay closest to the limits that answer them.
-	if skills := RenderSkillsSection(agentDir); skills != "" {
-		parts = append(parts, skills)
+	// After memory, before instructions: facts first, then how a job is done.
+	if section := RenderSkillsSection(skills, r); section != "" {
+		parts = append(parts, section)
 	}
 	if own := readCapped(instructionsPath(agentDir), instructionsCap); own != "" {
 		parts = append(parts, "## Your standing instructions\n"+own)

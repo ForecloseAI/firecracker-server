@@ -152,7 +152,11 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		// "an agent that did not start".
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
-	reportBadSkills(log, dir)
+	// Read once, then threaded. Everything downstream takes the directory as a
+	// parameter, so there is one source of truth for where built-in skills are.
+	r := roots{workspace: workspace, own: dir, builtin: BuiltinSkillsDir}
+	skills, problems := LoadSkills(r.builtin, dir)
+	reportBadSkills(log, problems)
 	gate := NewGate(log, hubOf(team), dir)
 	reload := &reloadFlag{}
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
@@ -165,13 +169,13 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 			log.Append(Event{Type: "error", Message: "no browser: " + err.Error()})
 		}
 	}
-	tools, err := Tools(roots{workspace: workspace, own: dir, builtin: BuiltinSkillsDir}, deps, p.Tools)
+	tools, err := Tools(r, deps, p.Tools)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
-		model: p.Model, system: ComposeSystemPrompt(p, dir, stateDirOf(team)),
+		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,
 	}
