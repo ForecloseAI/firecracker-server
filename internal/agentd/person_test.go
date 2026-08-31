@@ -224,3 +224,19 @@ func TestAnUnresolvableZoneIsRefused(t *testing.T) {
 		t.Error("the profile was written even though the request was refused")
 	}
 }
+
+// The app has to be able to read back the zone it set.
+//
+// It is not in the rendered profile, so a read used to omit it entirely — and
+// a reinstall or a second device then had no way to know which country to show
+// beside a machine that was on a perfectly good clock.
+func TestGetPersonReportsTheZone(t *testing.T) {
+	sup := newTestSupervisor(t)
+	srv := NewServer(sup)
+	if w := do(t, srv, "PUT", "/person", `{"name":"Naman","tz":"Asia/Kolkata"}`); w.Code != 204 {
+		t.Fatalf("put = %d: %s", w.Code, w.Body)
+	}
+	if got := do(t, srv, "GET", "/person", "").Body.String(); !strings.Contains(got, "Asia/Kolkata") {
+		t.Errorf("GET /person = %s, want it to carry the zone", got)
+	}
+}

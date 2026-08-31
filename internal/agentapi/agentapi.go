@@ -151,8 +151,10 @@ type Person struct {
 	// or a wrong clock would silently re-anchor every schedule the person had
 	// booked.
 	//
-	// Write-only. It is kept in its own file rather than in the rendered
-	// profile, so it does not come back on a read -- nothing needs it to.
+	// Kept in its own file rather than in the rendered profile, because it is
+	// machine state and not something an agent reads about the person. A read
+	// still reports it: the app has no other way to find out which country it
+	// should be showing, and guessing from the device is what this replaced.
 	TZ string `json:"tz,omitempty"`
 }
 

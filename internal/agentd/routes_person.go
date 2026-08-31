@@ -21,7 +21,12 @@ const personBodyCap = 32 << 10
 // happened.
 func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 	body := ReadPerson(s.sup.stateDir)
-	reply(w, http.StatusOK, agentapi.Person{Notes: body, Onboarded: body != ""})
+	// The zone comes back too. It is machine state rather than something an agent
+	// reads, so it is not in the rendered profile -- but the app has no other way
+	// to learn it, and without it a reinstall or a second device shows "Not set"
+	// beside a machine that is on a perfectly good clock.
+	reply(w, http.StatusOK, agentapi.Person{
+		Notes: body, Onboarded: body != "", TZ: readZoneFile(s.sup.stateDir)})
 }
 
 // handlePutPerson replaces the profile with what onboarding collected.
