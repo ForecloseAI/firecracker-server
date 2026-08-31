@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"mime"
 	"net/http"
+	"strconv"
 
 	"cracked/internal/agentapi"
 )
@@ -125,25 +127,51 @@ func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request, user stri
 		return
 	}
 	defer resp.Body.Close()
-	forwardAttachmentHeaders(w, resp)
+	setAttachmentHeaders(w, r.PathValue("name"), resp)
 	if _, err := io.Copy(w, io.LimitReader(resp.Body, maxAttachmentV1)); err != nil {
 		// The status and headers are already sent, so the person gets a short
 		// file whatever happens now. The log is the only place it can be seen.
-		log.Printf("chat attachment %s: %v", r.PathValue("name"), err)
+		// %q, because the name is a path segment a client chose and a raw one
+		// could put a newline in the log and forge a line after it.
+		log.Printf("chat attachment %q: %v", r.PathValue("name"), err)
 	}
 }
 
-// forwardAttachmentHeaders passes on what the guest decided about this file.
-func forwardAttachmentHeaders(w http.ResponseWriter, resp *http.Response) {
-	// Content-Length included deliberately: without it this response is chunked,
-	// so the client gets no total size -- no progress on a 20 MB file, and no way
-	// to notice the truncation the copy error below can only write to a log.
-	for _, h := range []string{"Content-Type", "Content-Disposition", "Cache-Control", "Content-Length"} {
-		if v := resp.Header.Get(h); v != "" {
-			w.Header().Set(h, v)
-		}
-	}
-	// Set here as well as on the guest: this is the response a browser sees, and
-	// without it one is free to sniff an octet-stream back into HTML.
+// setAttachmentHeaders decides how this file may be served, HERE, at the gateway.
+//
+// Recomputed rather than taken from the guest, and that is the whole point. A
+// guest is the person's own machine and they have root on it, so a daemon they
+// patched can answer any Content-Type it likes. This response comes back on the
+// same origin as the operator console and its __Host-sess cookie, so served as
+// text/html, guest-authored script would run with that authority -- and nosniff
+// does nothing about an explicitly declared type, only about a sniffed one. The
+// VNC gateway is kept off this origin for exactly the same reason.
+//
+// The name is not trusted either: a patched guest answers 200 to any name it
+// likes, so the filename is formatted by mime rather than concatenated into the
+// header.
+func setAttachmentHeaders(w http.ResponseWriter, name string, resp *http.Response) {
+	mimeType, isImage := agentapi.AttachmentMIME(name)
+	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if !isImage {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment",
+			map[string]string{"filename": agentapi.ReadableName(name)}))
+	}
+	forwardLength(w, resp)
+}
+
+// forwardLength passes on the guest's Content-Length when it is a plausible one.
+//
+// Worth having: without it the response is chunked, so the client gets no total
+// size -- no progress on a 20 MB file, and no way to notice the truncation the
+// copy error can only write to a log. Worth checking: it is the one number here
+// that still comes from the guest.
+func forwardLength(w http.ResponseWriter, resp *http.Response) {
+	n, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	if err != nil || n < 0 || n > maxAttachmentV1 {
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
 }

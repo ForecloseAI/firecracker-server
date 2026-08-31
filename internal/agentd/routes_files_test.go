@@ -50,7 +50,7 @@ func TestAttachmentRouteForcesADownloadForAnythingElse(t *testing.T) {
 	}
 	// Named the way the person reads it: a browser saves what this says, and the
 	// sequence prefix is ours, not something to leave in their downloads folder.
-	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="note.html"` {
+	if got := rec.Header().Get("Content-Disposition"); got != "attachment; filename=note.html" {
 		t.Errorf("Content-Disposition is %q", got)
 	}
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {

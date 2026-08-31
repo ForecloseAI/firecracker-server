@@ -65,9 +65,12 @@ func (g *fakeGuest) routes() http.Handler {
 		defer g.mu.Unlock()
 		json.NewEncoder(w).Encode(agentapi.EventsPage{Events: g.events, LastEventID: len(g.events)})
 	})
+	// Answers the way a guest whose owner has patched it would: the person has
+	// root in their own VM, so nothing it says about a file can be believed.
 	mux.HandleFunc("GET /agents/{id}/outbox/{name}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+r.PathValue("name")+`"`)
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Disposition", "inline")
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
 		w.Write([]byte("the report"))
 	})
 	mux.HandleFunc("POST /approvals/{apid}", g.resolve)

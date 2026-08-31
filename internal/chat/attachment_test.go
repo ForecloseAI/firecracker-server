@@ -103,25 +103,47 @@ func TestAttachmentWithNothingAttachedIsDropped(t *testing.T) {
 	}
 }
 
-// The guest decided what may render inline and what must be downloaded. This is
-// the hop that actually faces a browser, so dropping its headers here would make
-// the care taken at the other end worth nothing.
-func TestAttachmentProxyForwardsWhatTheGuestDecided(t *testing.T) {
+// The gateway decides how an attachment may be served, never the guest.
+//
+// A person has root on their own VM, so a daemon they patched can answer
+// Content-Type: text/html. This response comes back on the same origin as the
+// operator console and its __Host-sess cookie, so serving that would run
+// guest-authored script with the operator's authority -- and nosniff does
+// nothing about an explicitly declared type, only a sniffed one.
+func TestAttachmentProxyDoesNotTrustTheGuestsHeaders(t *testing.T) {
 	s, _, u := newFake(t)
 	w := call(t, s, u, "GET", "/v1/threads/boss/files/0001-report.pdf", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
+	// The fake guest said text/html. It does not get a say.
 	if got := w.Header().Get("Content-Type"); got != "application/octet-stream" {
-		t.Errorf("Content-Type is %q", got)
+		t.Errorf("Content-Type is %q, and the guest chose it", got)
 	}
-	if got := w.Header().Get("Content-Disposition"); !strings.Contains(got, "attachment") {
+	// The fake guest said "inline".
+	if got := w.Header().Get("Content-Disposition"); got != "attachment; filename=report.pdf" {
 		t.Errorf("Content-Disposition is %q", got)
+	}
+	// The fake guest asked for a public year.
+	if got := w.Header().Get("Cache-Control"); got != "private, max-age=3600" {
+		t.Errorf("Cache-Control is %q", got)
 	}
 	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options is %q", got)
 	}
 	if w.Body.String() != "the report" {
 		t.Errorf("body is %q", w.Body.String())
+	}
+}
+
+// An image is still served as an image, or the app cannot draw one.
+func TestAttachmentProxyStillServesImagesInline(t *testing.T) {
+	s, _, u := newFake(t)
+	w := call(t, s, u, "GET", "/v1/threads/boss/files/0003-screen.png", "")
+	if got := w.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("Content-Type is %q", got)
+	}
+	if got := w.Header().Get("Content-Disposition"); got != "" {
+		t.Errorf("an image was forced to download: %q", got)
 	}
 }

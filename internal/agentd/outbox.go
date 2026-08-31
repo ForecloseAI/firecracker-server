@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
 	"sync"
+
+	"cracked/internal/agentapi"
 )
 
 // errNoOutbox is what a send tool refuses with when the agent has no state
@@ -29,20 +28,9 @@ func outboxDir(agentDir string) string {
 	return filepath.Join(agentDir, "outbox")
 }
 
-// outboxFile matches the files an outbox owns and captures the number, so a
-// resumed sequence counts only its own. Anchored at the front, so both
-// "0007-screen-thumb.png" and "0007-2026-report.pdf" belong to seven.
-var outboxFile = regexp.MustCompile(`^(\d{4,})-`)
-
 // outboxSeqOf extracts an attachment's sequence number, or 0 if it has none.
-func outboxSeqOf(name string) int {
-	m := outboxFile.FindStringSubmatch(name)
-	if m == nil {
-		return 0
-	}
-	n, _ := strconv.Atoi(m[1])
-	return n
-}
+// The format is declared in agentapi because the gateway needs it too.
+func outboxSeqOf(name string) int { return agentapi.AttachmentSeq(name) }
 
 // outbox hands out the numbers that name what an agent sends.
 //
@@ -98,36 +86,10 @@ func (o *outbox) reserve(name string) (int, string, error) {
 	return o.seq, filepath.Join(o.dir, fmt.Sprintf("%04d-%s", o.seq, name)), nil
 }
 
-// readableName is the file as the person should read it, without the sequence
-// prefix reserve put on the front.
-//
-// Built from the same expression that recognises that prefix on the way back
-// in, so the format has one definition and lives beside the code that writes
-// it. The number is not lost: it travels in Seq, which is what the app groups by.
-func readableName(name string) string {
-	return outboxFile.ReplaceAllString(name, "")
-}
+// readableName is the file as the person should read it, and attachmentMIME is
+// how it may be served. Both come from agentapi: the gateway recomputes the same
+// answers rather than trusting what this daemon puts on the wire, so there must
+// be exactly one definition of them.
+func readableName(name string) string { return agentapi.ReadableName(name) }
 
-// imageTypes are the only types served as themselves.
-//
-// An allowlist rather than a MIME lookup, because the AGENT chooses these
-// filenames: a web client serving an agent-named .html or .svg from its own
-// origin would be running that file's script. These are also exactly what a
-// phone renders inline, so nothing is lost by handing the rest over as a
-// download.
-var imageTypes = map[string]string{
-	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-	".gif": "image/gif", ".webp": "image/webp",
-}
-
-// attachmentMIME reports how to serve a file, and whether it is an image.
-//
-// One helper for two readers: the download route, which is handed a name and no
-// event, and the send tools, which stamp Kind on the wire. They cannot disagree
-// about what an image is because they ask the same question here.
-func attachmentMIME(name string) (string, bool) {
-	if t, ok := imageTypes[strings.ToLower(filepath.Ext(name))]; ok {
-		return t, true
-	}
-	return "application/octet-stream", false
-}
+func attachmentMIME(name string) (string, bool) { return agentapi.AttachmentMIME(name) }

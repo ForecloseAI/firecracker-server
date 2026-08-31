@@ -13,6 +13,10 @@ package agentapi
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -172,6 +176,52 @@ const (
 	KindImage = "image"
 	KindFile  = "file"
 )
+
+// attachmentPrefix matches the sequence an outbox file is named with, and
+// captures the number. Anchored, so "0007-screen-thumb.png" and
+// "0007-2026-report.pdf" both belong to seven.
+var attachmentPrefix = regexp.MustCompile(`^(\d{4,})-`)
+
+// AttachmentSeq extracts an attachment's sequence number, or 0 if it has none.
+func AttachmentSeq(name string) int {
+	m := attachmentPrefix.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// ReadableName is an attachment as the person should read it, without the
+// sequence prefix the daemon named it with.
+func ReadableName(name string) string {
+	return attachmentPrefix.ReplaceAllString(name, "")
+}
+
+// attachmentImages are the only types an attachment is served as itself.
+var attachmentImages = map[string]string{
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp",
+}
+
+// AttachmentMIME reports how to serve a file, and whether it is an image.
+//
+// An allowlist and not a MIME table, because the AGENT chooses these filenames
+// and a page served as itself runs as itself.
+//
+// It lives HERE, in the package both sides share, because the gateway must
+// compute this for itself rather than pass on what the guest said. A guest is
+// the person's own machine and they have root on it: a daemon they patched
+// could answer Content-Type: text/html, and the gateway serves that on the same
+// origin as the operator console and its __Host-sess cookie. nosniff does not
+// help against an explicitly declared type. So both hops ask this function, and
+// the untrusted answer is never forwarded.
+func AttachmentMIME(name string) (string, bool) {
+	if t, ok := attachmentImages[strings.ToLower(filepath.Ext(name))]; ok {
+		return t, true
+	}
+	return "application/octet-stream", false
+}
 
 // Person is what the machine knows about whoever it works for. Collected at
 // onboarding and added to over time; it is rendered into a Markdown file the

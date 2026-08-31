@@ -3,6 +3,7 @@ package agentd
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -138,6 +139,10 @@ func setAttachmentHeaders(w http.ResponseWriter, name string) {
 		// The name the person reads, not the one on disk: a browser saves what
 		// this says, and "0001-report.pdf" is our sequence leaking into their
 		// downloads folder. The URL keeps the number; the filename does not.
-		w.Header().Set("Content-Disposition", `attachment; filename="`+readableName(name)+`"`)
+		//
+		// Formatted by mime rather than concatenated, so a name needing a quote
+		// or a non-ASCII character is escaped the way a browser expects.
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": readableName(name)}))
 	}
 }
