@@ -358,6 +358,30 @@ func (s *Supervisor) EvictIdle() {
 	}
 }
 
+// Recycle stops one agent so the next message to it rebuilds its prompt,
+// reporting whether it actually did.
+//
+// The narrow version of EvictIdle: a skill belongs to the agent that wrote it,
+// so recycling the whole machine to pick one up would throw away five other
+// agents' warm state for nothing.
+//
+// Both guards matter, and both have to be checked under the lock. A working
+// agent must not be interrupted mid-task. And an agent with a queued message
+// must not be dropped either: cancelling the goroutine abandons its inbox, and
+// Send logs the person's message when it ARRIVES, so a message lost here would
+// sit in their transcript with no reply coming, forever. Refusing is free --
+// the next start picks the skill up anyway.
+func (s *Supervisor) Recycle(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.agents[id]
+	if !ok || l.agent.State() != "idle" || len(l.agent.inbox) > 0 {
+		return false
+	}
+	s.stopLocked(id)
+	return true
+}
+
 // LiveCount is how many agents currently hold a goroutine, for /debug/memstats.
 func (s *Supervisor) LiveCount() int {
 	s.mu.Lock()

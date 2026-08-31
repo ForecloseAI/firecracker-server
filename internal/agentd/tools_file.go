@@ -52,16 +52,22 @@ type grepInput struct {
 	Path    string `json:"path" jsonschema:"description=Subdirectory to search - defaults to the whole workspace"`
 }
 
-// roots is where an agent's file tools may reach: the shared workspace, and
-// its own state directory.
+// roots is where an agent's file tools may reach: the shared workspace, its
+// own state directory, and the read-only built-in skills.
 //
 // Its own state has to be reachable or the agent cannot maintain its memory --
 // the doctrine tells it to edit memory/index.md, and a tool that refuses is
 // worse than no tool. Another agent's state directory is not in this list, so
 // one agent still cannot read another's memory.
+//
+// builtin is READ-ONLY, and that asymmetry is the point. Built-in skills ship
+// in the immutable rootfs and are shared by every agent on the machine, so a
+// writable one would let any agent rewrite what every other agent is told to
+// do. Skills an agent authors go under own, where the blast radius is itself.
 type roots struct {
 	workspace string // also the base for Glob and Grep walks
 	own       string
+	builtin   string
 }
 
 // fileTools returns the file tools, confined to the given roots.
@@ -75,11 +81,27 @@ func fileTools(r roots) ([]anthropic.BetaTool, error) {
 	)
 }
 
-// list is the roots a path may resolve under, skipping any that is unset.
-func (r roots) list() []string {
-	out := []string{r.workspace}
-	if r.own != "" {
-		out = append(out, r.own)
+// readable is the roots a path may be read from, skipping any that is unset.
+func (r roots) readable() []string {
+	return nonEmpty(r.workspace, r.own, r.builtin)
+}
+
+// writable is the roots a path may be written to. Deliberately not readable
+// minus nothing: builtin is missing, which is what makes built-in skills
+// read-only.
+func (r roots) writable() []string {
+	return nonEmpty(r.workspace, r.own)
+}
+
+// nonEmpty drops the roots this agent does not have. A unit test builds an
+// agent with only a workspace, and a machine with no built-in skills directory
+// is a normal machine rather than a broken one.
+func nonEmpty(dirs ...string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if d != "" {
+			out = append(out, d)
+		}
 	}
 	return out
 }
@@ -106,7 +128,7 @@ func writeTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[writeInput](
 		"Write", "Create or overwrite a file with the given contents.",
 		func(ctx context.Context, in writeInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			full, err := resolve(r, in.Path)
+			full, err := resolveWrite(r, in.Path)
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
@@ -125,7 +147,7 @@ func editTool(r roots) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[editInput](
 		"Edit", "Replace exact text in a file. Fails unless old_string appears exactly once, unless replace_all is set.",
 		func(ctx context.Context, in editInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			full, err := resolve(r, in.Path)
+			full, err := resolveWrite(r, in.Path)
 			if err != nil {
 				return toolText(err.Error()), nil
 			}
@@ -243,11 +265,24 @@ func grepTree(root, base string, re *regexp.Regexp) []string {
 		if err != nil || d.IsDir() || len(hits) >= matchCap {
 			return skipHidden(d, err)
 		}
-		rel, _ := filepath.Rel(root, p)
-		hits = append(hits, matchLines(p, rel, re, matchCap-len(hits))...)
+		hits = append(hits, matchLines(p, relTo(root, p), re, matchCap-len(hits))...)
 		return nil
 	})
 	return hits
+}
+
+// relTo names a hit relative to the workspace, falling back to the absolute
+// path when it is not under it.
+//
+// Grep can now be pointed at the built-in skills, which live outside the
+// workspace entirely: a plain filepath.Rel would render those as a ladder of
+// "../.." that names nothing the model can then Read.
+func relTo(root, p string) string {
+	rel, err := filepath.Rel(root, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return p
+	}
+	return rel
 }
 
 // matchLines returns up to limit matching lines from one file.
@@ -281,33 +316,70 @@ func joinOrNone(lines []string, empty string) string {
 	return body
 }
 
-// resolve confines a path to the agent's roots. Everything the agent touches
-// goes through here, so a traversal out of them fails in one place rather than
-// in each tool. This is a hard block, not an approval prompt: there is no
-// answer a person could give that makes reaching into /etc correct.
+// resolve confines a path the agent wants to READ. Everything the agent touches
+// goes through here or through resolveWrite, so a traversal out of the roots
+// fails in one place rather than in each tool. This is a hard block, not an
+// approval prompt: there is no answer a person could give that makes reaching
+// into /etc correct.
 //
 // A relative path is taken against the workspace, which is where work happens;
-// memory is reached by the absolute path the prompt already names.
+// memory and skills are reached by the absolute paths the prompt already names.
 func resolve(r roots, path string) (string, error) {
-	full := path
-	if !filepath.IsAbs(full) {
-		base, err := filepath.Abs(r.workspace)
-		if err != nil {
-			return "", fmt.Errorf("bad workspace root: %v", err)
-		}
-		full = filepath.Join(base, full)
+	full, err := absolute(r.workspace, path)
+	if err != nil {
+		return "", err
 	}
-	full = filepath.Clean(full)
-	for _, root := range r.list() {
-		base, err := filepath.Abs(root)
+	if under(full, r.readable()) {
+		return full, nil
+	}
+	return "", fmt.Errorf("%s is outside the workspace and your own files", path)
+}
+
+// resolveWrite confines a path the agent wants to CHANGE.
+//
+// A built-in skill gets its own refusal rather than the generic one. It IS
+// readable, so the generic "outside the workspace" message would contradict
+// what the model just did and read as a bug; naming the rule and the way round
+// it is what makes the refusal actionable.
+func resolveWrite(r roots, path string) (string, error) {
+	full, err := absolute(r.workspace, path)
+	if err != nil {
+		return "", err
+	}
+	if under(full, r.writable()) {
+		return full, nil
+	}
+	if under(full, nonEmpty(r.builtin)) {
+		return "", fmt.Errorf("%s is a built-in skill and is read-only - "+
+			"write your own version with create_skill instead", path)
+	}
+	return "", fmt.Errorf("%s is outside the workspace and your own files", path)
+}
+
+// absolute anchors a relative path to the workspace and cleans it.
+func absolute(workspace, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	base, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("bad workspace root: %v", err)
+	}
+	return filepath.Clean(filepath.Join(base, path)), nil
+}
+
+// under reports whether an absolute path sits at or inside one of the dirs.
+func under(full string, dirs []string) bool {
+	for _, dir := range dirs {
+		base, err := filepath.Abs(dir)
 		if err != nil {
 			continue
 		}
 		if full == base || strings.HasPrefix(full, base+string(filepath.Separator)) {
-			return full, nil
+			return true
 		}
 	}
-	return "", fmt.Errorf("%s is outside the workspace and your own files", path)
+	return false
 }
 
 // capText truncates to readCap, telling the model it was truncated so it can

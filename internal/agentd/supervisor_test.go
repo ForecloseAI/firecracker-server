@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // supervisorWith builds a supervisor with a given live-agent ceiling.
@@ -243,5 +244,61 @@ func TestNoCapacityWhenEverythingIsBusy(t *testing.T) {
 	}
 	if !strings.Contains(ErrNoCapacity.Error(), "working") {
 		t.Error("the capacity error does not say what is actually wrong")
+	}
+}
+
+// liveWithoutGoroutine registers an agent with the supervisor but does NOT run
+// it, so a test can leave a message sitting in its inbox.
+//
+// A running agent drains its inbox in microseconds and would then take a real
+// turn against the API, so the queued-message guard cannot be tested any other
+// way. The returned flag reports whether the agent's context was cancelled.
+func liveWithoutGoroutine(t *testing.T, sup *Supervisor, id string) (*Agent, *bool) {
+	t.Helper()
+	a, err := New(id, t.TempDir(), t.TempDir(), testProfile(), sup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	sup.mu.Lock()
+	sup.agents[id] = &live{agent: a, cancel: func() { stopped = true }, lastUsed: time.Now()}
+	sup.mu.Unlock()
+	return a, &stopped
+}
+
+// An idle agent with nothing queued is dropped, so the next message to it
+// rebuilds the prompt and picks up whatever it just learned.
+func TestRecycleDropsAnIdleAgent(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	_, stopped := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper") {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	if !*stopped {
+		t.Error("the agent's context was never cancelled, so its goroutine would live on")
+	}
+	if _, ok := sup.liveAgent("helper"); ok {
+		t.Error("the agent is still in the live map, so the next message reuses the stale prompt")
+	}
+}
+
+// THE guard that matters. Cancelling a goroutine abandons its inbox, and a
+// message is logged when it ARRIVES -- so a message lost here sits in the
+// person's transcript with no reply ever coming. Refusing costs nothing,
+// because the next start picks the skill up anyway.
+func TestRecycleRefusesWhenBusyOrQueued(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	working, workingStopped := liveWithoutGoroutine(t, sup, "working")
+	working.setState("working")
+	if sup.Recycle("working") || *workingStopped {
+		t.Error("an agent mid-turn was recycled, losing the work the person is waiting on")
+	}
+	queued, queuedStopped := liveWithoutGoroutine(t, sup, "queued")
+	queued.inbox <- inbound{text: "already logged as theirs"}
+	if sup.Recycle("queued") || *queuedStopped {
+		t.Error("an agent with a queued message was recycled; that message would never be answered")
+	}
+	if sup.Recycle("never-existed") {
+		t.Error("recycled an agent that is not running")
 	}
 }

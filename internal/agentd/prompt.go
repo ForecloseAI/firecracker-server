@@ -153,6 +153,12 @@ func ComposeSystemPrompt(p Profile, agentDir, stateDir string) string {
 	if mem := RenderMemorySection(agentDir); mem != "" {
 		parts = append(parts, mem)
 	}
+	// After memory and before the agent's own instructions. Memory is what it
+	// knows and skills are how a job is done, so the facts come first; the
+	// instructions stay closest to the limits that answer them.
+	if skills := RenderSkillsSection(agentDir); skills != "" {
+		parts = append(parts, skills)
+	}
 	if own := readCapped(instructionsPath(agentDir), instructionsCap); own != "" {
 		parts = append(parts, "## Your standing instructions\n"+own)
 	}

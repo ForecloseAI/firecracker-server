@@ -16,7 +16,7 @@ verifying Supabase access tokens; everything else is stdlib.
 | `internal/fc` | firecracker API client over its unix socket |
 | `internal/hostnet` | TAP devices and slot→IP/MAC derivation |
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
-| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd |
+| `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd, built-in skills |
 | `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh`, `vm-ssh.sh` |
 | `deploy/` | systemd unit for the control plane |
 
@@ -362,6 +362,59 @@ The full prompt is `BaseIdentity` + browser guidance (browser profiles only) +
 the profile's role + memory + `instructions.md` + `BaseLimits`. The limits go
 last on purpose: `instructions.md` is agent-writable, so the safety rules have
 to be the final word.
+
+## Skills
+
+A skill is a procedure an agent can follow again: one `SKILL.md` with a name, a
+description, and the steps. Only the **description** is loaded into the prompt.
+The body sits on disk until a job matches and the agent reads it, which is what
+makes many skills nearly free.
+
+They live in two places, and the difference is the whole design:
+
+| Path | Holds | Written by |
+|---|---|---|
+| `/opt/agent/skills/` | the built-ins | the rootfs image, read-only |
+| `<agent>/skills/` | what that agent learned | the agent itself |
+
+Built-ins ship in the **image**, not the overlay and not the binary. That image
+is opened read-only by every VM at once and the host page cache holds one copy
+for all of them, so a megabyte of skills costs a megabyte per host rather than
+per agent. It also means built-ins are always exactly what the image shipped —
+no seeding, and no VM stuck on a stale copy. Read-only is load-bearing too:
+built-ins are shared, so a writable one would let any agent rewrite what every
+other agent is told to do. `Write` and `Edit` refuse them by name, and
+`resolve()` in `tools_file.go` is where that split lives.
+
+An agent's own skills are private to it and sit on the overlay, so they survive
+`DELETE` and die on `?purge=true`, exactly like its memory. An agent's own skill
+of the same name overrides a built-in, which is how a wrong one gets fixed on a
+machine without a new image.
+
+The format is the [Agent Skills](https://agentskills.io) standard — `name` and
+`description` front matter — so a skill written elsewhere drops in unchanged. A
+skill with no description is **skipped and logged**, never silently ignored:
+without a description nothing would ever trigger it, and that is indistinguishable
+from a skill that simply never matched.
+
+### Learning without a deploy
+
+An agent writes its own with `create_skill`, which every profile gets whether or
+not it names it. The tool composes the front matter itself, so the model cannot
+produce a file the loader will not read.
+
+A prompt is composed once when an agent starts, so a skill written mid-conversation
+is not in the index yet. At the end of that turn the agent asks the supervisor to
+recycle it: `Recycle` cancels **one goroutine** inside a daemon that keeps running,
+and the next message rebuilds the agent, reloading `conversation.json` from disk.
+Nothing is deployed, no VM restarts, and the person sees an unchanged transcript
+and one slightly slower reply.
+
+`Recycle` refuses unless the agent is idle **and** its inbox is empty. Cancelling
+the goroutine abandons that inbox, and a message is logged when it *arrives* — so
+a message dropped here would sit in the person's transcript with no reply ever
+coming. Refusing costs nothing, because the next ordinary start picks the skill
+up anyway.
 
 ## Operational notes
 

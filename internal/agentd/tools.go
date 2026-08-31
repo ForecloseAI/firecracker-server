@@ -31,6 +31,7 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, d.gate) },
 		func() (anthropic.BetaTool, error) { return askTool(d.gate) },
 		func() (anthropic.BetaTool, error) { return rememberPersonTool(d) },
+		func() (anthropic.BetaTool, error) { return createSkillTool(r, d) },
 	)
 	if err != nil {
 		return nil, err
@@ -58,8 +59,12 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // Scheduling is here for the same reason: an agent that cannot put itself on a
 // timer has to ask the boss to do it, and the tool creating one is gated anyway,
 // so the person still agrees to every job whichever agent proposed it.
+// create_skill is here for the same reason: an agent that cannot record what it
+// just worked out has to rediscover it every time, and no profile should have to
+// remember to ask for the ability to learn.
 var alwaysAllowed = []string{
 	"remember_about_person", "schedule_task", "list_schedules", "cancel_schedule",
+	"create_skill",
 }
 
 // permitted expands what a profile allows with the tools it does not have to ask
@@ -100,9 +105,13 @@ type toolDeps struct {
 	// stateDir is the machine's, for the one file about the person that every
 	// agent here reads and writes.
 	stateDir string
-	chrome   *browserServer
-	snaps    *snapshotStore
-	log      *Log
+	// reload is set by a tool whose effect only reaches the model through a
+	// freshly composed prompt, so the agent knows to recycle itself when the
+	// turn ends. A pointer: deps is copied by value into every tool closure.
+	reload *reloadFlag
+	chrome *browserServer
+	snaps  *snapshotStore
+	log    *Log
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list

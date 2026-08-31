@@ -85,6 +85,11 @@ type Agent struct {
 	// with base64 the API is already clearing, and this is the number billed.
 	lastInput int64
 
+	// reload is shared with this agent's tools: create_skill sets it, and Run
+	// acts on it once the turn is over. Not guarded by a.mu -- it has its own
+	// lock, because a tool handler sets it from a goroutine the runner owns.
+	reload *reloadFlag
+
 	// How many people this agent is currently blocked on. A count rather than a
 	// flag because the runner calls tool handlers concurrently, so two questions
 	// can be open at once.
@@ -130,9 +135,11 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		// "an agent that did not start".
 		log.Append(Event{Type: "memory", Message: "could not seed memory: " + err.Error()})
 	}
+	reportBadSkills(log, dir)
 	gate := NewGate(log, hubOf(team), dir)
+	reload := &reloadFlag{}
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
-		stateDir: stateDirOf(team)}
+		stateDir: stateDirOf(team), reload: reload}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
 		// keeps every other tool, and the failure shows up in its log rather
@@ -141,7 +148,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 			log.Append(Event{Type: "error", Message: "no browser: " + err.Error()})
 		}
 	}
-	tools, err := Tools(roots{workspace: workspace, own: dir}, deps, p.Tools)
+	tools, err := Tools(roots{workspace: workspace, own: dir, builtin: BuiltinSkillsDir}, deps, p.Tools)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +156,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
 		model: p.Model, system: ComposeSystemPrompt(p, dir, stateDirOf(team)),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
-		inbox: make(chan inbound, inboxDepth),
+		inbox: make(chan inbound, inboxDepth), reload: reload,
 	}
 	// Wired after the agent exists, because the gate is built before it and the
 	// gate is what knows when a person has become the thing this agent is doing.
@@ -232,7 +239,31 @@ func (a *Agent) Run(ctx context.Context) {
 			// is bookkeeping between turns, and Interrupt must not appear to
 			// stop it. On the agent's own context, so shutdown still does.
 			a.compactIfNeeded(ctx)
+			a.recycleIfStale()
 		}
+	}
+}
+
+// recycleIfStale asks the supervisor to drop this agent when its prompt no
+// longer matches what is on disk, so the next message rebuilds it.
+//
+// Placed at the turn boundary and nowhere else. Inside `turn`, a.save() is the
+// LAST statement -- after finish and after report -- so this is the only point
+// at which the event log and conversation.json are both settled. It is also
+// safe from here: the lock order in the supervisor is one-way, and report()
+// already calls back into it from this same goroutine on every delegated turn.
+//
+// Recycle does the deciding, because whether an agent may go depends on state
+// only the supervisor can check without racing.
+func (a *Agent) recycleIfStale() {
+	if !a.reload.take() {
+		return
+	}
+	if a.team == nil {
+		return // a unit test, which has no supervisor to recycle it
+	}
+	if a.team.Recycle(a.id) {
+		a.log.Append(Event{Type: "skill", Message: "reloading so a new skill is available"})
 	}
 }
 

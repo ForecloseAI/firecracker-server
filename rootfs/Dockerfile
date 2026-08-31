@@ -93,6 +93,24 @@ RUN cd /opt/agent \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
 
+# Built-in skills: procedures every agent can follow, listed in its prompt by
+# name and description and read off disk only when a job matches.
+#
+# They ship HERE rather than embedded in agentd or seeded onto the overlay,
+# because this image is opened read-only by every VM at once and the host page
+# cache holds one copy for all of them. Seeding instead would pay for the same
+# files per agent, per start, and leave existing VMs on a stale copy forever.
+# Read-only is also what stops one agent rewriting what every other agent is
+# told to do; an agent's own skills live on its overlay.
+#
+# Note this lands AFTER the chown above, so these stay root-owned and the kernel
+# refuses a write from the agent user whatever the daemon's own path checks do.
+# That is the belt to resolveWrite's braces, not a replacement for it.
+#
+# After the npm layer on purpose: editing a skill must not reinstall node_modules.
+COPY files/skills /opt/agent/skills
+RUN test -f /opt/agent/skills/skill-creator/SKILL.md
+
 # agentd is compiled on the host by scripts/build-rootfs.sh, because its Go
 # source lives OUTSIDE this build context. Running it here is the guard: it
 # proves the file is present, executable, the right architecture and not
