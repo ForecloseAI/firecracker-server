@@ -2,7 +2,6 @@ package agentd
 
 import (
 	"context"
-	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/toolrunner"
@@ -174,7 +173,7 @@ func rememberPersonTool(d toolDeps) (anthropic.BetaTool, error) {
 			if d.stateDir == "" {
 				return toolText("there is nowhere to record that on this machine"), nil
 			}
-			if err := AppendAboutPerson(d.stateDir, in.Fact, d.self, time.Now().UTC()); err != nil {
+			if err := AppendAboutPerson(d.stateDir, in.Fact, d.self, personNow(d.stateDir)); err != nil {
 				return toolText("could not record that: " + err.Error()), nil
 			}
 			return toolText("Recorded. Every agent here will have it from their next start."), nil

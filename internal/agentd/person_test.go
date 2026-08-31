@@ -186,3 +186,41 @@ func TestAZoneOnlyUpdateKeepsTheProfile(t *testing.T) {
 		t.Errorf("zone = %q, want Europe/Berlin: the change still has to land", got)
 	}
 }
+
+// Picking a country and skipping the questions still counts as onboarding.
+//
+// Onboarded is derived from this file existing, so a zone-only body that
+// skipped WritePerson left the person un-onboarded: the app asked them the
+// questions again on every launch, and every answer they skipped again put
+// them back where they started.
+func TestAZoneOnlyBodyStillOnboards(t *testing.T) {
+	sup := newTestSupervisor(t)
+	srv := NewServer(sup)
+
+	if w := do(t, srv, "PUT", "/person",
+		`{"name":"","work":"","onboarded":true,"tz":"Asia/Kolkata"}`); w.Code != 204 {
+		t.Fatalf("put = %d, want 204: %s", w.Code, w.Body)
+	}
+	if ReadPerson(sup.stateDir) == "" {
+		t.Error("no profile was written, so GET /person still reports onboarded:false")
+	}
+	if got := loadZone(sup.stateDir).String(); got != "Asia/Kolkata" {
+		t.Errorf("zone = %q, want Asia/Kolkata", got)
+	}
+}
+
+// A zone this machine cannot resolve is refused, not quietly dropped.
+//
+// PUT /person is the only way a zone arrives, so a 204 that stored nothing
+// would leave the app showing a country the machine had never adopted.
+func TestAnUnresolvableZoneIsRefused(t *testing.T) {
+	sup := newTestSupervisor(t)
+	srv := NewServer(sup)
+
+	if w := do(t, srv, "PUT", "/person", `{"name":"Naman","tz":"Mars/Olympus"}`); w.Code != 400 {
+		t.Errorf("put with a bad zone = %d, want 400: %s", w.Code, w.Body)
+	}
+	if ReadPerson(sup.stateDir) != "" {
+		t.Error("the profile was written even though the request was refused")
+	}
+}

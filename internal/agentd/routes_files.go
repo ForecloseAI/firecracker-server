@@ -33,7 +33,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	saved, err := saveUpload(s.sup.workspace, header.Filename, file, time.Now().UTC())
+	// The person's clock, not the guest's: an upload sent at 11pm belongs in
+	// today's folder as they would name it, the same date a task folder gets.
+	saved, err := saveUpload(s.sup.workspace, header.Filename, file, personNow(s.sup.stateDir))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "file")
 		return

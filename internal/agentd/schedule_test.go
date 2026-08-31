@@ -1448,3 +1448,42 @@ func TestScheduleRoutesRejectBadInput(t *testing.T) {
 		t.Errorf("unknown agent = %d, want 404", got.Code)
 	}
 }
+
+// A machine onboarded before the zone became a name keeps its hours.
+//
+// The old code stored an RFC3339 stamp when a client sent no IANA name. Those
+// files still exist on running machines, and dropping to UTC on the next boot
+// would re-anchor every clock schedule they had booked, with no way left to say
+// where the person is -- messages no longer carry a zone. Read, never written.
+func TestLoadZoneStillReadsTheOldOffsetForm(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(zonePath(dir), []byte("2026-08-29T14:03:11+05:30"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := parseSchedule("daily at 09:00", loadZone(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sp.next(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)).UTC()
+	if got.Hour() != 3 || got.Minute() != 30 {
+		t.Errorf("09:00 at a stored +05:30 = %v UTC, want 03:30", got)
+	}
+}
+
+// What the model is told a schedule runs at must be the person's clock.
+//
+// NextRunAt is an absolute instant, so rendering it raw told the model that a
+// job booked for 09:00 in Kolkata runs at 03:30 -- and the model repeats that
+// to the person.
+func TestRenderSchedulesUsesThePersonsZone(t *testing.T) {
+	kolkata := mustZone(t, "Asia/Kolkata")
+	at := time.Date(2026, 9, 1, 3, 30, 0, 0, time.UTC) // 09:00 in Kolkata
+	out := renderSchedules([]Schedule{{
+		ID: "sch-0001", Name: "brief", Agent: BossID, Task: "brief me",
+		Expr: "daily at 09:00", NextRunAt: at, Enabled: true,
+	}}, BossID, kolkata)
+
+	if !strings.Contains(out, "09:00") {
+		t.Errorf("rendered %q, want the person's 09:00 rather than the guest's UTC", out)
+	}
+}

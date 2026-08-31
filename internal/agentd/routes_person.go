@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"cracked/internal/agentapi"
 )
@@ -28,10 +30,25 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, personBodyCap, &p) {
 		return
 	}
-	// A body carrying only a zone changes only the zone: WritePerson replaces the
-	// file, so treating the settings screen's zone-only save like an onboarding
-	// save would answer "I moved to Berlin" by forgetting who they are.
-	if !onlyZone(p) {
+	// A zone we cannot resolve is refused rather than ignored. This call is the
+	// only way a zone reaches the machine, so accepting a bad one with a 204 and
+	// storing nothing would leave both sides believing the clock had moved.
+	if p.TZ != "" {
+		if _, err := time.LoadLocation(p.TZ); err != nil {
+			fail(w, http.StatusBadRequest, "bad_request",
+				strconv.Quote(p.TZ)+" is not a timezone such as Asia/Kolkata", "person")
+			return
+		}
+	}
+	// A body carrying only a zone changes only the zone, because WritePerson
+	// replaces the file and the settings screen's zone-only save would otherwise
+	// answer "I moved to Berlin" by forgetting who they are.
+	//
+	// Unless there is nothing to forget yet. Onboarded is derived from this file
+	// existing, so skipping the write for someone who picked a country and
+	// skipped the questions would leave them un-onboarded and asked again on
+	// every launch. Nothing to protect means nothing to skip.
+	if !onlyZone(p) || ReadPerson(s.sup.stateDir) == "" {
 		if err := WritePerson(s.sup.stateDir, p); err != nil {
 			fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
 			return
@@ -50,8 +67,11 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 // onlyZone reports whether this profile says nothing except where the person is.
-// A GET does not hand back the name and work, so the settings screen has
-// nothing else it could send.
+//
+// A GET hands back the whole rendered profile in Notes and nothing in Name or
+// Work, so a client cannot echo back what it read as the fields it came from.
+// The settings screen therefore sends the zone alone, and this is what tells
+// that apart from an onboarding body.
 func onlyZone(p agentapi.Person) bool {
 	return p.TZ != "" && p.Name == "" && p.Work == "" && p.Notes == ""
 }

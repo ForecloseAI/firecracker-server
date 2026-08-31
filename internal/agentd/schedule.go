@@ -845,6 +845,15 @@ func exportZone(zone string) {
 	os.Setenv("TZ", zone)
 }
 
+// personNow is the current time on the person's own clock.
+//
+// The one accessor for it, so a person-facing date is never accidentally the
+// guest's. Reads the stored zone rather than time.Local, which AdoptZone sets
+// at boot and which is therefore still UTC on a machine onboarded since.
+func personNow(stateDir string) time.Time {
+	return time.Now().In(loadZone(stateDir))
+}
+
 // readZoneFile returns the stored zone name, or "" when there is not one yet.
 // Trimmed here so no caller has to defend against the trailing newline a hand
 // edit of the file would leave.
@@ -889,11 +898,21 @@ func (s *Supervisor) rezone(now time.Time) {
 
 // loadZone resolves the remembered timezone, falling back to UTC.
 func loadZone(stateDir string) *time.Location {
-	loc, err := time.LoadLocation(readZoneFile(stateDir))
-	if err != nil {
-		return time.UTC
+	v := readZoneFile(stateDir)
+	if loc, err := time.LoadLocation(v); err == nil {
+		return loc
 	}
-	return loc
+	// A machine onboarded before the zone became a name may hold an RFC3339
+	// stamp, which is what the old code stored when a client sent no IANA name.
+	// Read it rather than dropping to UTC: that machine's schedules are anchored
+	// to this offset, and falling back would silently re-anchor every one of them
+	// at the next boot with no way left to say where the person is. Nothing
+	// writes this form any more -- rememberZone refuses it -- so the file heals
+	// the next time they save a country.
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.Location()
+	}
+	return time.UTC
 }
 
 // runSchedules sweeps for due schedules until the daemon stops. Started by
