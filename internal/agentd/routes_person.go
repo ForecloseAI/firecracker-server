@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
-	"time"
 
 	"cracked/internal/agentapi"
 )
@@ -35,13 +33,14 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, personBodyCap, &p) {
 		return
 	}
-	// A zone we cannot resolve is refused rather than ignored. This call is the
-	// only way a zone reaches the machine, so accepting a bad one with a 204 and
-	// storing nothing would leave both sides believing the clock had moved.
+	// A zone we cannot adopt is refused rather than ignored. This call is the only
+	// way a zone reaches the machine, so accepting a bad one with a 204 and
+	// storing nothing would leave both sides believing the clock had moved. The
+	// emptiness check is the real one: an absent field means "leave the zone
+	// alone", which validZone rejects because it is not a zone.
 	if p.TZ != "" {
-		if _, err := time.LoadLocation(p.TZ); err != nil {
-			fail(w, http.StatusBadRequest, "bad_request",
-				strconv.Quote(p.TZ)+" is not a timezone such as Asia/Kolkata", "person")
+		if err := validZone(p.TZ); err != nil {
+			fail(w, http.StatusBadRequest, "bad_request", err.Error(), "person")
 			return
 		}
 	}
@@ -53,7 +52,8 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// existing, so skipping the write for someone who picked a country and
 	// skipped the questions would leave them un-onboarded and asked again on
 	// every launch. Nothing to protect means nothing to skip.
-	if !onlyZone(p) || ReadPerson(s.sup.stateDir) == "" {
+	wrote := !onlyZone(p) || ReadPerson(s.sup.stateDir) == ""
+	if wrote {
 		if err := WritePerson(s.sup.stateDir, p); err != nil {
 			fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
 			return
@@ -63,11 +63,18 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// person, so it is stored outside the rendered profile. This is its only
 	// writer, and going through the supervisor is what moves the guest's own TZ
 	// and any existing clock schedules with it.
-	s.sup.RememberZone(p.TZ)
+	moved := s.sup.RememberZone(p.TZ)
 	// Every running agent composed its prompt at start, so none of them can see
 	// this yet. Evicting is what makes onboarding take effect now rather than
 	// whenever an agent happens to be recycled.
-	s.sup.EvictIdle()
+	//
+	// Only when something actually changed. Re-opening the picker and tapping the
+	// country already chosen writes nothing and moves nothing, and throwing away
+	// the machine's warm agents for that would make a no-op the most expensive
+	// thing in the screen.
+	if wrote || moved {
+		s.sup.EvictIdle()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

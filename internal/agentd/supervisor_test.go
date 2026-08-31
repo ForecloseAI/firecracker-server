@@ -441,13 +441,9 @@ func TestTaskFoldersAreDatedInThePersonsZone(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Asia/Kolkata")
 
-	// Pinned to UTC, which is what a machine onboarded since its last restart
-	// still has: without it this would pass on a host that already ran Kolkata
-	// and prove nothing about which of the two was read.
-	local := time.Local
-	t.Cleanup(func() { time.Local = local })
-	time.Local = time.UTC
-
+	// TestMain pins time.Local to an offset nothing here uses, so this proves the
+	// stored zone is what was read rather than passing on a host that agreed.
+	//
 	// 20:00 UTC is already the next day in Kolkata, which is +05:30.
 	evening := time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)
 	if got := sup.localDate(evening); got != "2026-09-01" {

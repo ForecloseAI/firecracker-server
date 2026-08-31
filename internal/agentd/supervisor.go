@@ -537,11 +537,6 @@ func (s *Supervisor) localDate(now time.Time) string {
 	return now.In(loadZone(s.stateDir)).Format("2006-01-02")
 }
 
-// personDate is today where the person is, for a name they will read.
-func (s *Supervisor) personDate() string {
-	return personNow(s.stateDir).Format("2006-01-02")
-}
-
 // CurrentTask reports what an agent is working on, if anything.
 func (s *Supervisor) CurrentTask(agentID string) *Task {
 	rec, ok := s.roster.Get(agentID)

@@ -122,9 +122,8 @@ func TestUnsubscribeDetaches(t *testing.T) {
 // sorted them together or the person moved. Cheaper to assert it here than to
 // find it in a transcript months later.
 func TestAppendStampsInUTCWhateverTheLocalZone(t *testing.T) {
-	local := time.Local
-	t.Cleanup(func() { time.Local = local })
-	time.Local = mustZone(t, "Asia/Kolkata")
+	// time.Local is already pinned away from UTC by TestMain, which is the whole
+	// point: the stamp must be UTC regardless of what the process is running.
 
 	log, err := OpenLog(t.TempDir(), "boss")
 	if err != nil {
