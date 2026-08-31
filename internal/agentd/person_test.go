@@ -159,3 +159,30 @@ func TestAFileWithNoMessageStillNamesThePath(t *testing.T) {
 		t.Errorf("a bare attachment framed as %q", framed)
 	}
 }
+
+// Changing where you live must not cost you your name.
+//
+// The settings screen sends a zone and nothing else, because GET /person does
+// not hand back the name and work for it to echo. WritePerson replaces the
+// file, so a zone-only body that reached it would render an empty profile over
+// the real one and every agent would start the next turn not knowing who they
+// work for.
+func TestAZoneOnlyUpdateKeepsTheProfile(t *testing.T) {
+	sup := newTestSupervisor(t)
+	srv := NewServer(sup)
+
+	if w := do(t, srv, "PUT", "/person",
+		`{"name":"Naman","work":"Founder","tz":"Asia/Kolkata"}`); w.Code != 204 {
+		t.Fatalf("onboarding put = %d, want 204: %s", w.Code, w.Body)
+	}
+	if w := do(t, srv, "PUT", "/person", `{"tz":"Europe/Berlin"}`); w.Code != 204 {
+		t.Fatalf("zone-only put = %d, want 204: %s", w.Code, w.Body)
+	}
+
+	if got := ReadPerson(sup.stateDir); !strings.Contains(got, "Naman") {
+		t.Errorf("profile after a zone change = %q, want it to still name them", got)
+	}
+	if got := loadZone(sup.stateDir).String(); got != "Europe/Berlin" {
+		t.Errorf("zone = %q, want Europe/Berlin: the change still has to land", got)
+	}
+}

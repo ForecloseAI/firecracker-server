@@ -28,9 +28,18 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, personBodyCap, &p) {
 		return
 	}
-	if err := WritePerson(s.sup.stateDir, p); err != nil {
-		fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
-		return
+	// A body carrying only a zone changes only the zone.
+	//
+	// Onboarding sends the whole profile; the settings screen sends where the
+	// person now lives and nothing else, because a GET does not return their name
+	// and work for it to send back. WritePerson replaces the file, so treating the
+	// second like the first would answer "I moved to Berlin" by forgetting who
+	// they are.
+	if !onlyZone(p) {
+		if err := WritePerson(s.sup.stateDir, p); err != nil {
+			fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
+			return
+		}
 	}
 	// The zone is not part of the rendered profile -- it is machine state, not
 	// something an agent reads about the person -- so it is stored separately.
@@ -44,6 +53,11 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// whenever an agent happens to be recycled.
 	s.sup.EvictIdle()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// onlyZone reports whether this profile says nothing except where the person is.
+func onlyZone(p agentapi.Person) bool {
+	return p.TZ != "" && p.Name == "" && p.Work == "" && p.Notes == ""
 }
 
 // handleShot serves a handoff screenshot.
