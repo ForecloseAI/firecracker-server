@@ -93,6 +93,42 @@ RUN cd /opt/agent \
  && npm cache clean --force \
  && chown -R agent:agent /opt/agent
 
+# Document tooling, for the pdf/xlsx/docx/pptx skills below. This is the single
+# most expensive layer in the image, so it sits after everything cheap.
+#
+# LibreOffice as three component packages and NOT the `libreoffice` metapackage,
+# which drags in the whole desktop suite and a JRE for no gain here. Only two
+# things need it: converting a legacy .doc/.ppt/.xls that Python cannot open,
+# and rendering a document to PDF so it can be looked at. pandoc handles
+# markdown in and out; poppler-utils is for pdftoppm, which turns a PDF page
+# into an image the agent can actually see.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libreoffice-writer libreoffice-calc libreoffice-impress \
+      pandoc poppler-utils \
+ && rm -rf /var/lib/apt/lists/* \
+ && soffice --version \
+ && pandoc --version | head -1 \
+ && pdftoppm -v 2>&1 | head -1
+
+# A venv, not `pip install` into the system Python. Ubuntu 24.04 marks its
+# python3 externally-managed (PEP 668), so a plain pip refuses, and
+# --break-system-packages would put these libraries in the path apt itself
+# reaches for. The venv also means the agent's own later `pip install` lands
+# somewhere sane without sudo.
+#
+# The final import line is the guard, and it is the point of the layer: a
+# missing library otherwise boots a VM whose skills confidently instruct
+# something that fails, and which passes every health check while doing it.
+# Import names differ from package names -- python-docx is `docx`, python-pptx
+# is `pptx`, Pillow is `PIL` -- so this checks what the skills actually write.
+RUN python3 -m venv /opt/agent/venv \
+ && /opt/agent/venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/agent/venv/bin/pip install --no-cache-dir \
+      pypdf pdfplumber openpyxl python-docx python-pptx pandas Pillow defusedxml lxml \
+ && /opt/agent/venv/bin/python -c \
+      "import pypdf, pdfplumber, openpyxl, docx, pptx, pandas, PIL, defusedxml, lxml" \
+ && chown -R agent:agent /opt/agent/venv
+
 # Built-in skills: procedures every agent can follow, listed in its prompt by
 # name and description and read off disk only when a job matches.
 #
@@ -109,7 +145,12 @@ RUN cd /opt/agent \
 #
 # After the npm layer on purpose: editing a skill must not reinstall node_modules.
 COPY files/skills /opt/agent/skills
-RUN test -f /opt/agent/skills/skill-creator/SKILL.md
+# Named rather than counted. A count says only that the number changed, which is
+# what it said the first time this ran and the number was wrong; naming each one
+# says WHICH is missing, and it does not need editing when a skill is added.
+RUN for s in skill-creator pdf xlsx docx pptx doc-coauthoring; do \
+      test -f "/opt/agent/skills/$s/SKILL.md" || { echo "missing built-in skill: $s"; exit 1; }; \
+    done
 
 # agentd is compiled on the host by scripts/build-rootfs.sh, because its Go
 # source lives OUTSIDE this build context. Running it here is the guard: it

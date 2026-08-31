@@ -151,19 +151,35 @@ func TestSkillsHeaderScopesTheInstructionException(t *testing.T) {
 	}
 }
 
-// The skill this ships with has to survive its own loader. It is the file that
-// teaches every agent the format, so a typo in it teaches the wrong one.
-func TestShippedSkillCreatorParses(t *testing.T) {
-	buf, err := os.ReadFile(filepath.Join("..", "..", "rootfs", "files", "skills",
-		"skill-creator", "SKILL.md"))
+// Every skill this image ships has to survive its own loader. They are the
+// files that teach the format, so a typo in one teaches the wrong format -- and
+// a description that will not parse means the skill silently never triggers.
+func TestShippedSkillsAllParse(t *testing.T) {
+	dir := filepath.Join("..", "..", "rootfs", "files", "skills")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := parseSkill(string(buf), "skill-creator")
-	if err != nil {
-		t.Fatalf("the shipped skill-creator does not parse: %v", err)
+	if len(entries) == 0 {
+		t.Fatal("no skills ship with the image")
 	}
-	if !strings.Contains(s.Description, "create_skill") {
-		t.Errorf("description = %q, want it to name the tool it is about", s.Description)
+	for _, e := range entries {
+		buf, err := os.ReadFile(filepath.Join(dir, e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Errorf("%s: %v", e.Name(), err)
+			continue
+		}
+		s, err := parseSkill(string(buf), e.Name())
+		if err != nil {
+			t.Errorf("%s does not parse: %v", e.Name(), err)
+			continue
+		}
+		// The description is the only part ever loaded, so it has to carry both
+		// what the skill does and when to reach for it. A bare label ("Handles
+		// invoices.") triggers nothing, and that failure is silent -- an unread
+		// skill looks exactly like one that had no match.
+		if len(s.Description) < 60 || !strings.Contains(strings.ToLower(s.Description), "when") {
+			t.Errorf("%s description does not say when to reach for it: %q", e.Name(), s.Description)
+		}
 	}
 }

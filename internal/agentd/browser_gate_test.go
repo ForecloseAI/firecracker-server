@@ -40,6 +40,8 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		`node -e 'new WebSocket("ws://127.0.0.1:9222/devtools/page/AB")'`,
 		"node /opt/agent/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
 		"google-chrome --headless --dump-dom https://example.com",
+		"chromium --headless --screenshot=/tmp/x.png https://example.com",
+		"CHROME=$(which chromium); $CHROME --user-data-dir=/tmp/p",
 		"pkill -f chromium",
 		"xdotool key Return",
 	}
@@ -53,6 +55,12 @@ func TestBashRedirectsAttemptsToDriveChromeDirectly(t *testing.T) {
 		"grep -r chrome /var/log",
 		"echo 'chrome is slow' >> notes.md",
 		"ls ~/.config/chromium",
+		// Found on a live VM. LibreOffice takes --headless for every document
+		// conversion, and the pdf/docx/xlsx/pptx skills lean on it constantly,
+		// so a bare --headless match blocked the whole document surface.
+		"soffice --headless --convert-to pdf --outdir . report.docx",
+		"libreoffice --headless --convert-to xlsx old.xls",
+		"timeout 60 soffice --headless --convert-to pdf deck.pptx",
 		"go test ./...",
 	}
 	for _, cmd := range fine {

@@ -397,6 +397,34 @@ skill with no description is **skipped and logged**, never silently ignored:
 without a description nothing would ever trigger it, and that is indistinguishable
 from a skill that simply never matched.
 
+### What ships
+
+| Skill | For |
+|---|---|
+| `skill-creator` | how to write a skill, and when something is worth saving as one |
+| `pdf` | reading text and tables, splitting, merging, rendering a page |
+| `xlsx` | reading and building spreadsheets, and keeping formulas as formulas |
+| `docx` | reading and writing Word, including run-level edits that keep formatting |
+| `pptx` | reading and building decks, and checking the layout by rendering it |
+| `doc-coauthoring` | writing something long with the person rather than at them |
+
+The four document skills need tooling in the image: LibreOffice (writer, calc
+and impress only, not the metapackage), pandoc, poppler-utils, and a Python
+venv at `/opt/agent/venv` holding pypdf, pdfplumber, openpyxl, python-docx,
+python-pptx, pandas, Pillow, defusedxml and lxml.
+
+A **venv** rather than `pip install`, because Ubuntu 24.04 marks its system
+Python externally-managed and `--break-system-packages` would put these in the
+path apt itself uses. `agentd.service` puts `/opt/agent/venv/bin` first on
+`PATH`, and `bashTool` sets no `cmd.Env`, so every shell command an agent runs
+gets that Python. Note `Environment=PATH=` **replaces** rather than prepends, so
+the unit restates the whole default chain.
+
+One thing the skills have to say out loud: `pandoc x.md -o x.pdf` **fails** here,
+because pandoc writes PDFs through LaTeX and there is no LaTeX in the image. The
+route that works is `pandoc x.md -o x.docx` then
+`soffice --headless --convert-to pdf`.
+
 ### Learning without a deploy
 
 An agent writes its own with `create_skill`, which every profile gets whether or

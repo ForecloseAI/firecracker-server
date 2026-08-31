@@ -61,7 +61,20 @@ var browserRoutes = []*regexp.Regexp{
 	regexp.MustCompile(`devtools/(browser|page)/`),
 	regexp.MustCompile(`puppeteer`),
 	regexp.MustCompile(`chrome-devtools-mcp`),
-	regexp.MustCompile(`--(remote-debugging|user-data-dir|headless)`),
+	regexp.MustCompile(`--(remote-debugging|user-data-dir)`),
+	// --headless is NOT Chrome's alone, so it only counts beside a chrome
+	// binary. LibreOffice uses the same flag for every document conversion,
+	// which the pdf, docx, xlsx and pptx skills call for constantly -- matching
+	// it bare sent every `soffice --headless --convert-to pdf` to the browser
+	// redirect. Found on a live VM: the agent spent a minute and twenty tool
+	// calls before getting round it by hiding the flag in a shell variable,
+	// which worked and reads like a fight with its own tools.
+	//
+	// Still narrower than the bare `chrome` match the list deliberately omits:
+	// this needs the binary AND the flag, so `grep -r chrome /var/log` is
+	// untouched.
+	regexp.MustCompile(`\bchrom[a-z-]*\b[^|;]*--headless`),
+	regexp.MustCompile(`--headless[^|;]*\bchrom`),
 	regexp.MustCompile(`\b(pkill|killall)\b[^|;]*chrom`),
 	regexp.MustCompile(`\bxdotool\b`),
 }
