@@ -58,7 +58,15 @@ const maxTokens = 8192
 // which means UNLIMITED -- the runner loops until the model stops calling
 // tools. For an agent that runs unattended that is a runaway bill, so it is set
 // explicitly here rather than left at the default.
-const maxIterations = 40
+//
+// 100 rather than 40, because 40 was measured too low for the browser. One UI
+// action costs about three calls -- snapshot, act, screenshot -- so 40 bought
+// roughly thirteen actions, and a live booking ran out one click into a login
+// modal after five and a half minutes of real work. The turn ends where it
+// stands, so the cost of being too low is a job abandoned mid-way, which is
+// worse than the cost of being too high: the model stops on its own when it is
+// finished, and this only binds when something has gone wrong.
+const maxIterations = 100
 
 // Agent is one conversation: its own system prompt, tool set, history and log.
 //
