@@ -146,8 +146,14 @@ type File struct {
 // after the other. The event id cannot answer that -- ids advance on every event,
 // so two pictures a turn apart and two pictures a second apart look alike.
 type Attachment struct {
-	Seq  int    `json:"seq"`
-	Name string `json:"name"`
+	Seq int `json:"seq"`
+	// Name is the file on disk, sequence prefix and all, and it is what the
+	// download URL is built from. Display is the same file as the person should
+	// read it. Both, rather than one the host un-prefixes, because the guest
+	// mints the prefix and is the only side that knows the format -- the same
+	// reason File carries Name and Path separately.
+	Name    string `json:"name"`
+	Display string `json:"display"`
 	// Kind is the guest's serving policy surfaced on the wire, not a second
 	// opinion about it. The download route is handed a name and no event, so it
 	// has to decide image-or-download from the extension anyway; this is that
@@ -158,6 +164,14 @@ type Attachment struct {
 	// screenshots have one: a chart an agent drew is sent whole.
 	Thumb string `json:"thumb,omitempty"`
 }
+
+// The kinds an Attachment may be. Declared here beside the field they describe,
+// so the daemon that stamps one and the gateway that renders it cannot drift
+// into two private vocabularies.
+const (
+	KindImage = "image"
+	KindFile  = "file"
+)
 
 // Person is what the machine knows about whoever it works for. Collected at
 // onboarding and added to over time; it is rendered into a Markdown file the

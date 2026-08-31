@@ -33,7 +33,8 @@ func fullEvent() agentd.Event {
 		File: &agentapi.File{Name: "n.pdf", Path: "/home/agent/workspace/uploads/n.pdf", Size: 12},
 		Shot: "handoff-001-thumb.png", Kind: "choice",
 		Attachment: &agentapi.Attachment{
-			Seq: 7, Name: "0007-screen.png", Kind: "image", Size: 2048,
+			Seq: 7, Name: "0007-screen.png", Display: "screen.png",
+			Kind: agentapi.KindImage, Size: 2048,
 			Thumb: "0007-screen-thumb.png",
 		},
 		UI:       &agentapi.UI{Kind: "choice", Options: []string{"a", "b"}},

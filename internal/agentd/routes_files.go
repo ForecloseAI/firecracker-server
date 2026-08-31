@@ -135,6 +135,9 @@ func setAttachmentHeaders(w http.ResponseWriter, name string) {
 	// conversation needs.
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	if !isImage {
-		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		// The name the person reads, not the one on disk: a browser saves what
+		// this says, and "0001-report.pdf" is our sequence leaking into their
+		// downloads folder. The URL keeps the number; the filename does not.
+		w.Header().Set("Content-Disposition", `attachment; filename="`+readableName(name)+`"`)
 	}
 }

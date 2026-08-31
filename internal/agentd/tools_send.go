@@ -18,10 +18,11 @@ import (
 // a file it would refuse to bring in is one it cannot carry out.
 const maxAttachment = maxUpload
 
-// Attachment kinds, as the client switches on them.
+// Attachment kinds. Aliased rather than restated, the way BossID is, so the
+// daemon that stamps one and the gateway that renders it cannot drift.
 const (
-	kindImage = "image"
-	kindFile  = "file"
+	kindImage = agentapi.KindImage
+	kindFile  = agentapi.KindFile
 )
 
 // sendFileInput is the send_file tool's argument. Never put a comma in a
@@ -96,7 +97,7 @@ func sendFile(r roots, d toolDeps, out *outbox, in sendFileInput) string {
 // send that then failed leaves a hole in the very sequence the app groups a run
 // of pictures by. A disk that fills mid-copy can still spend one, and that is
 // the honest limit of this: it cannot be known in advance.
-func checkSendable(r roots, path string) (string, string) {
+func checkSendable(r roots, path string) (full, refusal string) {
 	full, err := resolve(r, path)
 	if err != nil {
 		return "", err.Error()
@@ -107,6 +108,12 @@ func checkSendable(r roots, path string) (string, string) {
 		return "", "could not read " + path + ": " + err.Error()
 	case info.IsDir():
 		return "", path + " is a folder. Send one file at a time."
+	case !info.Mode().IsRegular():
+		// A pipe or a device stats perfectly well and reports size zero, and
+		// then os.Open on it blocks until a writer appears. Nothing here watches
+		// the turn's context, so the agent would wedge with no way to interrupt
+		// it -- and an agent can make one with mkfifo through Bash.
+		return "", path + " is not an ordinary file, so it cannot be sent."
 	case info.Size() > maxAttachment:
 		return "", fmt.Sprintf("%s is %d MB and the most you can send is %d MB.",
 			path, info.Size()>>20, maxAttachment>>20)
@@ -129,61 +136,25 @@ func sendScreenshotTool(d toolDeps, out *outbox) (anthropic.BetaTool, error) {
 
 // sendScreenshot photographs the display and puts it in the conversation.
 func sendScreenshot(d toolDeps, out *outbox, note string) string {
-	if out.dir == "" {
-		return errNoOutbox.Error()
-	}
-	a, err := captureToOutbox(out)
-	if err != nil {
-		return "could not photograph the screen: " + err.Error()
-	}
-	return announce(d, a, note)
-}
-
-// captureToOutbox photographs the display and numbers the result.
-//
-// Captured under a temporary name first, so the number is taken only once there
-// is something to number. A capture that fails must not spend a sequence number.
-func captureToOutbox(out *outbox) (agentapi.Attachment, error) {
-	if err := os.MkdirAll(out.dir, 0o750); err != nil {
-		return agentapi.Attachment{}, err
-	}
-	f, err := os.CreateTemp(out.dir, "capturing-*.png")
-	if err != nil {
-		return agentapi.Attachment{}, err
-	}
-	f.Close()
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	defer os.Remove(thumbPath(tmp))
-	if err := scrotTo(tmp); err != nil {
-		return agentapi.Attachment{}, err
-	}
-	return numberCapture(out, tmp)
-}
-
-// numberCapture moves a finished capture, and its thumbnail, into place.
-//
-// Both files are kept, unlike a handoff card: the thumbnail is what draws in a
-// list of several options and the full capture is what they open to read the
-// page. That is why this does not go through thumbOf, which deletes the full one.
-func numberCapture(out *outbox, tmp string) (agentapi.Attachment, error) {
 	seq, dst, err := out.reserve("screen.png")
 	if err != nil {
-		return agentapi.Attachment{}, err
+		return err.Error()
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return agentapi.Attachment{}, err
+	if err := scrotTo(dst); err != nil {
+		// Both halves. A scrot killed at its timeout can leave a partial
+		// thumbnail behind, and the download route would serve it happily.
+		os.Remove(dst)
+		os.Remove(thumbPath(dst))
+		return "could not photograph the screen: " + err.Error()
 	}
 	a := agentapi.Attachment{Seq: seq, Name: filepath.Base(dst), Size: sizeOf(dst)}
-	if os.Rename(thumbPath(tmp), thumbPath(dst)) == nil {
+	// Both files are KEPT, unlike a handoff card: the thumbnail is what draws in
+	// a list of several options and the full capture is what they open to read
+	// the page. That is why this does not go through thumbOf, which deletes it.
+	if _, err := os.Stat(thumbPath(dst)); err == nil {
 		a.Thumb = thumbName(a.Name)
 	}
-	return a, nil
-}
-
-// thumbPath is where the thumbnail beside a capture lives.
-func thumbPath(path string) string {
-	return filepath.Join(filepath.Dir(path), thumbName(filepath.Base(path)))
+	return announce(d, a, note)
 }
 
 // sizeOf is a file's size, or 0 when it cannot be read.
@@ -200,12 +171,13 @@ func sizeOf(path string) int64 {
 // this as a bubble of its own, and an old gateway that does not know the type
 // drops it silently instead of rendering a message with a dangling reference.
 func announce(d toolDeps, a agentapi.Attachment, note string) string {
+	a.Display = readableName(a.Name)
 	a.Kind = kindFile
 	if _, isImage := attachmentMIME(a.Name); isImage {
 		a.Kind = kindImage
 	}
 	logEvent(d, Event{Type: "attachment", Text: note, Attachment: &a})
-	return "Sent " + a.Name + " to the person. It is in the chat now."
+	return "Sent " + a.Display + " to the person. It is in the chat now."
 }
 
 // copyFile copies the source into the outbox and reports what it actually wrote.

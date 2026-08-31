@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -58,7 +60,8 @@ func TestSendFileLogsAnAttachmentTheAppCanRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := call(t, tools, "send_file", map[string]any{"path": "report.pdf", "note": "the Q3 numbers"})
-	if !strings.Contains(out, "0001-report.pdf") {
+	// The model is told the name the person will see, not the one on disk.
+	if !strings.Contains(out, "Sent report.pdf") {
 		t.Fatalf("send_file said %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(outboxDir(agentDir), "0001-report.pdf")); err != nil {
@@ -71,6 +74,10 @@ func TestSendFileLogsAnAttachmentTheAppCanRender(t *testing.T) {
 	a := e.Attachment
 	if a == nil || a.Seq != 1 || a.Kind != kindFile || a.Size != int64(len(body)) || a.Thumb != "" {
 		t.Errorf("attachment = %+v", a)
+	}
+	// Two names: the one that finds the file, and the one the person reads.
+	if a.Name != "0001-report.pdf" || a.Display != "report.pdf" {
+		t.Errorf("name %q display %q", a.Name, a.Display)
 	}
 }
 
@@ -99,6 +106,29 @@ func TestSendFileRefusesAFolder(t *testing.T) {
 	}
 	if out := call(t, tools, "send_file", map[string]any{"path": "notes"}); !strings.Contains(out, "one file at a time") {
 		t.Errorf("send_file said %q", out)
+	}
+}
+
+// A FIFO stats like a small file and then blocks os.Open until a writer appears.
+// Nothing in the tool watches the turn's context, so without this check an agent
+// that ran mkfifo through Bash could wedge itself with no way to interrupt it.
+func TestSendFileRefusesSomethingThatIsNotAnOrdinaryFile(t *testing.T) {
+	ws, agentDir, tools, _ := sendSurface(t, false)
+	if err := syscall.Mkfifo(filepath.Join(ws, "pipe"), 0o600); err != nil {
+		t.Skipf("cannot make a fifo here: %v", err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- call(t, tools, "send_file", map[string]any{"path": "pipe"}) }()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, "not an ordinary file") {
+			t.Errorf("send_file said %q", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send_file blocked on a fifo, which would wedge the agent")
+	}
+	if entries, _ := os.ReadDir(outboxDir(agentDir)); len(entries) != 0 {
+		t.Error("a refused send still wrote to the outbox")
 	}
 }
 

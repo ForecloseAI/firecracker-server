@@ -57,6 +57,11 @@ func thumbName(name string) string {
 	return name[:len(name)-len(ext)] + "-thumb" + ext
 }
 
+// thumbPath is where the thumbnail beside a capture lives.
+func thumbPath(path string) string {
+	return filepath.Join(filepath.Dir(path), thumbName(filepath.Base(path)))
+}
+
 // thumbOf prefers the thumbnail scrot wrote beside the full capture, falling
 // back to the full one when only that exists.
 //
@@ -68,10 +73,9 @@ func thumbName(name string) string {
 // one small picture and there is nothing to tap through to. An attachment keeps
 // both, which is why sendScreenshot does not reuse this.
 func thumbOf(path, name string) string {
-	thumb := thumbName(name)
-	if _, err := os.Stat(filepath.Join(filepath.Dir(path), thumb)); err == nil {
+	if _, err := os.Stat(thumbPath(path)); err == nil {
 		os.Remove(path)
-		return thumb
+		return thumbName(name)
 	}
 	return name
 }

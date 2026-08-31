@@ -2,7 +2,6 @@ package chat
 
 import (
 	"strconv"
-	"strings"
 
 	"cracked/internal/agentapi"
 )
@@ -93,25 +92,12 @@ func askMessage(m Message, ev agentapi.Event) Message {
 func attachmentOf(ev agentapi.Event) *Attachment {
 	a := ev.Attachment
 	base := "/threads/" + ev.Agent + "/files/"
-	out := &Attachment{Seq: a.Seq, Name: displayName(a.Name), Kind: a.Kind,
+	out := &Attachment{Seq: a.Seq, Name: a.Display, Kind: a.Kind,
 		Size: a.Size, URL: base + a.Name}
 	if a.Thumb != "" {
 		out.ThumbURL = base + a.Thumb
 	}
 	return out
-}
-
-// displayName drops the sequence prefix an outbox file carries.
-//
-// Name is what the person reads and the URLs are what the app fetches, so only
-// the URLs keep the number. It travels in Seq for grouping, and repeating it in
-// the name just makes the chat say "Sent 0001-report.pdf".
-func displayName(name string) string {
-	i := strings.IndexByte(name, '-')
-	if i <= 0 || strings.Trim(name[:i], "0123456789") != "" {
-		return name
-	}
-	return name[i+1:]
 }
 
 // askUIOf reports how an ask should be answered.

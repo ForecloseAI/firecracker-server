@@ -98,6 +98,16 @@ func (o *outbox) reserve(name string) (int, string, error) {
 	return o.seq, filepath.Join(o.dir, fmt.Sprintf("%04d-%s", o.seq, name)), nil
 }
 
+// readableName is the file as the person should read it, without the sequence
+// prefix reserve put on the front.
+//
+// Built from the same expression that recognises that prefix on the way back
+// in, so the format has one definition and lives beside the code that writes
+// it. The number is not lost: it travels in Seq, which is what the app groups by.
+func readableName(name string) string {
+	return outboxFile.ReplaceAllString(name, "")
+}
+
 // imageTypes are the only types served as themselves.
 //
 // An allowlist rather than a MIME lookup, because the AGENT chooses these

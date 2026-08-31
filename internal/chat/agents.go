@@ -107,7 +107,9 @@ type Message struct {
 // group a run of pictures the way a chat app does -- consecutive numbers from
 // one agent were sent one after the other.
 type Attachment struct {
-	Seq  int    `json:"seq"`
+	Seq int `json:"seq"`
+	// Name is the readable one the guest sent, not the file on disk: the number
+	// that finds it lives in the URLs, and in Seq for grouping.
 	Name string `json:"name"`
 	Kind string `json:"kind"` // image | file
 	Size int64  `json:"size"`
@@ -116,11 +118,9 @@ type Attachment struct {
 	ThumbURL string `json:"thumbUrl,omitempty"`
 }
 
-// Attachment kinds, matching what the guest stamps on one.
-const (
-	kindImage = "image"
-	kindFile  = "file"
-)
+// Attachment kinds. Aliased rather than restated, so the daemon that stamps one
+// and this package cannot drift into two private vocabularies.
+const kindImage = agentapi.KindImage
 
 // AskUI is how an ask should be answered. One vocabulary across both sources: a
 // gated tool becomes "approval", and a question reports its own kind.

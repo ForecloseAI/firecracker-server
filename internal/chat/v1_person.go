@@ -135,7 +135,10 @@ func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request, user stri
 
 // forwardAttachmentHeaders passes on what the guest decided about this file.
 func forwardAttachmentHeaders(w http.ResponseWriter, resp *http.Response) {
-	for _, h := range []string{"Content-Type", "Content-Disposition", "Cache-Control"} {
+	// Content-Length included deliberately: without it this response is chunked,
+	// so the client gets no total size -- no progress on a 20 MB file, and no way
+	// to notice the truncation the copy error below can only write to a log.
+	for _, h := range []string{"Content-Type", "Content-Disposition", "Cache-Control", "Content-Length"} {
 		if v := resp.Header.Get(h); v != "" {
 			w.Header().Set(h, v)
 		}

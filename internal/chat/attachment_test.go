@@ -13,8 +13,8 @@ import (
 func sentPicture(id int) agentapi.Event {
 	e := ev(id, "attachment")
 	e.Attachment = &agentapi.Attachment{
-		Seq: 3, Name: "0003-screen.png", Kind: "image", Size: 4096,
-		Thumb: "0003-screen-thumb.png",
+		Seq: 3, Name: "0003-screen.png", Display: "screen.png",
+		Kind: agentapi.KindImage, Size: 4096, Thumb: "0003-screen-thumb.png",
 	}
 	return e
 }
@@ -73,7 +73,8 @@ func TestAttachmentURLsAreRelativeToTheApiRoot(t *testing.T) {
 // URL keeps the number that actually finds it on disk.
 func TestSentFilePreviewsWithoutItsSequencePrefix(t *testing.T) {
 	e := ev(11, "attachment")
-	e.Attachment = &agentapi.Attachment{Seq: 1, Name: "0001-report.pdf", Kind: "file", Size: 12}
+	e.Attachment = &agentapi.Attachment{Seq: 1, Name: "0001-report.pdf",
+		Display: "report.pdf", Kind: agentapi.KindFile, Size: 12}
 	th := buildThread("coder", []agentapi.Event{e}, "")
 	if th.LastMessage != "Sent report.pdf" {
 		t.Errorf("thread preview is %q", th.LastMessage)
