@@ -147,10 +147,8 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, s.sup.Meter().Report())
 }
 
-// sendReq is the body of POST /agents/{id}/messages.
-//
-// No timezone rides along here. The guest is already on the person's clock --
-// PUT /person set it, AdoptZone applied it -- so a message is just a message.
+// sendReq is the body of POST /agents/{id}/messages. No timezone: the guest is
+// already on the person's clock, which PUT /person set and AdoptZone applied.
 type sendReq struct {
 	Text string         `json:"text"`
 	File *agentapi.File `json:"file,omitempty"`

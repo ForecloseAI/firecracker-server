@@ -207,12 +207,8 @@ func (c *Client) Post(agentID, text string) (Sent, error) {
 }
 
 // PostMessage sends a turn with everything the client attached to it, which is
-// a file the person picked and nothing else.
-//
-// Deliberately not a place to carry the timezone. The guest runs on the
-// person's own clock, set once from the country they chose at onboarding, so a
-// message that also described where they were would be a second source for one
-// fact -- and the one that arrives on every request is the one that drifts.
+// a file the person picked and nothing else. Deliberately not a place to carry
+// the timezone -- see agentapi.Person.TZ for why that is the only writer.
 func (c *Client) PostMessage(agentID string, m Send) (Sent, error) {
 	var out Sent
 	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages", m, &out)

@@ -161,7 +161,7 @@ func TestAMessageNeverCarriesATimezone(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("post message = %d, want 200", code)
 	}
-	if g.zone != "" {
-		t.Errorf("the guest received tz %q, want none: only the profile may set it", g.zone)
+	if strings.Contains(g.body, "tz") {
+		t.Errorf("the guest was sent %s, which still carries a zone: only the profile may set it", g.body)
 	}
 }

@@ -28,25 +28,19 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, personBodyCap, &p) {
 		return
 	}
-	// A body carrying only a zone changes only the zone.
-	//
-	// Onboarding sends the whole profile; the settings screen sends where the
-	// person now lives and nothing else, because a GET does not return their name
-	// and work for it to send back. WritePerson replaces the file, so treating the
-	// second like the first would answer "I moved to Berlin" by forgetting who
-	// they are.
+	// A body carrying only a zone changes only the zone: WritePerson replaces the
+	// file, so treating the settings screen's zone-only save like an onboarding
+	// save would answer "I moved to Berlin" by forgetting who they are.
 	if !onlyZone(p) {
 		if err := WritePerson(s.sup.stateDir, p); err != nil {
 			fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
 			return
 		}
 	}
-	// The zone is not part of the rendered profile -- it is machine state, not
-	// something an agent reads about the person -- so it is stored separately.
-	// This is the ONLY writer: nothing else on this daemon may move the zone, so
-	// it changes when the person picks a country and at no other time. Going
-	// through the supervisor rather than the plain function is what puts the
-	// guest's own TZ on it and moves any existing clock schedules with it.
+	// The zone is machine state rather than something an agent reads about the
+	// person, so it is stored outside the rendered profile. This is its only
+	// writer, and going through the supervisor is what moves the guest's own TZ
+	// and any existing clock schedules with it.
 	s.sup.RememberZone(p.TZ)
 	// Every running agent composed its prompt at start, so none of them can see
 	// this yet. Evicting is what makes onboarding take effect now rather than
@@ -56,6 +50,8 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 }
 
 // onlyZone reports whether this profile says nothing except where the person is.
+// A GET does not hand back the name and work, so the settings screen has
+// nothing else it could send.
 func onlyZone(p agentapi.Person) bool {
 	return p.TZ != "" && p.Name == "" && p.Work == "" && p.Notes == ""
 }

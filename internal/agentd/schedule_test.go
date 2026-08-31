@@ -510,7 +510,7 @@ func TestAmPmTimesAreReadCorrectly(t *testing.T) {
 // what the machine keeps.
 func TestRememberZoneStoresTheName(t *testing.T) {
 	dir := t.TempDir()
-	RememberZone(dir, "Asia/Kolkata")
+	rememberZone(dir, "Asia/Kolkata")
 	if got := loadZone(dir).String(); got != "Asia/Kolkata" {
 		t.Errorf("zone = %q, want Asia/Kolkata", got)
 	}
@@ -519,7 +519,7 @@ func TestRememberZoneStoresTheName(t *testing.T) {
 // The stored name is what the schedule math reads, with no client involved.
 func TestScheduleUsesTheStoredZone(t *testing.T) {
 	dir := t.TempDir()
-	RememberZone(dir, "Asia/Kolkata")
+	rememberZone(dir, "Asia/Kolkata")
 	sp, err := parseSchedule("daily at 09:00", loadZone(dir))
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +536,7 @@ func TestZoneDefaultsToUTC(t *testing.T) {
 	if got := loadZone(dir); got != time.UTC {
 		t.Errorf("zone with no file = %v, want UTC", got)
 	}
-	RememberZone(dir, "Mars/Olympus")
+	rememberZone(dir, "Mars/Olympus")
 	if got := loadZone(dir); got != time.UTC {
 		t.Errorf("zone after nonsense = %v, want UTC", got)
 	}
@@ -547,8 +547,8 @@ func TestZoneDefaultsToUTC(t *testing.T) {
 // sampled and fired an hour out after the next daylight-saving change.
 func TestRememberZoneRefusesAnOffset(t *testing.T) {
 	dir := t.TempDir()
-	RememberZone(dir, "Asia/Kolkata")
-	RememberZone(dir, "2026-08-29T14:03:11+09:00")
+	rememberZone(dir, "Asia/Kolkata")
+	rememberZone(dir, "2026-08-29T14:03:11+09:00")
 	if got := loadZone(dir).String(); got != "Asia/Kolkata" {
 		t.Errorf("zone = %q, want Asia/Kolkata: a stamp must not replace a name", got)
 	}
@@ -558,18 +558,11 @@ func TestRememberZoneRefusesAnOffset(t *testing.T) {
 // own time.Local moves, and TZ is exported so a bash tool's `date` agrees.
 func TestAdoptZoneMovesTheProcess(t *testing.T) {
 	dir := t.TempDir()
-	before, hadTZ := os.LookupEnv("TZ")
+	t.Setenv("TZ", "")
 	local := time.Local
-	t.Cleanup(func() {
-		time.Local = local
-		if hadTZ {
-			os.Setenv("TZ", before)
-			return
-		}
-		os.Unsetenv("TZ")
-	})
+	t.Cleanup(func() { time.Local = local })
 
-	RememberZone(dir, "Asia/Kolkata")
+	rememberZone(dir, "Asia/Kolkata")
 	AdoptZone(dir)
 
 	if got := time.Local.String(); got != "Asia/Kolkata" {

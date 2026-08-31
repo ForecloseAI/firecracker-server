@@ -308,9 +308,9 @@ func retirable(cl *agent.Client, id string) (int, string) {
 // already uploaded through POST /v1/threads/{id}/files, not the bytes
 // themselves.
 //
-// The message carries no clock and no zone. The server stamps it, so a device
-// with a wrong clock cannot reorder a transcript, and the guest is already on
-// the person's own timezone -- PUT /v1/profile is where that is decided, once.
+// The message carries no clock and no zone: the server stamps it, so a device
+// with a wrong clock cannot reorder a transcript, and PUT /v1/profile is where
+// the guest's own timezone is decided, once.
 type sendReqV1 struct {
 	Text string         `json:"text"`
 	File *agentapi.File `json:"file,omitempty"`

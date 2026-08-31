@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,7 +28,7 @@ type fakeGuest struct {
 
 	sched  []agentapi.Schedule
 	person agentapi.Person // the last profile the gateway forwarded
-	zone   string          // any tz the last message carried, which must be none
+	body   string          // the raw JSON of the last message, as it came off the wire
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -134,13 +135,14 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(g.sendStatus)
 		return
 	}
-	var req struct {
-		Text string
-		TZ   string `json:"tz"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
+	// Kept as bytes, not just decoded: a test that asserts on a decoded field can
+	// only see fields the struct still declares, so it could not notice a zone
+	// coming back onto the wire.
+	raw, _ := io.ReadAll(r.Body)
+	g.body = string(raw)
+	var req struct{ Text string }
+	json.Unmarshal(raw, &req)
 	g.sent = append(g.sent, req.Text)
-	g.zone = req.TZ
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]any{
 		"message_id": "m_001", "session_state": "working", "last_event_id": 41 + len(g.sent)})

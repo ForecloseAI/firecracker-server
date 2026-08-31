@@ -124,11 +124,7 @@ func TestUnsubscribeDetaches(t *testing.T) {
 func TestAppendStampsInUTCWhateverTheLocalZone(t *testing.T) {
 	local := time.Local
 	t.Cleanup(func() { time.Local = local })
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Local = loc
+	time.Local = mustZone(t, "Asia/Kolkata")
 
 	log, err := OpenLog(t.TempDir(), "boss")
 	if err != nil {

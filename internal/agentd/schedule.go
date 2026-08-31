@@ -1,7 +1,6 @@
 package agentd
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -773,33 +772,32 @@ func zonePath(stateDir string) string { return filepath.Join(stateDir, "timezone
 //
 // An unresolvable name is ignored rather than stored. Failure is silent -- not
 // knowing the zone costs UTC, and it must never fail the person's onboarding.
-func RememberZone(stateDir, tz string) {
-	if tz == "" {
-		return
+// Reports whether it stored anything, which is what tells the caller the zone
+// actually moved. Unexported: outside this file the only way to set a zone is
+// the Supervisor method below, which is what carries the adoption with it.
+func rememberZone(stateDir, tz string) bool {
+	if tz == "" || tz == readZoneFile(stateDir) {
+		return false
 	}
 	if _, err := time.LoadLocation(tz); err != nil {
-		return
+		return false
 	}
-	os.WriteFile(zonePath(stateDir), []byte(tz), 0o640)
+	return os.WriteFile(zonePath(stateDir), []byte(tz), 0o640) == nil
 }
 
 // RememberZone records the zone and, when it has actually changed, adopts it:
 // the daemon's own TZ moves, and the clock schedules move with it.
 //
-// The method rather than the function is what the HTTP handler calls, because a
-// stored NextRunAt is an absolute instant: a person who books "daily at 09:00"
-// in London and then changes their country to the United States would get one
-// firing at the old 9am -- 01:00 where they now are -- before the schedule
-// settled onto the new zone. The file's own bytes decide whether anything
-// changed, so re-saving the same profile costs one read and no writes.
+// Moving the schedules is the point. A stored NextRunAt is an absolute instant,
+// so a person who books "daily at 09:00" in London and then changes their
+// country to the United States would get one firing at the old 9am -- 01:00
+// where they now are -- before the schedule settled onto the new zone.
+// Re-saving the same profile writes nothing and moves nothing.
 func (s *Supervisor) RememberZone(tz string) {
-	before, _ := os.ReadFile(zonePath(s.stateDir))
-	RememberZone(s.stateDir, tz)
-	after, _ := os.ReadFile(zonePath(s.stateDir))
-	if bytes.Equal(before, after) {
+	if !rememberZone(s.stateDir, tz) {
 		return
 	}
-	exportZone(string(after))
+	exportZone(tz)
 	s.rezone(time.Now())
 }
 
@@ -820,12 +818,11 @@ func (s *Supervisor) RememberZone(tz string) {
 // daemon would race the sweep and every live turn, and restarting to avoid that
 // would drop the calls onboarding makes right after saving the profile.
 //
-// So nothing in the daemon may depend on time.Local for its answer. Everything
-// that needs the person's clock takes it from loadZone instead -- the schedule
-// math, and Supervisor.localDate -- which is correct the moment onboarding
-// writes the file. time.Local is what a restart settles onto afterwards.
+// So nothing in the daemon may depend on time.Local for its answer: everything
+// that needs the person's clock takes it from loadZone, which is correct the
+// moment onboarding writes the file.
 func AdoptZone(stateDir string) {
-	zone := strings.TrimSpace(readZoneFile(stateDir))
+	zone := readZoneFile(stateDir)
 	if zone == "" {
 		return
 	}
@@ -845,18 +842,18 @@ func AdoptZone(stateDir string) {
 // `agent` and cannot write /etc/localtime anyway. So this one setenv is what
 // makes `date` inside a turn print the person's time instead of UTC.
 func exportZone(zone string) {
-	if zone = strings.TrimSpace(zone); zone != "" {
-		os.Setenv("TZ", zone)
-	}
+	os.Setenv("TZ", zone)
 }
 
 // readZoneFile returns the stored zone name, or "" when there is not one yet.
+// Trimmed here so no caller has to defend against the trailing newline a hand
+// edit of the file would leave.
 func readZoneFile(stateDir string) string {
 	buf, err := os.ReadFile(zonePath(stateDir))
 	if err != nil {
 		return ""
 	}
-	return string(buf)
+	return strings.TrimSpace(string(buf))
 }
 
 // rezone recomputes the next firing of every enabled clock schedule.
@@ -892,7 +889,7 @@ func (s *Supervisor) rezone(now time.Time) {
 
 // loadZone resolves the remembered timezone, falling back to UTC.
 func loadZone(stateDir string) *time.Location {
-	loc, err := time.LoadLocation(strings.TrimSpace(readZoneFile(stateDir)))
+	loc, err := time.LoadLocation(readZoneFile(stateDir))
 	if err != nil {
 		return time.UTC
 	}
