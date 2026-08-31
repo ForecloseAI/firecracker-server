@@ -84,6 +84,6 @@ Check the first few slides, not all of them.
 
 ## Before you finish
 
-Say where the file is and how many slides it has. The person cannot download it
-from the app yet, so summarise the deck in the chat, and offer to hand over the
-screen if they want to see it.
+Send it with send_file, and say how many slides it has. Summarise the deck in
+the chat as well: that is what they read on a phone, and the file is what they
+open when they want the detail.

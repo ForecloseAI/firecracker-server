@@ -32,6 +32,10 @@ func fullEvent() agentd.Event {
 		ApprovalID: "coder.ap_001", Preview: "a preview", Question: "a question",
 		File: &agentapi.File{Name: "n.pdf", Path: "/home/agent/workspace/uploads/n.pdf", Size: 12},
 		Shot: "handoff-001-thumb.png", Kind: "choice",
+		Attachment: &agentapi.Attachment{
+			Seq: 7, Name: "0007-screen.png", Kind: "image", Size: 2048,
+			Thumb: "0007-screen-thumb.png",
+		},
 		UI:       &agentapi.UI{Kind: "choice", Options: []string{"a", "b"}},
 		Decision: "allow",
 		TaskSlug: "a-task", TaskTitle: "A task", TaskDir: "/home/agent/workspace/a-task",

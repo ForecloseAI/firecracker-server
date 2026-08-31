@@ -2,6 +2,7 @@ package chat
 
 import (
 	"strconv"
+	"strings"
 
 	"cracked/internal/agentapi"
 )
@@ -35,6 +36,14 @@ func projectMessage(ev agentapi.Event) (Message, bool) {
 		m.Kind, m.Text = kindEvent, scheduleLine(ev)
 	case "compaction":
 		m.Kind, m.Text = kindEvent, ev.Message
+	case "attachment":
+		if ev.Attachment == nil {
+			return Message{}, false
+		}
+		// A text bubble that happens to carry a file, not a fourth kind. The
+		// client can already see the attachment is there, and a new kind would
+		// make every one of them switch on something they can test directly.
+		m.Kind, m.Text, m.Attachment = kindText, ev.Text, attachmentOf(ev)
 	case "approval_required", "question":
 		return askMessage(m, ev), true
 	default:
@@ -73,6 +82,36 @@ func askMessage(m Message, ev agentapi.Event) Message {
 		m.Shot = "/threads/" + ev.Agent + "/shots/" + ev.Shot
 	}
 	return m
+}
+
+// attachmentOf resolves the guest's bare file names into URLs the app can fetch.
+//
+// Relative to the API root the client already holds, NOT including /v1: it joins
+// this onto a base URL that already ends in /v1, so naming the prefix here asks
+// for /v1/v1/... and the file silently never loads. The same trap as the handoff
+// shot above, which is why it is spelled out twice.
+func attachmentOf(ev agentapi.Event) *Attachment {
+	a := ev.Attachment
+	base := "/threads/" + ev.Agent + "/files/"
+	out := &Attachment{Seq: a.Seq, Name: displayName(a.Name), Kind: a.Kind,
+		Size: a.Size, URL: base + a.Name}
+	if a.Thumb != "" {
+		out.ThumbURL = base + a.Thumb
+	}
+	return out
+}
+
+// displayName drops the sequence prefix an outbox file carries.
+//
+// Name is what the person reads and the URLs are what the app fetches, so only
+// the URLs keep the number. It travels in Seq for grouping, and repeating it in
+// the name just makes the chat say "Sent 0001-report.pdf".
+func displayName(name string) string {
+	i := strings.IndexByte(name, '-')
+	if i <= 0 || strings.Trim(name[:i], "0123456789") != "" {
+		return name
+	}
+	return name[i+1:]
 }
 
 // askUIOf reports how an ask should be answered.

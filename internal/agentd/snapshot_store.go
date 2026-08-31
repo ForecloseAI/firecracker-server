@@ -58,19 +58,23 @@ func newSnapshotStore(agentDir string) (*snapshotStore, error) {
 		return nil, err
 	}
 	s := &snapshotStore{dir: dir}
-	s.seq = highestSeq(dir)
+	s.seq = highestSeq(dir, seqOf)
 	return s, nil
 }
 
 // highestSeq finds the largest sequence number already written.
-func highestSeq(dir string) int {
+//
+// The matcher is a parameter because two stores resume this way -- spilled
+// snapshots and the outbox -- and each owns a different filename shape. Sharing
+// the walk keeps the resume behaviour itself in one place.
+func highestSeq(dir string, numberOf func(string) int) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
 	high := 0
 	for _, e := range entries {
-		if n := seqOf(e.Name()); n > high {
+		if n := numberOf(e.Name()); n > high {
 			high = n
 		}
 	}

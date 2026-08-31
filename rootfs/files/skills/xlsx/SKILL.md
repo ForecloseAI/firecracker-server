@@ -99,5 +99,6 @@ soffice --headless --convert-to xlsx --outdir . old.xls
 
 ## Before you finish
 
-Say where the file is and what is in it. Give the person the headline numbers in
-the chat as well, because they cannot download the file from the app yet.
+Send it with send_file, and say what is in it. Give the headline numbers in the
+chat as well: a spreadsheet is hard to read on a phone and the numbers are
+usually the answer they wanted.

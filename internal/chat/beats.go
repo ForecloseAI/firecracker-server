@@ -37,6 +37,9 @@ var beats = map[string]string{
 	"Glob":  "Looking for files",
 	"Grep":  "Searching files",
 
+	"send_file":       "Sending a file",
+	"send_screenshot": "Sending a screenshot",
+
 	// Working as a team is most of what a boss does, and none of it was
 	// narrated: the person watched an idle-looking page while several agents
 	// worked.

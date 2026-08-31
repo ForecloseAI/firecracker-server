@@ -101,6 +101,11 @@ type Event struct {
 	Input json.RawMessage `json:"input,omitempty"`
 	// File is what the person attached to this message, if anything.
 	File *File `json:"file,omitempty"`
+	// Attachment is what the AGENT sent back: a document it produced, or a
+	// picture of its screen. The mirror of File, and deliberately a second
+	// field rather than a direction flag on one -- the two are read by
+	// different code on the client and carry different fields.
+	Attachment *Attachment `json:"attachment,omitempty"`
 
 	Model        string `json:"model,omitempty"`
 	Usage        *Usage `json:"usage,omitempty"`
@@ -130,6 +135,28 @@ type File struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Size int64  `json:"size"`
+}
+
+// Attachment is something an agent sent the person: a document it produced, or a
+// picture of its screen.
+//
+// Seq is dense, per-agent, and survives a restart, and it is also what names the
+// file on disk. Dense is the point: it lets a client group a run of pictures the
+// way a chat app does, because two attachments with consecutive Seq were sent one
+// after the other. The event id cannot answer that -- ids advance on every event,
+// so two pictures a turn apart and two pictures a second apart look alike.
+type Attachment struct {
+	Seq  int    `json:"seq"`
+	Name string `json:"name"`
+	// Kind is the guest's serving policy surfaced on the wire, not a second
+	// opinion about it. The download route is handed a name and no event, so it
+	// has to decide image-or-download from the extension anyway; this is that
+	// same decision, computed by the same helper, so the two cannot disagree.
+	Kind string `json:"kind"` // image | file
+	Size int64  `json:"size"`
+	// Thumb names a smaller copy sitting beside the full one, for a list. Only
+	// screenshots have one: a chart an agent drew is sent whole.
+	Thumb string `json:"thumb,omitempty"`
 }
 
 // Person is what the machine knows about whoever it works for. Collected at

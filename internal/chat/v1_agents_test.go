@@ -65,6 +65,11 @@ func (g *fakeGuest) routes() http.Handler {
 		defer g.mu.Unlock()
 		json.NewEncoder(w).Encode(agentapi.EventsPage{Events: g.events, LastEventID: len(g.events)})
 	})
+	mux.HandleFunc("GET /agents/{id}/outbox/{name}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+r.PathValue("name")+`"`)
+		w.Write([]byte("the report"))
+	})
 	mux.HandleFunc("POST /approvals/{apid}", g.resolve)
 	mux.HandleFunc("GET /schedules", g.schedules)
 	mux.HandleFunc("DELETE /schedules/{id}", g.dropSchedule)

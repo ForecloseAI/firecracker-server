@@ -47,7 +47,14 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := append(append(append(append(files, rest...), team...), browser...), sched...)
+	// One outbox shared by both send tools, so their numbers cannot collide. It
+	// resumes from disk, which is what lets a client group by sequence across a
+	// restart.
+	send, err := sendTools(r, d, newOutbox(r.own))
+	if err != nil {
+		return nil, err
+	}
+	all := append(append(append(append(append(files, rest...), team...), browser...), sched...), send...)
 	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
 
@@ -61,9 +68,13 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // create_skill is here for the same reason: an agent that cannot record what it
 // just worked out has to rediscover it every time, and no profile should have to
 // remember to ask for the ability to learn.
+// send_file is here for the same reason again: every agent produces documents,
+// and one that cannot hand its work over has done the work for nobody.
+// send_screenshot is deliberately NOT here -- it rides the browser switch below,
+// because only an agent driving the screen has one worth photographing.
 var alwaysAllowed = []string{
 	"remember_about_person", "schedule_task", "list_schedules", "cancel_schedule",
-	"create_skill",
+	"create_skill", "send_file",
 }
 
 // permitted expands what a profile allows with the tools it does not have to ask
@@ -89,7 +100,9 @@ func permitted(allow []string, browser bool) []string {
 	for name := range browserAllowed {
 		out = append(out, name)
 	}
-	return out
+	// Ours, not the MCP server's, so it does not belong in browserAllowed -- that
+	// map also filters the server's tools/list. It rides the same single switch.
+	return append(out, "send_screenshot")
 }
 
 // toolDeps is what tool construction needs beyond the roots: the approval

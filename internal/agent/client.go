@@ -337,3 +337,30 @@ func (c *Client) Shot(agentID, name string) (io.ReadCloser, error) {
 	}
 	return resp.Body, nil
 }
+
+// Attachment fetches a file an agent sent the person. The caller closes the body.
+//
+// On the SLOW client, unlike Shot, and that difference is the point: an
+// http.Client's Timeout covers reading the response BODY and not just the
+// headers, so the 2s one would cut a 20 MB attachment mid-stream and hand the
+// person a truncated file. Handoff thumbnails are a few KB, which is why Shot
+// has never met this.
+//
+// 30s is a wider budget and not immunity: it still bounds the whole transfer,
+// so a stalled guest is still cut. What makes it enough is the hop -- a TAP
+// device on the same host, where 20 MB is far inside it.
+//
+// Returns the whole response rather than just the body, because the guest is
+// what decided this file's Content-Type and whether it may render inline, and
+// the caller has to forward that decision rather than invent its own.
+func (c *Client) Attachment(agentID, name string) (*http.Response, error) {
+	resp, err := c.slow.Get(c.base + "/agents/" + url.PathEscape(agentID) + "/outbox/" + url.PathEscape(name))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, &StatusError{Code: resp.StatusCode, Path: "/outbox"}
+	}
+	return resp, nil
+}

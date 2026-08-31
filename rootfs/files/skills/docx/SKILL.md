@@ -97,6 +97,6 @@ look at an image.
 
 ## Before you finish
 
-Say where the file is. The person cannot download it from the app yet, so put
-the substance in the chat too, and offer to hand over the screen if they need to
-see the document itself.
+Send it with send_file, and say what is in it. The file is the deliverable and
+the chat is the summary: they read the summary wherever they are and open the
+document when they need the detail.

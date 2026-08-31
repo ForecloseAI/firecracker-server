@@ -98,3 +98,43 @@ func trimmedName(name string) string {
 	}
 	return name
 }
+
+// handleAttachment serves a file an agent sent the person: the mirror of
+// handleUpload, and the way anything the agents produce actually leaves here.
+//
+// Modelled on handleShot. The name is stripped to its last element, so the only
+// files reachable are the ones an agent put in its own outbox; there is no path
+// in this request that could point anywhere else.
+func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
+	name := filepath.Base(r.PathValue("name"))
+	path := filepath.Join(outboxDir(s.sup.dirFor(r.PathValue("id"))), name)
+	if _, err := os.Stat(path); err != nil {
+		fail(w, http.StatusNotFound, "not_found", "no such attachment", "attachment")
+		return
+	}
+	setAttachmentHeaders(w, name)
+	http.ServeFile(w, r, path)
+}
+
+// setAttachmentHeaders decides whether a browser may render this or must save it.
+//
+// Only images are served as themselves. The AGENT chooses these filenames, so a
+// web client that let one name an .html and then served it from its own origin
+// would be running that file's script; nosniff closes the same hole a second
+// time, by stopping a browser guessing its way past the octet-stream.
+//
+// ServeFile only sniffs a type when none is set, so this wins.
+func setAttachmentHeaders(w http.ResponseWriter, name string) {
+	mimeType, isImage := attachmentMIME(name)
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Deliberately not "immutable", and not a year. A number is never reused
+	// while the agent lives, but DELETE ?purge=true takes its outbox with it and
+	// a new agent minted with the same id starts again at 0001 -- so a name can
+	// come to mean different bytes. An hour matches the shot route and is all a
+	// conversation needs.
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if !isImage {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	}
+}
