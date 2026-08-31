@@ -430,13 +430,26 @@ func (s *Supervisor) StartTask(agentID, title, taskSlug string) (Task, error) {
 	if name == "" {
 		return Task{}, fmt.Errorf("could not make a folder name from %q", taskSlug)
 	}
-	dir := filepath.Join(s.workspace, time.Now().Format("2006-01-02")+"-"+name)
+	dir := filepath.Join(s.workspace, s.localDate(time.Now())+"-"+name)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Task{}, err
 	}
 	task := Task{Slug: name, Title: title, Dir: dir, StartedAt: time.Now().UTC()}
 	s.logFor(agentID, Event{Type: "task_start", TaskSlug: name, TaskTitle: title, TaskDir: dir})
 	return task, s.roster.SetTask(agentID, &task)
+}
+
+// localDate is today's date where the person is.
+//
+// Taken from the stored zone and not from time.Local, which AdoptZone sets at
+// startup and which therefore still reads UTC on a machine onboarded since. A
+// person who picks their country at 11pm would otherwise get a folder dated
+// tomorrow, named differently from what `date` prints inside their own turn --
+// the subprocess reads TZ, which onboarding moves at once. The schedule math
+// takes its location the same way, and for the same reason: the file is the
+// machine's zone and it is current the moment onboarding writes it.
+func (s *Supervisor) localDate(now time.Time) string {
+	return now.In(loadZone(s.stateDir)).Format("2006-01-02")
 }
 
 // CurrentTask reports what an agent is working on, if anything.

@@ -816,9 +816,14 @@ func (s *Supervisor) RememberZone(tz string) {
 // Called from main before the supervisor exists, so the assignment to
 // time.Local cannot race a goroutine reading it. A later change comes in
 // through RememberZone, which moves TZ for the subprocesses that care and
-// leaves time.Local alone until the next restart -- nothing in the daemon's own
-// scheduling reads it, because the schedule math takes its location from
-// loadZone explicitly.
+// leaves time.Local alone until the next restart: assigning it under a running
+// daemon would race the sweep and every live turn, and restarting to avoid that
+// would drop the calls onboarding makes right after saving the profile.
+//
+// So nothing in the daemon may depend on time.Local for its answer. Everything
+// that needs the person's clock takes it from loadZone instead -- the schedule
+// math, and Supervisor.localDate -- which is correct the moment onboarding
+// writes the file. time.Local is what a restart settles onto afterwards.
 func AdoptZone(stateDir string) {
 	zone := strings.TrimSpace(readZoneFile(stateDir))
 	if zone == "" {

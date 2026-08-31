@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // supervisorWith builds a supervisor with a given live-agent ceiling.
@@ -243,5 +244,40 @@ func TestNoCapacityWhenEverythingIsBusy(t *testing.T) {
 	}
 	if !strings.Contains(ErrNoCapacity.Error(), "working") {
 		t.Error("the capacity error does not say what is actually wrong")
+	}
+}
+
+// A task folder is dated where the person is, not where the guest booted.
+//
+// AdoptZone sets time.Local at startup, so a machine onboarded since is still
+// running UTC in-process until it restarts. Reading the stored zone instead is
+// what keeps the folder name and the `date` an agent runs in its own turn from
+// disagreeing -- they only ever differ near midnight, which is exactly when
+// nobody is looking.
+func TestTaskFoldersAreDatedInThePersonsZone(t *testing.T) {
+	sup := newTestSupervisor(t)
+	sup.RememberZone("Asia/Kolkata")
+
+	// Pinned to UTC, which is what a machine onboarded since its last restart
+	// still has: without it this would pass on a host that already ran Kolkata
+	// and prove nothing about which of the two was read.
+	local := time.Local
+	t.Cleanup(func() { time.Local = local })
+	time.Local = time.UTC
+
+	// 20:00 UTC is already the next day in Kolkata, which is +05:30.
+	evening := time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)
+	if got := sup.localDate(evening); got != "2026-09-01" {
+		t.Errorf("task folder date = %q, want 2026-09-01: it must follow the stored zone", got)
+	}
+}
+
+// With no zone stored the machine is on UTC, and must stay there rather than
+// following whatever the host that built it happened to run.
+func TestTaskFoldersFallBackToUTC(t *testing.T) {
+	sup := newTestSupervisor(t)
+	evening := time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)
+	if got := sup.localDate(evening); got != "2026-08-31" {
+		t.Errorf("task folder date = %q, want 2026-08-31", got)
 	}
 }
