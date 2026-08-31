@@ -271,7 +271,7 @@ func liveWithoutGoroutine(t *testing.T, sup *Supervisor, id string) (*Agent, *bo
 func TestRecycleDropsAnIdleAgent(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	_, stopped := liveWithoutGoroutine(t, sup, "helper")
-	if !sup.Recycle("helper") {
+	if !sup.Recycle("helper", nil) {
 		t.Fatal("an idle agent with an empty inbox was not recycled")
 	}
 	if !*stopped {
@@ -290,15 +290,101 @@ func TestRecycleRefusesWhenBusyOrQueued(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	working, workingStopped := liveWithoutGoroutine(t, sup, "working")
 	working.setState("working")
-	if sup.Recycle("working") || *workingStopped {
+	if sup.Recycle("working", nil) || *workingStopped {
 		t.Error("an agent mid-turn was recycled, losing the work the person is waiting on")
 	}
 	queued, queuedStopped := liveWithoutGoroutine(t, sup, "queued")
 	queued.inbox <- inbound{text: "already logged as theirs"}
-	if sup.Recycle("queued") || *queuedStopped {
+	if sup.Recycle("queued", nil) || *queuedStopped {
 		t.Error("an agent with a queued message was recycled; that message would never be answered")
 	}
-	if sup.Recycle("never-existed") {
+	if sup.Recycle("never-existed", nil) {
 		t.Error("recycled an agent that is not running")
+	}
+	// A refused agent must still take messages: quiesce only marks the ones it
+	// actually stopped.
+	if err := queued.Send("and another"); err != nil {
+		t.Errorf("Send to an agent that was NOT recycled = %v, want it queued", err)
+	}
+}
+
+// The window the inbox check alone cannot close: a caller looks an agent up,
+// the agent is recycled, and only then does the caller enqueue. The message has
+// to bounce rather than land in an inbox nothing will ever drain -- otherwise it
+// sits in the person's transcript with no reply coming.
+func TestSendToARecycledAgentIsRefusedRatherThanLost(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	stale, _ := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper", nil) {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	if err := stale.Send("did this reach anybody?"); !errors.Is(err, ErrStopped) {
+		t.Fatalf("Send through a recycled agent = %v, want ErrStopped", err)
+	}
+	if len(stale.inbox) != 0 {
+		t.Error("the message was queued onto an agent whose goroutine is gone")
+	}
+	events, err := stale.Log().ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == "user" {
+			t.Error("a refused message was still logged as the person's, so they wait on a reply nobody will send")
+		}
+	}
+}
+
+// ...and the person never sees that bounce, because the supervisor puts the
+// message on the instance that replaced the one it lost.
+func TestSendToRetriesOntoTheReplacement(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	stale, _ := liveWithoutGoroutine(t, sup, "helper")
+	if !sup.Recycle("helper", nil) {
+		t.Fatal("an idle agent with an empty inbox was not recycled")
+	}
+	// Registered again by hand rather than by letting Get start it: a real
+	// goroutine would take the message straight to the API, which an offline
+	// test has no key for. What is under test is that sendTo looks the agent up
+	// AGAIN after a refusal, not what the replacement then does with it.
+	var fresh *Agent
+	sup.mu.Lock()
+	sup.agents["helper"] = &live{agent: stale, cancel: func() {}, lastUsed: time.Now()}
+	sup.mu.Unlock()
+	took, err := sup.sendTo("helper", func(a *Agent) error {
+		err := a.Send("did this reach anybody?")
+		if errors.Is(err, ErrStopped) {
+			fresh, _ = liveWithoutGoroutine(t, sup, "helper") // as a restart would
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("sendTo after a recycle = %v, want the message taken by the replacement", err)
+	}
+	if took != fresh {
+		t.Fatal("sendTo returned the recycled instance, so the reply would report a state nobody is in")
+	}
+	if len(fresh.inbox) != 1 {
+		t.Error("the replacement never got the message")
+	}
+}
+
+// The reload note is appended while the supervisor still owns the agent. After
+// the entry goes, a message can start a second instance, and OpenLog takes its
+// next event id from disk -- so an append made after that read hands out an id
+// the new log has already given to something else, and SSE replay needs them
+// unique.
+func TestRecycleLogsBeforeTheSlotIsFree(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	liveWithoutGoroutine(t, sup, "helper")
+	noted := false
+	sup.Recycle("helper", func() {
+		noted = true
+		if _, ok := sup.agents["helper"]; !ok { // safe: Recycle holds the lock
+			t.Error("the agent was already out of the map, so a restart could be racing this append")
+		}
+	})
+	if !noted {
+		t.Fatal("the note was never appended")
 	}
 }

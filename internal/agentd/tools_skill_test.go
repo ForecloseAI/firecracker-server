@@ -173,3 +173,27 @@ func TestSkillWrittenDuringATurnRecyclesTheAgent(t *testing.T) {
 		t.Error("an agent that wrote no skill recycled anyway")
 	}
 }
+
+// A recycle refused because the person got a word in first must not throw the
+// request away. The queued turn runs on the old prompt either way, but a
+// consumed flag would leave the skill the agent just wrote invisible until some
+// unrelated eviction -- so the request is kept and tried again at the next
+// boundary.
+func TestARefusedRecycleKeepsTheReloadRequest(t *testing.T) {
+	withBuiltinSkills(t)
+	sup := supervisorWith(t, 8)
+	a, stopped := liveWithoutGoroutine(t, sup, "helper")
+	a.reload.set()
+	a.inbox <- inbound{text: "one more thing"}
+
+	a.recycleIfStale()
+	if *stopped {
+		t.Fatal("an agent with a queued message was recycled; that message would never be answered")
+	}
+	// The next boundary, with the inbox drained, picks it up.
+	<-a.inbox
+	a.recycleIfStale()
+	if !*stopped {
+		t.Error("the reload request was lost, so the new skill stays out of the prompt")
+	}
+}

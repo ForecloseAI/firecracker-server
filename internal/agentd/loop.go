@@ -26,6 +26,16 @@ import (
 // 503 rather than blocking an HTTP handler on a model call.
 var ErrBusy = errors.New("agent queue is full")
 
+// ErrStopped is returned when a message is handed to an agent whose goroutine
+// has already been cancelled -- it was recycled or evicted between the caller
+// looking it up and the caller using it.
+//
+// Refusing is the whole point: this instance's inbox is never drained again, so
+// accepting would log the person's message into a transcript that gets no
+// reply. The supervisor turns it into a retry on the replacement instance, so
+// it should never reach a client.
+var ErrStopped = errors.New("agent was recycled")
+
 // inboxDepth is how many messages may wait while a turn runs. Small on
 // purpose: a person queueing a dozen instructions at an agent that is stuck is
 // better told so than silently buffered.
@@ -78,6 +88,13 @@ type Agent struct {
 	state       string
 	cancel      context.CancelFunc
 	convBytes   int
+
+	// stopped is set when the supervisor cancels this agent's goroutine, and is
+	// what closes the window between a caller looking an agent up and enqueueing
+	// to it. Under the SAME lock as state and the inbox check, so a recycle
+	// cannot slip between "idle with nothing queued" and the message that would
+	// have made that false.
+	stopped bool
 
 	// What the last request actually cost in input tokens, which is what
 	// compaction triggers on. Read off the response rather than estimated from
@@ -262,9 +279,21 @@ func (a *Agent) recycleIfStale() {
 	if a.team == nil {
 		return // a unit test, which has no supervisor to recycle it
 	}
-	if a.team.Recycle(a.id) {
+	// The note is appended by Recycle, while the supervisor still owns this
+	// agent: after the entry is dropped, a message arriving in that window
+	// starts a second instance, and OpenLog reads the last id off DISK -- so an
+	// append made after that read hands out an id the new log is about to reuse,
+	// and SSE replay needs them unique.
+	if a.team.Recycle(a.id, func() {
 		a.log.Append(Event{Type: "skill", Message: "reloading so a new skill is available"})
+	}) {
+		return
 	}
+	// Refused because a message arrived while the turn was ending. Put the
+	// request back rather than dropping it: the queued turn runs on the old
+	// prompt either way, but without this the skill the agent just wrote stays
+	// invisible until some unrelated eviction. The next turn boundary tries again.
+	a.reload.set()
 }
 
 // runTurn executes one turn under a cancellable child context, so Interrupt can
@@ -336,13 +365,51 @@ func (a *Agent) deliver(in inbound) error {
 }
 
 // enqueue puts one message on the inbox without blocking.
+//
+// Under a.mu, and not because the channel needs it: the lock is what makes the
+// refusal above meaningful. quiesce checks the inbox and marks the agent
+// stopped while holding the same lock, so a message either lands before the
+// recycle -- which then refuses -- or is refused itself. Nothing can fall
+// between the two. The send never blocks, so holding the lock across it cannot
+// stall a turn.
 func (a *Agent) enqueue(in inbound) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped {
+		return ErrStopped
+	}
 	select {
 	case a.inbox <- in:
 		return nil
 	default:
 		return ErrBusy
 	}
+}
+
+// quiesce marks the agent stopped if it is idle with an empty inbox, reporting
+// whether it did. The supervisor calls it before cancelling.
+//
+// Both guards live here rather than in the supervisor so that they are checked
+// under the lock enqueue takes. Reading len(inbox) from outside proves nothing:
+// a caller holding a pointer from a moment ago can push onto it between that
+// read and the cancel, and the message would then sit in the person's
+// transcript with no reply ever coming.
+func (a *Agent) quiesce() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || a.state != "idle" || len(a.inbox) > 0 {
+		return false
+	}
+	a.stopped = true
+	return true
+}
+
+// stop marks the agent as no longer running, so a caller still holding it is
+// told to look it up again rather than enqueueing into a dead inbox.
+func (a *Agent) stop() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopped = true
 }
 
 // Interrupt cancels the in-flight turn, reporting whether there was one.
