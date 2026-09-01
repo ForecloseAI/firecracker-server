@@ -117,6 +117,13 @@ func TestARemintedTicketForTheSameSessionIsNotASurfaceChange(t *testing.T) {
 		{"the surface is taken away",
 			agentapi.Apps{SessionURL: a, SessionID: "s1"},
 			agentapi.Apps{}, true},
+		// The read-only set is refreshed hourly and pushed on every restart. If
+		// that counted as a new surface it would evict every idle agent on the
+		// fleet whenever the provider shipped a tool -- the same storm, with a
+		// new cause. Nothing an agent composed at startup depends on it.
+		{"only the read-only set moved",
+			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}},
+			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_LIST_LABELS"}}, false},
 	}
 	for _, c := range cases {
 		if got := surfaceChanged(c.had, c.now); got != c.want {
@@ -135,5 +142,33 @@ func TestARemintedTicketStillRepointsTheServer(t *testing.T) {
 	do(t, s, http.MethodPut, "/apps", `{"session_url":"`+second+`","session_id":"s1"}`)
 	if got := s.sup.Apps().Current(); got != second {
 		t.Errorf("the machine is still dialling %q", got)
+	}
+}
+
+// The read-only set has to survive the disk, because it is what the gate reads
+// and a machine that restarts must not come back asking about every read.
+func TestTheReadOnlySetSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	want := agentapi.Apps{SessionURL: "http://172.16.0.1:8092/apps/aaaa", SessionID: "s1",
+		ReadOnly: []string{"GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS"}}
+	if err := WriteApps(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadApps(dir)
+	if len(got.ReadOnly) != 2 || got.ReadOnly[0] != "GMAIL_FETCH_EMAILS" {
+		t.Errorf("read back %+v", got)
+	}
+}
+
+// An empty set must round-trip as empty rather than as absent-and-therefore-
+// anything. omitempty drops it from the JSON, so this pins that reading a file
+// without the field gives nothing rather than a surprise.
+func TestNoReadOnlySetReadsBackAsNone(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteApps(dir, agentapi.Apps{SessionURL: "http://x/apps/a", SessionID: "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadApps(dir); len(got.ReadOnly) != 0 {
+		t.Errorf("invented %v", got.ReadOnly)
 	}
 }

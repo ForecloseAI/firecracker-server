@@ -306,3 +306,48 @@ func TestALinkWithNoURLIsAnError(t *testing.T) {
 		t.Fatal("a link with no url was accepted")
 	}
 }
+
+// The tag filter is asked for AND checked, because this API ignores a parameter
+// it does not recognise rather than rejecting it. A renamed filter would answer
+// with every tool in the toolkit -- writes included -- and a caller that trusted
+// the answer would run all of them unasked. This is the fail-open that matters
+// most in the whole feature, so the server here deliberately ignores the filter.
+func TestReadOnlyChecksTheRowsRatherThanTrustingTheFilter(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(`{"items":[
+			{"slug":"GMAIL_FETCH_EMAILS","tags":["gmail","readOnlyHint","idempotentHint"]},
+			{"slug":"GMAIL_SEND_EMAIL","tags":["gmail","openWorldHint","createHint"]},
+			{"slug":"GMAIL_SEND_DRAFT","tags":["gmail","destructiveHint","updateHint"]},
+			{"slug":"GMAIL_LIST_LABELS","tags":["gmail","readOnlyHint"]}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).ReadOnly(context.Background(), "gmail")
+	if err != nil {
+		t.Fatalf("ReadOnly: %v", err)
+	}
+	for _, want := range []string{"tags=readOnlyHint", "toolkit_slug=gmail"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query %q is missing %q", gotQuery, want)
+		}
+	}
+	if len(got) != 2 || got[0] != "GMAIL_FETCH_EMAILS" || got[1] != "GMAIL_LIST_LABELS" {
+		t.Errorf("got %v, want only the two annotated read-only", got)
+	}
+}
+
+// A tool with no tags at all is not read-only. The provider populates them
+// today; absent must still mean ask, because that is the direction a mistake
+// here has to fall.
+func TestAToolWithNoTagsIsNotReadOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"slug":"GMAIL_MYSTERY"},{"slug":"GMAIL_OTHER","tags":[]}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).ReadOnly(context.Background(), "gmail")
+	if err != nil || len(got) != 0 {
+		t.Errorf("got %v, %v -- an unannotated tool was treated as safe", got, err)
+	}
+}

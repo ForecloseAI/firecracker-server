@@ -71,6 +71,16 @@ type UI struct {
 type Apps struct {
 	SessionURL string `json:"session_url"`
 	SessionID  string `json:"session_id,omitempty"`
+	// ReadOnly is the actions the provider annotates as only reading, pushed
+	// rather than compiled in so a tool the provider ships today is understood
+	// within the hour instead of at the next rootfs rebuild. What is absent from
+	// it asks a person, so an empty set is noisy and never permissive.
+	//
+	// Pushed only. AppsStore persists the session and not this: it is the same
+	// answer for everybody, it is the provider's to change, and a row that
+	// carried it would go stale in a place nobody looks. That is also why this
+	// struct is no longer comparable -- compare the fields you mean.
+	ReadOnly []string `json:"read_only,omitempty"`
 }
 
 // Decision is a human's answer to a pending interaction. Scope, MaxUses and

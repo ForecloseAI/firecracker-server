@@ -72,7 +72,8 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	if err != nil {
 		return err
 	}
-	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID})
+	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
+		ReadOnly: s.reads.slugs(ctx)})
 }
 
 // validateComposioSessionURL is the boundary between caller-writable storage
