@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -89,6 +90,21 @@ func (c Config) validate() error {
 	// nothing reads unless a provider is configured.
 	if c.ComposioKey != "" && c.SupabasePublishable == "" {
 		return fmt.Errorf("SUPABASE_PUBLISHABLE_KEY must be set when COMPOSIO_API_KEY is")
+	}
+	// Checked only when the feature is on. env() gives this a default, so it can
+	// never be empty; the failure this catches is a missing port -- "8092" or a
+	// bare host -- which is what makes NewAppsGateway return nil, and that opens
+	// no listener and short-circuits every push. Connected apps off, with a valid
+	// key set and nothing said.
+	//
+	// It stops there on purpose. SplitHostPort is happy with a non-numeric port,
+	// but that one does not fail quietly: the gateway is built, listen() cannot
+	// bind, and the service dies saying so. Only the silent case needs catching
+	// here.
+	if c.ComposioKey != "" {
+		if _, _, err := net.SplitHostPort(c.AppsAddr); err != nil {
+			return fmt.Errorf("CHAT_APPS_ADDR must be host:port: %w", err)
+		}
 	}
 	return nil
 }
