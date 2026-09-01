@@ -133,6 +133,9 @@ type App struct {
 	// Connected is reported rather than filtered out, so the client can grey a
 	// card or hide it; dropping the row would take that choice away.
 	Connected bool `json:"connected"`
+	// ConnectionID is what disconnecting this app needs, carried on the row so
+	// the screen does not have to fetch a second list to offer the button.
+	ConnectionID string `json:"connectionId,omitempty"`
 	// Status is the provider's own word -- ACTIVE, EXPIRED, INITIATED -- and is
 	// what lets an expired connection offer Reconnect instead of reading as
 	// though the app was never connected at all.
@@ -150,6 +153,7 @@ func projectApps(toolkits []composio.Toolkit, held []composio.Connection) []App 
 		}
 		if conn, ok := connectionFor(held, kit.Slug); ok {
 			app.Connected, app.Status = conn.Status == statusActive, conn.Status
+			app.ConnectionID = conn.ID
 		}
 		out = append(out, app)
 	}
