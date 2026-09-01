@@ -154,7 +154,7 @@ COPY files/skills /opt/agent/skills
 # Named rather than counted. A count says only that the number changed, which is
 # what it said the first time this ran and the number was wrong; naming each one
 # says WHICH is missing, and it does not need editing when a skill is added.
-RUN for s in skill-creator pdf xlsx docx pptx doc-coauthoring; do \
+RUN for s in skill-creator pdf xlsx docx pptx doc-coauthoring connected-apps; do \
       test -f "/opt/agent/skills/$s/SKILL.md" || { echo "missing built-in skill: $s"; exit 1; }; \
     done
 

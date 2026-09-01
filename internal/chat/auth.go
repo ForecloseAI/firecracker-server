@@ -143,3 +143,23 @@ func identityFrom(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(identityKey{}).(Identity)
 	return id, ok
 }
+
+// tokenKey is the context key the verified access token is carried under.
+type tokenKey struct{}
+
+// withToken returns a request carrying the caller's own access token.
+//
+// A SECOND context value rather than a field on Identity, deliberately. Identity
+// is documented as carried for the log line, and a bearer token has no business
+// in a struct that exists to be logged. This one is read by exactly one caller:
+// the store, which forwards it so the database -- not a WHERE clause somebody
+// remembered to write -- decides which rows the request may see.
+func withToken(r *http.Request, raw string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), tokenKey{}, raw))
+}
+
+// tokenFrom returns the caller's access token, if this request had one.
+func tokenFrom(ctx context.Context) string {
+	raw, _ := ctx.Value(tokenKey{}).(string)
+	return raw
+}

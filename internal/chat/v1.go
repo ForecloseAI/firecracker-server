@@ -1,15 +1,18 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"cracked/internal/agent"
 	"cracked/internal/agentapi"
+	"cracked/internal/composio"
 	"cracked/internal/vm"
 )
 
@@ -38,6 +41,10 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
 	mux.HandleFunc("GET /v1/stream", s.apiGuard(s.streamV1))
 	mux.HandleFunc("DELETE /v1/account", s.apiGuard(s.deleteAccount))
+	// Deliberately NOT behind apiGuard: the browser coming back from a provider
+	// carries no token. Safe unauthenticated because the page holds no state and
+	// takes no action -- it only bounces back into the app.
+	mux.HandleFunc("GET "+connectedPath, s.connected)
 	mux.HandleFunc("POST /v1/threads/{id}/messages/{messageId}/approval",
 		s.apiGuard(s.resolveApproval))
 }
@@ -64,7 +71,7 @@ func (s *Server) apiGuard(next func(http.ResponseWriter, *http.Request, string))
 // it if this is their first visit. That first call is slow -- a VM takes most of
 // a minute to come up -- and every one after it is not.
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request, user string) {
-	agents, err := s.rosterOf(machineFor(user))
+	agents, err := s.rosterOf(r.Context(), user)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -88,23 +95,103 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, user stri
 		fail(w, http.StatusBadRequest, "no machine for this account")
 		return
 	}
+	// BEFORE anything is destroyed. A grant at the provider is the one piece of
+	// this the person cannot reach themselves, and revoking after the machine is
+	// gone means a failure leaves them with no data and a live key to their
+	// inbox. Failing here costs a retry and destroys nothing.
+	if err := s.revokeApps(r.Context(), user, machine); err != nil {
+		log.Printf("chat: not erasing %s: its apps could not be disconnected: %v", machine, err)
+		fail(w, http.StatusBadGateway, "could not disconnect your apps, so nothing was deleted")
+		return
+	}
 	if err := s.control.DeleteVM(machine); err != nil {
 		// Deliberately not 204. The app tells someone their data is gone on the
 		// strength of this status, so a failure has to read as one.
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	// The machine id is derived from the account, so the replacement reuses it.
-	// Anything still keyed on it would attach to the new machine as if it were
-	// the old one.
+	s.forgetMachine(r.Context(), user, machine)
+	log.Printf("chat: erased %s at the account holder's request", machine)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// appsRevokeTimeout bounds handing back a person's grants. Generous, because it
+// is one call per connected app, but bounded: this is a person waiting on a tap.
+const appsRevokeTimeout = 30 * time.Second
+
+// revokeApps hands back every app grant this person gave.
+//
+// All of them, not the ones this machine happened to use: the grants are keyed
+// on the person at the provider and outlive any machine. Nothing to revoke and
+// no provider configured are both success -- there is simply nothing held.
+func (s *Server) revokeApps(ctx context.Context, user, machine string) error {
+	if s.composio == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, appsRevokeTimeout)
+	defer cancel()
+	held, err := s.composio.Connections(ctx, user)
+	if err != nil {
+		return err
+	}
+	if err := s.disconnectAll(ctx, held); err != nil {
+		return err
+	}
+	log.Printf("chat: disconnected %d app(s) for %s", len(held), machine)
+	return nil
+}
+
+// revokeFanout is how many accounts are disconnected at once.
+//
+// Bounded rather than serial, and the reason is arithmetic: one request may take
+// the client's full 15s against a 30s budget, so someone with eight connected
+// apps could never finish erasing their account on a slow day -- each attempt
+// would grind a couple off and report failure. There is no ordering among
+// disconnects to preserve; the list-then-revoke-then-delete ordering is.
+const revokeFanout = 4
+
+// disconnectAll hands back every grant, a few at a time, and reports the first
+// refusal. A partial pass is safe to retry: the next one lists what survived.
+func (s *Server) disconnectAll(ctx context.Context, held []composio.Connection) error {
+	var wg sync.WaitGroup
+	errs := make(chan error, len(held))
+	slots := make(chan struct{}, revokeFanout)
+	for _, conn := range held {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			if err := s.composio.Disconnect(ctx, conn.ID); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	return <-errs
+}
+
+// forgetMachine drops everything still keyed on a machine that has just been
+// erased. The machine id is derived from the account, so the replacement reuses
+// it, and anything left behind would attach to the new machine as if it were the
+// old one.
+//
+// Best effort from here on, deliberately: the machine is already gone, and
+// refusing now would tell someone their data survived when it did not.
+func (s *Server) forgetMachine(ctx context.Context, user, machine string) {
 	if b := s.dropBridge(machine); b != nil {
 		b.Close()
 	}
 	if s.caps != nil {
 		s.caps.Revoke(machine)
 	}
-	log.Printf("chat: erased %s at the account holder's request", machine)
-	w.WriteHeader(http.StatusNoContent)
+	if s.apps != nil {
+		if err := s.apps.Delete(ctx, user); err != nil {
+			log.Printf("chat: could not forget the app session for %s: %v", machine, err)
+		}
+	}
+	s.forgetApps(machine)
 }
 
 // fail writes an error status. The client reads only the code, never the body,
@@ -119,7 +206,7 @@ func fail(w http.ResponseWriter, code int, msg string) {
 // the person asks is "what runs on its own while I am not here", and an answer
 // split across one call per agent could not be asked at all.
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -143,7 +230,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user stri
 // request IS the person, and undoing a commitment they made needs no permission
 // from them.
 func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -162,7 +249,7 @@ func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user str
 
 // guestOf resolves a person to their machine's daemon, booting the machine if
 // this is their first call.
-func guestOf(s *Server, user string) (*agent.Client, error) {
+func guestOf(ctx context.Context, s *Server, user string) (*agent.Client, error) {
 	machine := machineFor(user)
 	if machine == "" {
 		return nil, ErrNoVM
@@ -171,12 +258,24 @@ func guestOf(s *Server, user string) (*agent.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return agent.New(view.GuestIP, guestPort), nil
+	return s.clientFor(ctx, user, view), nil
+}
+
+// clientFor is a machine's client, with its connected-apps session in place.
+//
+// Both ways into a machine go through here. ensureMachine cannot do it: the
+// session is minted for the PERSON -- the Supabase id with its hyphens -- and
+// ensureMachine knows only the machine, which is the same id with them stripped.
+// The view comes along because the broker pins its ticket to the guest address.
+func (s *Server) clientFor(ctx context.Context, user string, view vmView) *agent.Client {
+	cl := agent.New(view.GuestIP, guestPort)
+	s.ensureApps(ctx, user, view, cl)
+	return cl
 }
 
 // listTypes is the gallery: what this person can still add.
 func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -203,7 +302,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -271,7 +370,7 @@ func lookupType(cl *agent.Client, typeKey string) (agentapi.Profile, []agentapi.
 // answers 409 for both "no such agent" and "that is the boss", and a client
 // retrying on 409 would retry a missing agent forever.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -328,7 +427,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadRequest, "text is required")
 		return
 	}
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -372,6 +471,9 @@ func (s *Server) ensureMachine(machine string) (vmView, error) {
 	view, err := s.control.VM(machine)
 	if errors.Is(err, ErrNoVM) {
 		log.Printf("chat: booting %s on first sign-in", machine)
+		// A machine that has to be created comes up blank, so whatever this
+		// process believes it has already pushed to that id is about to be wrong.
+		s.forgetApps(machine)
 		return s.control.CreateVM(machine)
 	}
 	return view, err
@@ -382,7 +484,8 @@ func (s *Server) ensureMachine(machine string) (vmView, error) {
 // GET /agents on the guest is deliberately not wrapped in withAgent, so listing
 // costs nothing: the sibling event route IS wrapped, and reading the roster
 // through that would start every agent on the machine just to draw a list.
-func (s *Server) rosterOf(machine string) ([]Agent, error) {
+func (s *Server) rosterOf(ctx context.Context, user string) ([]Agent, error) {
+	machine := machineFor(user)
 	if machine == "" {
 		return []Agent{}, nil
 	}
@@ -393,7 +496,11 @@ func (s *Server) rosterOf(machine string) ([]Agent, error) {
 	if view.State != vm.StateRunning {
 		return []Agent{}, nil
 	}
-	cl := agent.New(view.GuestIP, guestPort)
+	// clientFor and not agent.New: this is the app's FIRST call after signing in,
+	// so it is where a machine is usually booted -- and a machine that got its
+	// session only once somebody sent a message would spend that whole first
+	// conversation with no apps.
+	cl := s.clientFor(ctx, user, view)
 	roster, err := cl.Agents()
 	if err != nil {
 		return nil, err

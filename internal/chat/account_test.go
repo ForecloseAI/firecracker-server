@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"cracked/internal/composio"
 )
 
 // fakeControl records what the gateway asked the control plane to do, and can be
@@ -229,5 +231,78 @@ func TestDeleteAccountDoesNotTreatAConflictAsSuccess(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", w.Code)
+	}
+}
+
+// fakeProvider records the revokes an account deletion asks for.
+type fakeProvider struct {
+	mu       sync.Mutex
+	revoked  []string
+	listFail bool
+}
+
+// server stands the provider up and points a client at it.
+func (f *fakeProvider) server(t *testing.T) *composio.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodDelete {
+			f.revoked = append(f.revoked, strings.TrimPrefix(r.URL.Path, "/connected_accounts/"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if f.listFail {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{"items":[
+			{"id":"ca_gmail","status":"ACTIVE","toolkit":{"slug":"gmail"}},
+			{"id":"ca_slack","status":"ACTIVE","toolkit":{"slug":"slack"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return composio.New("k", srv.URL)
+}
+
+// Erasing an account hands back the grants that came with it. Without this the
+// person is told their data is gone while a live Google grant keeps their inbox
+// reachable -- confirmed against the real provider before this was written.
+func TestDeleteAccountRevokesTheProviderGrants(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fp := &fakeProvider{}
+	s.composio = fp.server(t)
+
+	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if len(fp.revoked) != 2 {
+		t.Fatalf("revoked %v, want both accounts", fp.revoked)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.purged) != 1 {
+		t.Errorf("the machine was not purged: %v", fc.purged)
+	}
+}
+
+// THE ordering test. Revoking runs FIRST, so a provider that cannot be reached
+// costs a retry and nothing else -- revoking after the machine was destroyed
+// would leave the person with no data AND a live key to their inbox, which is
+// the worst of both and the one outcome they cannot fix themselves.
+func TestAFailedRevokeDestroysNothing(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fp := &fakeProvider{listFail: true}
+	s.composio = fp.server(t)
+
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", w.Code, w.Body)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleted) != 0 {
+		t.Errorf("the machine was deleted anyway: %v", fc.deleted)
 	}
 }

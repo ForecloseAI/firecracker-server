@@ -54,7 +54,7 @@ func logged(next http.Handler, bodies bool, auth *Verifier) http.Handler {
 		user := ""
 		if id, ok := auth.identify(r); ok {
 			user = id.Email
-			r = withIdentity(r, id)
+			r = withToken(withIdentity(r, id), requestToken(r))
 		}
 		req := ""
 		if bodies {

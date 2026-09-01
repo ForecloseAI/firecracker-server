@@ -22,6 +22,28 @@ type Config struct {
 	// because the app is being integrated against; set CHAT_LOG_BODIES=0 once
 	// real people are using it, since message text is their content.
 	LogBodies bool
+
+	// SupabasePublishable identifies the project to PostgREST. Not a secret: it
+	// is the same key the app ships with, and it grants nothing on its own --
+	// row-level security plus the caller's own token decide what a request sees.
+	SupabasePublishable string
+
+	// ComposioKey is authority over every user's connected accounts, so it lives
+	// only here and never reaches a guest. Empty turns connected apps off
+	// entirely, which is why the feature needs no flag of its own.
+	ComposioKey string
+	// ComposioBase overrides the provider's REST root, for a test host.
+	ComposioBase string
+	// AppsAddr is the broker guests dial to reach their own session. Bound on
+	// every interface rather than loopback, because it has to be reachable from
+	// a tap device -- the firewall and the ticket check are what keep it shut,
+	// and the port is not in the security group.
+	AppsAddr string
+	// ComposioCallback is where a person lands after approving an app. It has to
+	// be a page this service serves, because the browser coming back from a
+	// provider carries no token and a custom scheme is not reliably followed
+	// through a server redirect.
+	ComposioCallback string
 }
 
 // LoadConfig reads and validates the environment.
@@ -35,7 +57,13 @@ func LoadConfig() (Config, error) {
 		Token:       env("CRACKED_TOKEN", ""),
 		SupabaseURL: strings.TrimSuffix(env("SUPABASE_URL", ""), "/"),
 		LogBodies:   env("CHAT_LOG_BODIES", "1") != "0",
+
+		SupabasePublishable: env("SUPABASE_PUBLISHABLE_KEY", ""),
+		ComposioKey:         env("COMPOSIO_API_KEY", ""),
+		ComposioBase:        env("COMPOSIO_BASE_URL", ""),
+		AppsAddr:            env("CHAT_APPS_ADDR", "0.0.0.0:8092"),
 	}
+	c.ComposioCallback = env("COMPOSIO_CALLBACK_URL", c.Origin+connectedPath)
 	return c, c.validate()
 }
 
@@ -55,6 +83,12 @@ func (c Config) validate() error {
 	}
 	if !strings.HasPrefix(c.SupabaseURL, "https://") {
 		return fmt.Errorf("SUPABASE_URL must be https, or access tokens travel in the clear")
+	}
+	// Required only when connected apps are on. Making it unconditional would
+	// stop every existing deployment coming up on the next restart, for a key
+	// nothing reads unless a provider is configured.
+	if c.ComposioKey != "" && c.SupabasePublishable == "" {
+		return fmt.Errorf("SUPABASE_PUBLISHABLE_KEY must be set when COMPOSIO_API_KEY is")
 	}
 	return nil
 }
