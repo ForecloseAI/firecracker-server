@@ -168,7 +168,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	gate := NewGate(log, hubOf(team), dir)
 	reload := &reloadFlag{}
 	deps := toolDeps{gate: gate, team: team, self: id, log: log, browser: p.Browser,
-		stateDir: stateDirOf(team), reload: reload}
+		stateDir: stateDirOf(team), reload: reload, apps: appsOf(team)}
 	if p.Browser {
 		// A browser agent that cannot reach Chrome is still worth starting: it
 		// keeps every other tool, and the failure shows up in its log rather
@@ -195,6 +195,15 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	}
 	a.log.Append(Event{Type: "ready", Message: "agent " + id + " ready"})
 	return a, nil
+}
+
+// appsOf is the machine's connected-apps session, or nil when this agent has no
+// team -- which is only ever the case in a unit test.
+func appsOf(team *Supervisor) *appsServer {
+	if team == nil {
+		return nil
+	}
+	return team.Apps()
 }
 
 // hubOf is the machine's interaction hub, or nil when this agent has no team --

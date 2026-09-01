@@ -133,7 +133,7 @@ func (s *browserServer) Tools(ctx context.Context, d toolDeps) ([]anthropic.Beta
 	if err != nil {
 		return nil, err
 	}
-	s.tools = wrapAll(listed, s, d)
+	s.tools = wrapAll(listed, s, browserNoun, nil, d)
 	return s.tools, nil
 }
 
@@ -221,6 +221,10 @@ func serverEnv() []string {
 		"CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1",
 		"CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1")
 }
+
+// redact is a passthrough. The browser server is a local process reached at a
+// loopback address, so nothing about it needs keeping from the model.
+func (s *browserServer) redact(err error) error { return err }
 
 // drop retires a session that has died, so the next call reconnects.
 func (s *browserServer) drop(dead *mcpsdk.ClientSession) {

@@ -279,6 +279,11 @@ func (c *Client) SetPerson(p agentapi.Person) error {
 	return c.write(http.MethodPut, "/person", p, nil)
 }
 
+// SetApps hands the machine the session its agents dial to reach connected apps.
+func (c *Client) SetApps(a agentapi.Apps) error {
+	return c.write(http.MethodPut, "/apps", a, nil)
+}
+
 // Schedules lists the standing jobs on the machine, across every agent.
 func (c *Client) Schedules() ([]agentapi.Schedule, error) {
 	var out []agentapi.Schedule
