@@ -181,6 +181,11 @@ type Connection struct {
 	Status string
 }
 
+// StatusActive is the provider's word for a connection that works. Written down
+// here rather than at the call site: this package is where the vocabulary is
+// documented, so it should be the one holding the constant too.
+const StatusActive = "ACTIVE"
+
 // connectionsResp is one page of GET /connected_accounts.
 type connectionsResp struct {
 	Items []struct {
@@ -240,4 +245,132 @@ func (c *Client) connectionPage(ctx context.Context, userID, cursor string) (con
 // gone while a live Google grant keeps their inbox reachable.
 func (c *Client) Disconnect(ctx context.Context, id string) error {
 	return c.send(ctx, http.MethodDelete, "/connected_accounts/"+url.PathEscape(id), nil, nil)
+}
+
+// Toolkit is one app as the provider's catalogue describes it.
+//
+// Fetched rather than written down here: a name, a logo and a blurb are copy
+// that goes stale, and the only thing this project should be choosing is WHICH
+// apps to offer.
+type Toolkit struct {
+	Slug        string
+	Name        string
+	Logo        string
+	Description string
+}
+
+// toolkitResp is the shape of GET /toolkits/{slug}.
+type toolkitResp struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	Meta struct {
+		Logo        string `json:"logo"`
+		Description string `json:"description"`
+	} `json:"meta"`
+}
+
+// Toolkit fetches one app's public metadata.
+func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
+	var out toolkitResp
+	if err := c.send(ctx, http.MethodGet, "/toolkits/"+url.PathEscape(slug), nil, &out); err != nil {
+		return Toolkit{}, err
+	}
+	return Toolkit{Slug: out.Slug, Name: out.Name,
+		Logo: out.Meta.Logo, Description: out.Meta.Description}, nil
+}
+
+// Link is a hosted page where a person authorises one app.
+type Link struct {
+	URL string
+	// ExpiresAt is the provider's own deadline rather than an assumption. It is
+	// about ten minutes out, which is shorter than a person left holding a card
+	// may take -- so whoever shows this has to be able to ask for a fresh one.
+	ExpiresAt time.Time
+}
+
+// linkReq is the body of POST /connected_accounts/link.
+type linkReq struct {
+	UserID       string `json:"user_id"`
+	AuthConfigID string `json:"auth_config_id"`
+	CallbackURL  string `json:"callback_url,omitempty"`
+}
+
+// linkResp is what it answers with.
+type linkResp struct {
+	RedirectURL string    `json:"redirect_url"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// Link mints a connect link for one person and one app.
+//
+// Two calls, not one: the link needs an auth config id, and the provider will
+// not infer it from the toolkit.
+func (c *Client) Link(ctx context.Context, userID, slug, callback string) (Link, error) {
+	cfg, err := c.authConfig(ctx, slug)
+	if err != nil {
+		return Link{}, err
+	}
+	var out linkResp
+	body := linkReq{UserID: userID, AuthConfigID: cfg, CallbackURL: callback}
+	if err := c.send(ctx, http.MethodPost, "/connected_accounts/link", body, &out); err != nil {
+		return Link{}, err
+	}
+	if out.RedirectURL == "" {
+		return Link{}, fmt.Errorf("composio: a connect link came back with no url")
+	}
+	return Link{URL: out.RedirectURL, ExpiresAt: out.ExpiresAt}, nil
+}
+
+// authConfigsResp is one page of GET /auth_configs.
+type authConfigsResp struct {
+	Items []struct {
+		ID      string `json:"id"`
+		Toolkit struct {
+			Slug string `json:"slug"`
+		} `json:"toolkit"`
+	} `json:"items"`
+}
+
+// authConfigResp is what creating one answers with.
+type authConfigResp struct {
+	AuthConfig struct {
+		ID string `json:"id"`
+	} `json:"auth_config"`
+}
+
+// authConfig is the provider-managed auth config for one app, created the first
+// time anybody connects it.
+//
+// Note toolkit_slug, SINGULAR. The plural toolkit_slugs and the bare toolkit are
+// both accepted and then IGNORED, answering with every config in the project --
+// and the caller would mint a link against whichever came back first. That is
+// the reverse of connected_accounts, where the plural user_ids is the live one
+// and the singular is ignored. Neither is guessable; both are pinned by tests.
+func (c *Client) authConfig(ctx context.Context, slug string) (string, error) {
+	var held authConfigsResp
+	q := "/auth_configs?" + url.Values{"toolkit_slug": {slug}, "limit": {"1"}}.Encode()
+	if err := c.send(ctx, http.MethodGet, q, nil, &held); err != nil {
+		return "", err
+	}
+	for _, it := range held.Items {
+		if it.Toolkit.Slug == slug {
+			return it.ID, nil
+		}
+	}
+	return c.createAuthConfig(ctx, slug)
+}
+
+// createAuthConfig asks for a provider-managed config for one app. The body
+// carries only the toolkit: everything else defaults to managed OAuth, which is
+// the whole point of not bringing our own credentials yet.
+func (c *Client) createAuthConfig(ctx context.Context, slug string) (string, error) {
+	body := map[string]any{"toolkit": map[string]string{"slug": slug}}
+	var made authConfigResp
+	if err := c.send(ctx, http.MethodPost, "/auth_configs", body, &made); err != nil {
+		return "", err
+	}
+	if made.AuthConfig.ID == "" {
+		return "", fmt.Errorf("composio: an auth config for %s came back with no id", slug)
+	}
+	return made.AuthConfig.ID, nil
 }
