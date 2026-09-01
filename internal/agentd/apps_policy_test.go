@@ -1,7 +1,6 @@
 package agentd
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 )
@@ -12,9 +11,7 @@ import (
 func batch(t *testing.T, body string) map[string]any {
 	t.Helper()
 	var args map[string]any
-	if err := json.Unmarshal([]byte(body), &args); err != nil {
-		t.Fatalf("fixture is not json: %v", err)
-	}
+	decodeBody(t, body, &args)
 	return args
 }
 
@@ -92,9 +89,7 @@ func TestAnEmptyBatchIsNotAnError(t *testing.T) {
 	}
 }
 
-// Search, schemas and wait only read, and starting a connection still needs the
-// person to finish OAuth in their own browser. None of them can act, so none of
-// them carries an action to report.
+// The other four cannot act, so none of them carries an action to report.
 func TestTheOtherMetaToolsCarryNoActions(t *testing.T) {
 	for _, name := range appsMetaTools {
 		if name == appsExecTool {
@@ -105,15 +100,4 @@ func TestTheOtherMetaToolsCarryNoActions(t *testing.T) {
 			t.Errorf("%s reported %v, %v", name, got, err)
 		}
 	}
-}
-
-// The execute tool is named here and in appsMetaTools; if the provider renames
-// it, the surface keeps working while the gate silently stops seeing sends.
-func TestTheExecuteToolIsOneTheSessionActuallyOffers(t *testing.T) {
-	for _, name := range appsMetaTools {
-		if name == appsExecTool {
-			return
-		}
-	}
-	t.Fatalf("%s is not in appsMetaTools, so nothing gates it", appsExecTool)
 }

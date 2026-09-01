@@ -16,6 +16,9 @@ const appsExecTool = "COMPOSIO_MULTI_EXECUTE_TOOL"
 // Worded for the model, because it is handed back as the tool result: it says
 // what was wrong and what shape to use, so a legitimate malformed call can be
 // retried. A refusal the model cannot act on becomes a retry loop.
+//
+// "Nothing ran" is a claim about the caller, true only while the hook hands this
+// back unwrapped. Do not fmt.Errorf("...: %w", err) it.
 var errUnreadableCall = errors.New(
 	"this call could not be read, so nothing ran. Its tools argument must be a " +
 		"list, and every entry an object with a non-empty tool_slug string.")
@@ -30,10 +33,9 @@ var errUnreadableCall = errors.New(
 // waves every send through.
 //
 // Unidentifiable is never safe. A batch this cannot read is one whose contents
-// nothing has checked, so it is an error rather than an empty answer. The one
-// type assertion below covers nil args, a missing tools and a tools that is not
-// a list -- and nil args does reach here, because Execute only returns early
-// when JSON fails to parse, and empty input parses to nothing at all.
+// nothing has checked, so it is an error rather than an empty answer. Nil args
+// does reach the one assertion below: Execute only returns early when JSON fails
+// to parse, and empty input parses to nothing at all.
 func slugsIn(name string, args map[string]any) ([]string, error) {
 	if name != appsExecTool {
 		return nil, nil
@@ -44,9 +46,9 @@ func slugsIn(name string, args map[string]any) ([]string, error) {
 	}
 	out := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		slug, err := slugOf(entry)
-		if err != nil {
-			return nil, err
+		slug, ok := slugOf(entry)
+		if !ok {
+			return nil, errUnreadableCall
 		}
 		out = append(out, slug)
 	}
@@ -58,14 +60,14 @@ func slugsIn(name string, args map[string]any) ([]string, error) {
 // The whole batch fails on a bad entry rather than that entry being skipped:
 // running the readable half of a call the model wrote as a unit is a decision
 // nobody made.
-func slugOf(entry any) (string, error) {
+func slugOf(entry any) (string, bool) {
+	// Refused here rather than left to the lookup below, which would also miss:
+	// indexing a nil map is legal and yields nothing. Belt and braces, on purpose
+	// -- what refuses a malformed entry should not rest on that.
 	call, ok := entry.(map[string]any)
 	if !ok {
-		return "", errUnreadableCall
+		return "", false
 	}
 	slug, ok := call["tool_slug"].(string)
-	if !ok || slug == "" {
-		return "", errUnreadableCall
-	}
-	return slug, nil
+	return slug, ok && slug != ""
 }

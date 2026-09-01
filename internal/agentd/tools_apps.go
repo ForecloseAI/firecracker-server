@@ -15,7 +15,7 @@ import (
 // session was unreachable at the moment that agent was built.
 var appsMetaTools = []string{
 	"COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MANAGE_CONNECTIONS",
-	"COMPOSIO_WAIT_FOR_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL",
+	"COMPOSIO_WAIT_FOR_CONNECTIONS", appsExecTool,
 }
 
 // appsTools asks the session what it offers, or returns nothing when this
