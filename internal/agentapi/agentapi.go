@@ -13,6 +13,10 @@ package agentapi
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -101,6 +105,11 @@ type Event struct {
 	Input json.RawMessage `json:"input,omitempty"`
 	// File is what the person attached to this message, if anything.
 	File *File `json:"file,omitempty"`
+	// Attachment is what the AGENT sent back: a document it produced, or a
+	// picture of its screen. The mirror of File, and deliberately a second
+	// field rather than a direction flag on one -- the two are read by
+	// different code on the client and carry different fields.
+	Attachment *Attachment `json:"attachment,omitempty"`
 
 	Model        string `json:"model,omitempty"`
 	Usage        *Usage `json:"usage,omitempty"`
@@ -130,6 +139,88 @@ type File struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Size int64  `json:"size"`
+}
+
+// Attachment is something an agent sent the person: a document it produced, or a
+// picture of its screen.
+//
+// Seq is dense, per-agent, and survives a restart, and it is also what names the
+// file on disk. Dense is the point: it lets a client group a run of pictures the
+// way a chat app does, because two attachments with consecutive Seq were sent one
+// after the other. The event id cannot answer that -- ids advance on every event,
+// so two pictures a turn apart and two pictures a second apart look alike.
+type Attachment struct {
+	Seq int `json:"seq"`
+	// Name is the file on disk, sequence prefix and all, and it is what the
+	// download URL is built from. Display is the same file as the person should
+	// read it. Both, rather than one the host un-prefixes, because the guest
+	// mints the prefix and is the only side that knows the format -- the same
+	// reason File carries Name and Path separately.
+	Name    string `json:"name"`
+	Display string `json:"display"`
+	// Kind is the guest's serving policy surfaced on the wire, not a second
+	// opinion about it. The download route is handed a name and no event, so it
+	// has to decide image-or-download from the extension anyway; this is that
+	// same decision, computed by the same helper, so the two cannot disagree.
+	Kind string `json:"kind"` // image | file
+	Size int64  `json:"size"`
+	// Thumb names a smaller copy sitting beside the full one, for a list. Only
+	// screenshots have one: a chart an agent drew is sent whole.
+	Thumb string `json:"thumb,omitempty"`
+}
+
+// The kinds an Attachment may be. Declared here beside the field they describe,
+// so the daemon that stamps one and the gateway that renders it cannot drift
+// into two private vocabularies.
+const (
+	KindImage = "image"
+	KindFile  = "file"
+)
+
+// attachmentPrefix matches the sequence an outbox file is named with, and
+// captures the number. Anchored, so "0007-screen-thumb.png" and
+// "0007-2026-report.pdf" both belong to seven.
+var attachmentPrefix = regexp.MustCompile(`^(\d{4,})-`)
+
+// AttachmentSeq extracts an attachment's sequence number, or 0 if it has none.
+func AttachmentSeq(name string) int {
+	m := attachmentPrefix.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// ReadableName is an attachment as the person should read it, without the
+// sequence prefix the daemon named it with.
+func ReadableName(name string) string {
+	return attachmentPrefix.ReplaceAllString(name, "")
+}
+
+// attachmentImages are the only types an attachment is served as itself.
+var attachmentImages = map[string]string{
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp",
+}
+
+// AttachmentMIME reports how to serve a file, and whether it is an image.
+//
+// An allowlist and not a MIME table, because the AGENT chooses these filenames
+// and a page served as itself runs as itself.
+//
+// It lives HERE, in the package both sides share, because the gateway must
+// compute this for itself rather than pass on what the guest said. A guest is
+// the person's own machine and they have root on it: a daemon they patched
+// could answer Content-Type: text/html, and the gateway serves that on the same
+// origin as the operator console and its __Host-sess cookie. nosniff does not
+// help against an explicitly declared type. So both hops ask this function, and
+// the untrusted answer is never forwarded.
+func AttachmentMIME(name string) (string, bool) {
+	if t, ok := attachmentImages[strings.ToLower(filepath.Ext(name))]; ok {
+		return t, true
+	}
+	return "application/octet-stream", false
 }
 
 // Person is what the machine knows about whoever it works for. Collected at

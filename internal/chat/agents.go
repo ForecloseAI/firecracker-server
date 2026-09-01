@@ -86,6 +86,8 @@ type Message struct {
 	File *agentapi.File `json:"file,omitempty"`
 	// Shot is where to fetch a picture of the screen a handoff leads to.
 	Shot string `json:"shot,omitempty"`
+	// Attachment is what the agent sent back, if anything. The mirror of File.
+	Attachment *Attachment `json:"attachment,omitempty"`
 	// UI tells the client what kind of answer this ask wants. Without it two
 	// buttons are the only option, and a question like "which city?" gets
 	// answered "yes" -- which unblocks the agent while telling it something the
@@ -97,6 +99,28 @@ type Message struct {
 	Verdict     string    `json:"verdict,omitempty"`
 	VerdictTime time.Time `json:"verdictTime,omitzero"`
 }
+
+// Attachment is something an agent sent the person, as the app receives it: the
+// guest's own record with its file names already resolved to URLs.
+//
+// Seq is passed through untouched. It is dense and per-agent, so a client can
+// group a run of pictures the way a chat app does -- consecutive numbers from
+// one agent were sent one after the other.
+type Attachment struct {
+	Seq int `json:"seq"`
+	// Name is the readable one the guest sent, not the file on disk: the number
+	// that finds it lives in the URLs, and in Seq for grouping.
+	Name string `json:"name"`
+	Kind string `json:"kind"` // image | file
+	Size int64  `json:"size"`
+
+	URL      string `json:"url"`
+	ThumbURL string `json:"thumbUrl,omitempty"`
+}
+
+// Attachment kinds. Aliased rather than restated, so the daemon that stamps one
+// and this package cannot drift into two private vocabularies.
+const kindImage = agentapi.KindImage
 
 // AskUI is how an ask should be answered. One vocabulary across both sources: a
 // gated tool becomes "approval", and a question reports its own kind.

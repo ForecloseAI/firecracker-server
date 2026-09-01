@@ -30,6 +30,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/threads/{id}/messages", s.apiGuard(s.sendMessage))
 	mux.HandleFunc("POST /v1/threads/{id}/files", s.apiGuard(s.uploadFile))
 	mux.HandleFunc("GET /v1/threads/{id}/shots/{name}", s.apiGuard(s.getShot))
+	mux.HandleFunc("GET /v1/threads/{id}/files/{name}", s.apiGuard(s.getAttachment))
 	mux.HandleFunc("GET /v1/schedules", s.apiGuard(s.listSchedules))
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.apiGuard(s.cancelSchedule))
 	mux.HandleFunc("GET /v1/profile", s.apiGuard(s.getProfile))

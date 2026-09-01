@@ -82,6 +82,6 @@ file you already have. It takes a few seconds the first time it runs.
 
 ## Before you finish
 
-Say where the file is. The person cannot download it from the app yet, so a
-file they cannot see is not a delivered result. If they need to look at it,
-offer to hand over the screen.
+Send it with send_file. A file they never received is not a delivered result,
+and naming a path on this machine is not sending it. Say what is in it as well,
+so they know what they are opening.

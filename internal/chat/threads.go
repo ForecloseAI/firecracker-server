@@ -88,10 +88,31 @@ func buildThread(id string, events []agentapi.Event, handoff string) Thread {
 // withPreview fills the list-screen fields from the final line.
 func withPreview(t Thread) Thread {
 	if n := len(t.Messages); n > 0 {
-		t.LastMessage = t.Messages[n-1].Text
+		t.LastMessage = previewOf(t.Messages[n-1])
 		t.LastTime = t.Messages[n-1].Time
 	}
 	return t
+}
+
+// previewOf is what the thread list shows for one message.
+//
+// An attachment sent without a note carries no text at all, and a blank line on
+// a screen whose whole job is saying what happened reads as nothing having
+// happened. The stand-in is made HERE and never written into Message.Text: that
+// is the caption the bubble renders, and words the agent did not say do not
+// belong in the transcript.
+func previewOf(m Message) string {
+	switch {
+	case m.Text != "":
+		return m.Text
+	case m.Attachment == nil:
+		return ""
+	case m.Attachment.Kind == kindImage:
+		// Not the file name: it is "0007-screen.png" and says nothing.
+		return "Sent a screenshot"
+	default:
+		return "Sent " + m.Attachment.Name
+	}
 }
 
 // isNotFound reports whether the guest said the agent does not exist.

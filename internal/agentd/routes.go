@@ -27,6 +27,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /agents/{id}/interrupt", s.withAgent(s.handleInterrupt))
 	mux.HandleFunc("GET /agents/{id}/events", s.handleEvents)
 	mux.HandleFunc("GET /agents/{id}/shots/{name}", s.handleShot)
+	mux.HandleFunc("GET /agents/{id}/outbox/{name}", s.handleAttachment)
 	mux.HandleFunc("GET /schedules", s.handleListSchedules)
 	mux.HandleFunc("POST /schedules", s.handleCreateSchedule)
 	mux.HandleFunc("DELETE /schedules/{id}", s.handleDeleteSchedule)

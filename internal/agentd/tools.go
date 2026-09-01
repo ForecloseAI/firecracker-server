@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"context"
+	"slices"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/toolrunner"
@@ -47,7 +48,14 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := append(append(append(append(files, rest...), team...), browser...), sched...)
+	// One outbox shared by both send tools, so their numbers cannot collide. It
+	// resumes from disk, which is what lets a client group by sequence across a
+	// restart.
+	send, err := sendTools(r, d, newOutbox(r.own))
+	if err != nil {
+		return nil, err
+	}
+	all := slices.Concat(files, rest, team, browser, sched, send)
 	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
 
@@ -61,9 +69,19 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // create_skill is here for the same reason: an agent that cannot record what it
 // just worked out has to rediscover it every time, and no profile should have to
 // remember to ask for the ability to learn.
+// send_file is here for the same reason again: every agent produces documents,
+// and one that cannot hand its work over has done the work for nobody.
+// send_screenshot is deliberately NOT here -- it rides the browser switch below,
+// because only an agent driving the screen has one worth photographing.
+// ownBrowserTools are OUR browser-gated tools. They are kept out of
+// browserAllowed because that map also filters the MCP server's own tools/list,
+// where a name the server never advertises would look like a tool that went
+// missing. They ride the same single switch.
+var ownBrowserTools = []string{"send_screenshot"}
+
 var alwaysAllowed = []string{
 	"remember_about_person", "schedule_task", "list_schedules", "cancel_schedule",
-	"create_skill",
+	"create_skill", "send_file",
 }
 
 // permitted expands what a profile allows with the tools it does not have to ask
@@ -76,8 +94,10 @@ var alwaysAllowed = []string{
 // that tool. The flag is the single source of truth; tools: stays authoritative
 // for everything else.
 //
-// The names come straight from browserAllowed, which is also what filters the
-// server's tools/list -- so the allow list and the surface cannot drift apart.
+// The MCP names come straight from browserAllowed, which is also what filters
+// the server's tools/list -- so the allow list and the surface cannot drift
+// apart. Our own browser-gated tools are named in ownBrowserTools instead, and
+// gated on the same flag where they are built.
 func permitted(allow []string, browser bool) []string {
 	if len(allow) == 0 {
 		return allow // an empty list already means everything
@@ -89,7 +109,7 @@ func permitted(allow []string, browser bool) []string {
 	for name := range browserAllowed {
 		out = append(out, name)
 	}
-	return out
+	return append(out, ownBrowserTools...)
 }
 
 // toolDeps is what tool construction needs beyond the roots: the approval
