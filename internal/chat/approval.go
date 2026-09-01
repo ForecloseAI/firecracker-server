@@ -36,7 +36,7 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, user st
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	cl, err := guestOf(s, user)
+	cl, err := guestOf(r.Context(), s, user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
@@ -124,7 +124,7 @@ func denyBody(ui *AskUI) map[string]any {
 	switch ui.Kind {
 	case askConfirm:
 		return map[string]any{"answer": "no"}
-	case askHandoff:
+	case askHandoff, askConnect:
 		return map[string]any{"answer": "not now"}
 	}
 	return map[string]any{"decision": "deny", "reason": declined}
@@ -137,7 +137,10 @@ func allowBody(ui *AskUI, answer string) (map[string]any, bool) {
 		return map[string]any{"decision": "allow"}, true
 	case askConfirm:
 		return map[string]any{"answer": "yes"}, true
-	case askHandoff:
+	case askHandoff, askConnect:
+		// Deliberately not in wantsText above. The guest reads ANY non-empty
+		// answer as consent, so a connect card that accepted free text would let
+		// a client approve one by typing into it.
 		return map[string]any{"answer": "done"}, true
 	case askText:
 		// An empty answer reads as a refusal to the guest, so it would tell the

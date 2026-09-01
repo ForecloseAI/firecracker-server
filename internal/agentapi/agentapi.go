@@ -50,8 +50,27 @@ func (u Usage) TotalTokens() int64 {
 
 // UI tells a client how to render a pending interaction.
 type UI struct {
-	Kind    string   `json:"kind"` // text | confirm | choice | handoff
+	Kind    string   `json:"kind"` // text | confirm | choice | handoff | connect
 	Options []string `json:"options,omitempty"`
+	// URL is where a "connect" card sends the person to sign in.
+	//
+	// Unlike a handoff's URL, which the host mints, this one is authored in the
+	// guest -- so the host checks its origin before letting a client render it
+	// as a button. See connectHostAllowed in internal/chat.
+	URL string `json:"url,omitempty"`
+}
+
+// Apps is the machine's connection to the person's app integrations: one
+// tool-router session, minted by the host and pushed here because a guest
+// cannot reach the host to ask for it.
+//
+// Config, not state. The host remembers having minted a session; this is the
+// copy the daemon needs on its own disk to dial one. An empty SessionURL means
+// this machine has no connected-apps surface, which is the ordinary shape when
+// no integration provider is configured.
+type Apps struct {
+	SessionURL string `json:"session_url"`
+	SessionID  string `json:"session_id,omitempty"`
 }
 
 // Decision is a human's answer to a pending interaction. Scope, MaxUses and

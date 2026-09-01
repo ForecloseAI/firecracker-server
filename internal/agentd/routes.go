@@ -33,6 +33,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /schedules/{id}", s.handleDeleteSchedule)
 	mux.HandleFunc("GET /person", s.handleGetPerson)
 	mux.HandleFunc("PUT /person", s.handlePutPerson)
+	mux.HandleFunc("GET /apps", s.handleGetApps)
+	mux.HandleFunc("PUT /apps", s.handlePutApps)
 	mux.HandleFunc("POST /files", s.handleUpload)
 	mux.HandleFunc("GET /debug/memstats", s.handleMemstats)
 	mux.HandleFunc("POST /debug/exec", s.handleDebugExec)

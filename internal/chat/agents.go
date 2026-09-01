@@ -93,8 +93,10 @@ type Message struct {
 	// answered "yes" -- which unblocks the agent while telling it something the
 	// person never said.
 	UI *AskUI `json:"ui,omitempty"`
-	// URL sends the person to the machine's own screen for a login handoff, so
-	// the credential never passes through this service.
+	// URL is where the card's button sends them: the machine's own screen for a
+	// login handoff, so the credential never passes through this service, or the
+	// provider's sign-in page for a connect. The handoff one is minted here; the
+	// connect one comes from the guest and is origin-checked before it is set.
 	URL         string    `json:"url,omitempty"`
 	Verdict     string    `json:"verdict,omitempty"`
 	VerdictTime time.Time `json:"verdictTime,omitzero"`
@@ -125,7 +127,7 @@ const kindImage = agentapi.KindImage
 // AskUI is how an ask should be answered. One vocabulary across both sources: a
 // gated tool becomes "approval", and a question reports its own kind.
 type AskUI struct {
-	Kind    string   `json:"kind"` // approval | confirm | text | choice | handoff
+	Kind    string   `json:"kind"` // approval | confirm | text | choice | handoff | connect
 	Options []string `json:"options,omitempty"`
 }
 
@@ -136,6 +138,7 @@ const (
 	askChoice   = "choice"
 	askConfirm  = "confirm"
 	askHandoff  = "handoff"
+	askConnect  = "connect"
 )
 
 // projectTemplates turns the catalog into a gallery.

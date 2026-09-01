@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+
+	"cracked/internal/composio"
 )
 
 //go:embed static/chat.html
@@ -17,13 +19,52 @@ type Server struct {
 	caps    *Caps
 	auth    *Verifier
 
+	// composio mints app-integration sessions, and apps remembers them. Both are
+	// nil when no provider is configured, which is what turns the whole feature
+	// off without a flag.
+	composio *composio.Client
+	apps     AppsStore
+	// gw is how a guest reaches its session without holding the credential.
+	gw *AppsGateway
+
 	mu      sync.Mutex
 	bridges map[string]*Bridge
+	// appsClaims is what this process has done about each machine's session.
+	// One map, not two: pushed and failed have to stay consistent across three
+	// call sites, and a delete forgotten in one of them is a machine that never
+	// gets its apps back.
+	appsClaims map[string]appsClaim
 }
 
 // NewServer wires the chat service together.
 func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server {
-	return &Server{cfg: cfg, control: control, caps: caps, auth: auth, bridges: map[string]*Bridge{}}
+	s := &Server{cfg: cfg, control: control, caps: caps, auth: auth,
+		bridges: map[string]*Bridge{}, appsClaims: map[string]appsClaim{},
+		composio: composio.New(cfg.ComposioKey, cfg.ComposioBase)}
+	// Only alongside a provider. A store with nothing to remember would be a
+	// live database dependency bought for nothing.
+	// Assigned through a local, never straight into the field: a nil *pgApps put
+	// behind the interface is not a nil interface, and every call on it would
+	// panic instead of taking the "no store configured" path.
+	if s.composio != nil {
+		if store := newPGApps(cfg.SupabaseURL, cfg.SupabasePublishable); store != nil {
+			s.apps = store
+		}
+		s.gw = NewAppsGateway(cfg.ComposioKey, cfg.AppsAddr)
+	}
+	return s
+}
+
+// AppsRoutes is the guest-facing broker, or nil when no provider is configured.
+//
+// Its own listener and its own handler tree, deliberately: it is the one surface
+// an untrusted guest can reach, and mounting it on the mux that serves /v1 and
+// the operator page would put it one routing mistake away from both.
+func (s *Server) AppsRoutes() http.Handler {
+	if s.gw == nil {
+		return nil
+	}
+	return s.gw.Routes()
 }
 
 // Routes builds the handler, wrapped in stdlib CSRF protection.

@@ -14,7 +14,32 @@ import (
 // ever sees it.
 const snapshotToolName = "take_snapshot"
 
-// mcpTool is one chrome-devtools-mcp tool as the model sees it.
+// mcpOwner is what a wrapped tool needs from whatever holds its server: a live
+// session, and somewhere to report one that has died.
+//
+// An interface rather than *browserServer because two servers now ride this
+// adapter -- the local Chrome one and the remote connected-apps one -- and the
+// retry logic below is the same for both.
+type mcpOwner interface {
+	session(context.Context) (*mcpsdk.ClientSession, error)
+	drop(*mcpsdk.ClientSession)
+	// redact takes anything secret about the server out of an error before it
+	// becomes a tool result the model reads and the event log keeps.
+	redact(error) error
+}
+
+// beforeHook runs on the tool name and its parsed arguments before a call is
+// made, and refuses it by returning an error. It is how the approval gate
+// reaches a tool whose real identity is an argument rather than its name.
+type beforeHook func(ctx context.Context, name string, args map[string]any) error
+
+// The names a wrapped tool calls its server in an error the model reads.
+const (
+	browserNoun = "the browser"
+	appsNoun    = "the connected app"
+)
+
+// mcpTool is one MCP tool as the model sees it.
 //
 // Deliberately not mcp.NewBetaTool. That helper binds a tool to one session and
 // drops most of the schema, and both are bugs we would otherwise ship: Tools()
@@ -25,7 +50,11 @@ type mcpTool struct {
 	name   string
 	desc   string
 	schema anthropic.BetaToolInputSchemaParam
-	srv    *browserServer
+	srv    mcpOwner
+	// noun names the server in an error the model reads, so "the browser is not
+	// answering" does not turn up when a connected app is what failed.
+	noun   string
+	before beforeHook
 	deps   toolDeps
 }
 
@@ -45,6 +74,13 @@ func (t *mcpTool) Execute(ctx context.Context,
 	var args map[string]any
 	if len(input) > 0 && json.Unmarshal(input, &args) != nil {
 		return textBlocks("could not read the arguments for " + t.name), nil
+	}
+	// Before the call and after the parse: the hook decides on the ARGUMENTS,
+	// which is where a meta-tool keeps the identity of what it is about to do.
+	if t.before != nil {
+		if err := t.before(ctx, t.name, args); err != nil {
+			return textBlocks(err.Error()), nil
+		}
 	}
 	res, err := t.call(ctx, args)
 	if err != nil {
@@ -66,7 +102,7 @@ func (t *mcpTool) Execute(ctx context.Context,
 func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallToolResult, error) {
 	sess, err := t.srv.session(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the browser is not answering: %w", err)
+		return nil, fmt.Errorf("%s is not answering: %w", t.noun, err)
 	}
 	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.name, Arguments: args})
 	if err == nil {
@@ -80,12 +116,12 @@ func (t *mcpTool) call(ctx context.Context, args map[string]any) (*mcpsdk.CallTo
 func (t *mcpTool) retry(ctx context.Context, args map[string]any) (*mcpsdk.CallToolResult, error) {
 	sess, err := t.srv.session(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the browser stopped answering: %w", err)
+		return nil, fmt.Errorf("%s stopped answering: %w", t.noun, err)
 	}
 	res, err := sess.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.name, Arguments: args})
 	if err != nil {
 		t.srv.drop(sess)
-		return nil, fmt.Errorf("the browser stopped answering: %w", err)
+		return nil, fmt.Errorf("%s stopped answering: %w", t.noun, t.srv.redact(err))
 	}
 	return res, nil
 }
@@ -96,7 +132,7 @@ func (t *mcpTool) blocks(res *mcpsdk.CallToolResult) []anthropic.BetaToolResultB
 	for _, c := range res.Content {
 		block, err := anthropicmcp.ToBlock(c)
 		if err != nil {
-			return textBlocks("the browser sent something I cannot pass on: " + err.Error())
+			return textBlocks(t.noun + " sent something I cannot pass on: " + err.Error())
 		}
 		out = append(out, block)
 	}
@@ -135,12 +171,15 @@ func digestSnapshotBlocks(blocks []anthropic.BetaToolResultBlockParamContentUnio
 	}
 }
 
-// wrapAll turns the server's tools into the surface the model is offered.
-func wrapAll(tools []*mcpsdk.Tool, srv *browserServer, d toolDeps) []anthropic.BetaTool {
+// wrapAll turns a server's tools into the surface the model is offered. noun
+// names it in errors, and before -- which may be nil -- gates each call.
+func wrapAll(tools []*mcpsdk.Tool, srv mcpOwner, noun string,
+	before beforeHook, d toolDeps) []anthropic.BetaTool {
 	out := make([]anthropic.BetaTool, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, &mcpTool{
-			name: t.Name, desc: t.Description, schema: schemaOf(t), srv: srv, deps: d,
+			name: t.Name, desc: t.Description, schema: schemaOf(t),
+			srv: srv, noun: noun, before: before, deps: d,
 		})
 	}
 	return out
@@ -170,7 +209,7 @@ func resultText(res *mcpsdk.CallToolResult) string {
 		}
 	}
 	if out == "" {
-		return "the browser tool failed and said nothing about why"
+		return "the tool failed and said nothing about why"
 	}
 	return out
 }

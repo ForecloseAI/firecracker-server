@@ -91,7 +91,7 @@ func (s *Server) streamV1(w http.ResponseWriter, r *http.Request, user string) {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	cl := agent.New(view.GuestIP, guestPort)
+	cl := s.clientFor(r.Context(), user, view)
 	rc := http.NewResponseController(w)
 	rc.SetWriteDeadline(time.Time{}) // an absolute deadline would cut the stream
 	writeSSEHeaders(w)

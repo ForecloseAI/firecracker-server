@@ -9,10 +9,14 @@ import (
 )
 
 // askInput is the ask_human tool's argument.
+//
+// Note the descriptions carry no commas. The jsonschema tag separates options on
+// one, so a comma silently truncates what the model is told the field means.
 type askInput struct {
 	Question string   `json:"question" jsonschema:"required,description=One short sentence for the person to answer"`
-	Kind     string   `json:"kind" jsonschema:"description=One of text confirm choice or handoff - defaults to text"`
+	Kind     string   `json:"kind" jsonschema:"description=One of text confirm choice handoff or connect - defaults to text"`
 	Options  []string `json:"options" jsonschema:"description=Labels to choose between - for kind choice"`
+	URL      string   `json:"url" jsonschema:"description=Where the person signs in - required for kind connect"`
 }
 
 // Tools assembles the whole tool surface for one agent, in one place so the
@@ -48,6 +52,10 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
+	apps, err := appsTools(d)
+	if err != nil {
+		return nil, err
+	}
 	// One outbox shared by both send tools, so their numbers cannot collide. It
 	// resumes from disk, which is what lets a client group by sequence across a
 	// restart.
@@ -55,7 +63,7 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	all := slices.Concat(files, rest, team, browser, sched, send)
+	all := slices.Concat(files, rest, team, browser, sched, send, apps)
 	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
 
@@ -103,6 +111,12 @@ func permitted(allow []string, browser bool) []string {
 		return allow // an empty list already means everything
 	}
 	out := append(append([]string(nil), allow...), alwaysAllowed...)
+	// Connected apps ride no profile switch at all. The person connected the app
+	// to their machine, not to one agent, and a profile written before any of
+	// this existed cannot name tools that did not exist yet -- so gating on a
+	// tools: entry would exclude every shipped profile. Whether the surface is
+	// there is decided by whether the machine has a session.
+	out = append(out, appsMetaTools...)
 	if !browser {
 		return out
 	}
@@ -131,6 +145,10 @@ type toolDeps struct {
 	chrome *browserServer
 	snaps  *snapshotStore
 	log    *Log
+	// apps is the machine's connected-apps session, or nil when it has none.
+	// Every agent shares it, because the session belongs to the person rather
+	// than to any one agent.
+	apps *appsServer
 }
 
 // keepAllowed narrows the surface to what a profile declares. An empty list
@@ -162,9 +180,12 @@ func askTool(gate *Gate) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[askInput](
 		"ask_human",
 		"Ask the person a question and wait for their answer. Use kind 'handoff' when a password or "+
-			"sign-in is needed: it hands them the machine so they type it themselves. Never ask for a secret as text.",
+			"sign-in is needed: it hands them the machine so they type it themselves. Use kind 'connect' "+
+			"with a url when an app they own needs connecting: it gives them a button to tap and waits "+
+			"until they come back. Never ask for a secret as text.",
 		func(ctx context.Context, in askInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			answer, err := gate.Ask(ctx, in.Question, UI{Kind: orDefault(in.Kind, "text"), Options: in.Options})
+			answer, err := gate.Ask(ctx, in.Question,
+				UI{Kind: orDefault(in.Kind, "text"), Options: in.Options, URL: in.URL})
 			if err != nil {
 				return toolText(err.Error()), nil
 			}

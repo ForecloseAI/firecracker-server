@@ -102,7 +102,8 @@ func (g *Gate) Check(ctx context.Context, tool, preview string, input any) error
 func (g *Gate) Ask(ctx context.Context, question string, ui UI) (string, error) {
 	timeout := questionTimeout
 	ev := Event{Type: "question", Question: question, Kind: ui.Kind, UI: &ui}
-	if ui.Kind == "handoff" {
+	switch ui.Kind {
+	case "handoff":
 		timeout = approvalTimeout // they have to go and do something
 		// A handoff asks the person to take over this machine's screen. Showing
 		// them what is on it is the difference between "sign in to something" and
@@ -110,6 +111,12 @@ func (g *Gate) Ask(ctx context.Context, question string, ui UI) (string, error) 
 		// land -- taken now, because by the time they open it the agent may have
 		// moved on.
 		ev.Shot = captureScreen(g.dir, g.shotName())
+	case "connect":
+		// The same patience as a handoff and for the same reason: they have gone
+		// off to sign in to something. No screenshot, because where they are going
+		// is their own browser rather than this machine's screen -- and a picture
+		// of an idle desktop beside "Connect your Gmail" only confuses it.
+		timeout = approvalTimeout
 	}
 	d, err := g.await(ctx, timeout, "", ev)
 	if err != nil {

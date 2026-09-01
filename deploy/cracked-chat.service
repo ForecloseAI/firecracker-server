@@ -10,17 +10,28 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 
-# Both listeners bind loopback: only Caddy can reach them, so a security-group
-# mistake cannot expose the app or the VNC gateway.
+# The first two listeners bind loopback: only Caddy can reach them, so a
+# security-group mistake cannot expose the app or the VNC gateway.
 Environment=CHAT_ADDR=127.0.0.1:8090
 Environment=CHAT_VNC_ADDR=127.0.0.1:8091
+# The third cannot: it is the connected-apps broker, and guests reach it on their
+# own tap address, which changes with every VM. It opens only when COMPOSIO_API_KEY
+# is set, host-setup.sh allows exactly this port from tap+, and every request must
+# carry a ticket pinned to the guest that was issued it.
+Environment=CHAT_APPS_ADDR=0.0.0.0:8092
 Environment=CHAT_ORIGIN=https://chat.usetypeo.com
 Environment=CHAT_VNC_ORIGIN=https://vnc.usetypeo.com
 Environment=CRACKED_URL=http://127.0.0.1:8080
 # The Supabase project whose public keys verify every /v1 access token. Not a
 # secret -- it is the same URL the app ships with -- so it lives here.
 Environment=SUPABASE_URL=https://vpjsckvgqodzsbxuceau.supabase.co
-# CRACKED_TOKEN via `systemctl edit cracked-chat`, never in this file.
+# The publishable key is what identifies the project to PostgREST. Not a secret:
+# it is the same key the app ships with, and row-level security plus the caller's
+# own token are what decide which rows a request may see.
+Environment=SUPABASE_PUBLISHABLE_KEY=sb_publishable_jhf9kUEdbiDVCr06NO7PTg_rNajGeut
+# CRACKED_TOKEN and COMPOSIO_API_KEY via `systemctl edit cracked-chat`, never in
+# this file. COMPOSIO_API_KEY is authority over every user's connected accounts;
+# it never leaves this process and is added to a request only on its way upstream.
 
 ExecStart=/usr/local/bin/cracked-chat
 Restart=on-failure

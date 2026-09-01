@@ -25,14 +25,20 @@ func fakeServer(t *testing.T, pageSize int, tools ...*mcpsdk.Tool) *browserServe
 	}
 	b := newBrowserServer("http://127.0.0.1:9222", "")
 	b.dial = func(ctx context.Context) (*mcpsdk.ClientSession, error) {
-		client, server := mcpsdk.NewInMemoryTransports()
-		if _, err := srv.Connect(ctx, server, nil); err != nil {
-			return nil, err
-		}
-		return mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil).
-			Connect(ctx, client, nil)
+		return connectInMemory(ctx, srv)
 	}
 	return b
+}
+
+// connectInMemory joins a client to an in-process MCP server, so a test drives
+// the same handshake, tools/list and tools/call the guest will.
+func connectInMemory(ctx context.Context, srv *mcpsdk.Server) (*mcpsdk.ClientSession, error) {
+	client, server := mcpsdk.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, server, nil); err != nil {
+		return nil, err
+	}
+	return mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil).
+		Connect(ctx, client, nil)
 }
 
 // cannedResult answers a tool call with whatever the fixture stored in the

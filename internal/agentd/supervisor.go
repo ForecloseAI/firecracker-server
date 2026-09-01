@@ -53,6 +53,11 @@ type Supervisor struct {
 	// connection to the same Chrome.
 	browser *browserServer
 
+	// The machine's connected-apps session, pushed here by the host. One per
+	// daemon, for the same reason the browser is: it is scoped to the person,
+	// and every agent on this machine works for that same person.
+	apps *appsServer
+
 	// What this machine has spent, across every agent. Owned here rather than
 	// per-agent because the question the host asks is "what did this VM cost",
 	// and an evicted agent must not take its share of the answer with it.
@@ -82,6 +87,10 @@ var ChromeURL = "http://127.0.0.1:9222"
 // never fork node.
 func (s *Supervisor) Browser() *browserServer { return s.browser }
 
+// Apps is the machine's connected-apps session. Never nil: a machine the host
+// has pushed nothing to holds one with no URL, which advertises no tools.
+func (s *Supervisor) Apps() *appsServer { return s.apps }
+
 // NewSupervisor loads the roster and ensures this machine has a boss.
 func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	catalog *Catalog, model string, maxLive int) (*Supervisor, error) {
@@ -100,6 +109,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
+		apps:  newAppsServer(ReadApps(stateDir).SessionURL),
 		meter: OpenMeter(stateDir), hub: NewInteractions(), schedules: schedules,
 		sweepDone: make(chan struct{}),
 	}

@@ -37,7 +37,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	serve(cfg, chat.NewServer(cfg, control, caps, auth).Routes(), gw.Routes())
+	srv := chat.NewServer(cfg, control, caps, auth)
+	serve(cfg, srv.Routes(), gw.Routes())
+	// The one listener a guest can reach. Started only when a provider is
+	// configured, so a deployment without one opens no guest-facing port at all.
+	if apps := srv.AppsRoutes(); apps != nil {
+		go listen(cfg.AppsAddr, apps, "apps")
+	}
 	return waitForSignal()
 }
 
