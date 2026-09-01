@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -290,6 +291,11 @@ func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
 // nothing downstream parses a tool name.
 const readOnlyTag = "readOnlyHint"
 
+// readOnlyPage is asked for in one page. Outlook is the largest of the featured
+// six at 117 read-only tools, so this is four times the biggest real answer --
+// deliberately, because ReadOnly refuses a full page rather than paging.
+const readOnlyPage = 500
+
 // toolsResp is one page of GET /tools. Tags come back so the filter can be
 // checked rather than trusted -- see ReadOnly.
 type toolsResp struct {
@@ -312,10 +318,19 @@ type toolsResp struct {
 func (c *Client) ReadOnly(ctx context.Context, slug string) ([]string, error) {
 	var out toolsResp
 	q := "/tools?" + url.Values{
-		"toolkit_slug": {slug}, "tags": {readOnlyTag}, "limit": {"500"},
+		"toolkit_slug": {slug}, "tags": {readOnlyTag}, "limit": {strconv.Itoa(readOnlyPage)},
 	}.Encode()
 	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
 		return nil, err
+	}
+	if len(out.Items) >= readOnlyPage {
+		// Refused rather than paged. A full page means there may be more, and a
+		// silently truncated set is one whose missing tools look like writes --
+		// the caller would cache it for an hour and ask about ordinary reads. The
+		// featured six top out at 117, so this firing means the catalogue grew
+		// past what this call was designed for and wants paging, not a bigger
+		// number.
+		return nil, fmt.Errorf("composio: %s has %d or more read-only tools; this needs paging", slug, readOnlyPage)
 	}
 	got := make([]string, 0, len(out.Items))
 	for _, it := range out.Items {

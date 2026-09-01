@@ -40,10 +40,9 @@ func TestTheReadOnlySetIsFetchedOncePerTTL(t *testing.T) {
 // the partial answer is NOT cached, because an hour of asking about ordinary
 // reads is how a gate teaches people to stop reading it.
 func TestAnAppThatDidNotAnswerIsAbsentAndNotCached(t *testing.T) {
-	var down atomic.Bool
-	down.Store(true)
+	down := true
 	a, calls := stubReads(func(slug string) ([]string, error) {
-		if down.Load() && slug == "slack" {
+		if down && slug == "slack" {
 			return nil, errors.New("provider had a bad minute")
 		}
 		return []string{slug + "_GET"}, nil
@@ -57,7 +56,7 @@ func TestAnAppThatDidNotAnswerIsAbsentAndNotCached(t *testing.T) {
 		t.Errorf("got %d, want every app but the one that failed", len(got))
 	}
 
-	down.Store(false)
+	down = false
 	calls.Store(0)
 	if got = a.slugs(context.Background()); calls.Load() == 0 {
 		t.Fatal("a partial answer was cached for an hour, so slack's reads keep asking")

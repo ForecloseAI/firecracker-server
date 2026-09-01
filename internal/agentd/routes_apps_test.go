@@ -2,7 +2,9 @@ package agentd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 
 	"cracked/internal/agentapi"
@@ -117,9 +119,9 @@ func TestARemintedTicketForTheSameSessionIsNotASurfaceChange(t *testing.T) {
 		{"the surface is taken away",
 			agentapi.Apps{SessionURL: a, SessionID: "s1"},
 			agentapi.Apps{}, true},
-		// The read-only set is refreshed hourly and pushed on every restart. If
-		// that counted as a new surface it would evict every idle agent on the
-		// fleet whenever the provider shipped a tool -- the same storm, with a
+		// The set moves when the provider re-annotates a tool. If that counted as
+		// a new surface it would evict every idle agent on the machine whenever
+		// the host restarted with a fresher set -- the re-ticketing storm with a
 		// new cause. Nothing an agent composed at startup depends on it.
 		{"only the read-only set moved",
 			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}},
@@ -154,21 +156,41 @@ func TestTheReadOnlySetSurvivesARestart(t *testing.T) {
 	if err := WriteApps(dir, want); err != nil {
 		t.Fatal(err)
 	}
-	got := ReadApps(dir)
-	if len(got.ReadOnly) != 2 || got.ReadOnly[0] != "GMAIL_FETCH_EMAILS" {
+	if got := ReadApps(dir); !slices.Equal(got.ReadOnly, want.ReadOnly) {
 		t.Errorf("read back %+v", got)
 	}
 }
 
-// An empty set must round-trip as empty rather than as absent-and-therefore-
-// anything. omitempty drops it from the JSON, so this pins that reading a file
-// without the field gives nothing rather than a surprise.
-func TestNoReadOnlySetReadsBackAsNone(t *testing.T) {
-	dir := t.TempDir()
-	if err := WriteApps(dir, agentapi.Apps{SessionURL: "http://x/apps/a", SessionID: "s1"}); err != nil {
+// THE test for the push on this side. appsBodyCap was 8 KiB "because it carries
+// two short strings"; the real set is ~400 slugs and 13 KB, so adding it made
+// every push 400 -- and handlePutApps answers before WriteApps, so it took the
+// SESSION down with it rather than just the set. A machine ended up with no
+// connected apps at all, on the healthy path, self-repeating on the cooldown.
+func TestARealSizedReadOnlySetFitsThePush(t *testing.T) {
+	s, _ := newTestServer(t)
+	// Built from the longest real slug in the catalogue so the fixture cannot
+	// flatter itself, and floor-checked below so it cannot shrink under the cap
+	// it exists to test.
+	set := make([]string, 400)
+	for i := range set {
+		set[i] = fmt.Sprintf("MICROSOFT_TEAMS_LIST_COMMUNICATIONS_CALLS_OPERATIONS_%03d", i)
+	}
+	body, err := json.Marshal(agentapi.Apps{SessionID: "sess_abc", ReadOnly: set,
+		SessionURL: "http://172.16.0.1:8092/apps/0123456789abcdef0123456789abcdef"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadApps(dir); len(got.ReadOnly) != 0 {
-		t.Errorf("invented %v", got.ReadOnly)
+	if len(body) < 8<<10 {
+		t.Fatalf("fixture is %d bytes, too small to have caught the old cap", len(body))
+	}
+	if rec := do(t, s, http.MethodPut, "/apps", string(body)); rec.Code != http.StatusNoContent {
+		t.Fatalf("a real-sized push answered %d: %s", rec.Code, rec.Body)
+	}
+	var got agentapi.Apps
+	if err := json.Unmarshal(do(t, s, http.MethodGet, "/apps", "").Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.ReadOnly, set) || got.SessionID != "sess_abc" {
+		t.Errorf("read back %d slugs, session %q", len(got.ReadOnly), got.SessionID)
 	}
 }

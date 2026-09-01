@@ -351,3 +351,22 @@ func TestAToolWithNoTagsIsNotReadOnly(t *testing.T) {
 		t.Errorf("got %v, %v -- an unannotated tool was treated as safe", got, err)
 	}
 }
+
+// A full page is refused rather than quietly kept. A truncated set is one whose
+// missing tools look like writes, and the caller caches it for an hour -- so it
+// would ask about ordinary reads all that time with nothing saying why.
+func TestAFullPageOfToolsIsRefusedRatherThanTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[` + strings.Repeat(
+			`{"slug":"X","tags":["readOnlyHint"]},`, readOnlyPage-1) +
+			`{"slug":"X","tags":["readOnlyHint"]}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).ReadOnly(context.Background(), "outlook")
+	if err == nil {
+		t.Fatalf("kept %d slugs off a full page, so the rest silently look like writes", len(got))
+	}
+	if got != nil {
+		t.Errorf("returned %d slugs alongside the refusal", len(got))
+	}
+}

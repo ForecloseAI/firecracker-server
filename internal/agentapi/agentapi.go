@@ -72,9 +72,13 @@ type Apps struct {
 	SessionURL string `json:"session_url"`
 	SessionID  string `json:"session_id,omitempty"`
 	// ReadOnly is the actions the provider annotates as only reading, pushed
-	// rather than compiled in so a tool the provider ships today is understood
-	// within the hour instead of at the next rootfs rebuild. What is absent from
-	// it asks a person, so an empty set is noisy and never permissive.
+	// rather than compiled in: a tool the provider ships reaches a machine on its
+	// next push, instead of waiting for a rootfs rebuild and a recreated VM. What
+	// is absent from it asks a person, so an empty set is noisy, never permissive.
+	//
+	// A machine is pushed once per host process -- claimApps latches it -- so this
+	// is as old as that machine's last boot or the last host restart. The hourly
+	// cache behind it only decides what the NEXT machine to boot is told.
 	//
 	// Pushed only. AppsStore persists the session and not this: it is the same
 	// answer for everybody, it is the provider's to change, and a row that

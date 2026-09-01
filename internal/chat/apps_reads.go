@@ -2,9 +2,9 @@ package chat
 
 import (
 	"context"
+	"log"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"cracked/internal/composio"
@@ -18,11 +18,11 @@ const appReadsTTL = time.Hour
 // appReads is which of the featured apps' actions only read, as the PROVIDER
 // annotates them. Nothing here is a list this project maintains.
 //
-// Kept separate from appCatalog rather than folded into it, though the shape is
-// the same. Their failures are not worth the same: a blurb that will not load
-// costs an app a nice description, and this failing to load costs a person a
-// prompt on every read they make. Letting either invalidate the other would mean
-// paying one of those costs for the other's bad minute.
+// A separate cache entry from appCatalog, sharing its fan-out. Separate because
+// the failures are not worth the same -- a blurb that will not load costs an app
+// a nice description, this costs a person a prompt on every read they make -- so
+// neither may invalidate the other's deadline. That is an argument about the two
+// ENTRIES, not the mechanism, which is why fanOut is shared.
 type appReads struct {
 	// fetch is a field so a test can answer without a provider.
 	fetch func(context.Context, string) ([]string, error)
@@ -39,18 +39,21 @@ func newAppReads(c *composio.Client) *appReads {
 
 // slugs is every action the featured apps expose that only reads.
 //
-// Never fails, and an incomplete answer is never cached. What is missing from
-// this set asks a person, so a bad minute at the provider costs prompts rather
-// than silence -- and caching a partial answer would spend an hour asking about
-// reads that are perfectly safe.
+// Never fails, and an incomplete answer is never cached: caching one would
+// spend an hour asking about reads that are perfectly safe.
 func (a *appReads) slugs(ctx context.Context) []string {
 	if held, ok := a.fresh(); ok {
 		return held
 	}
 	got, whole := a.fetchAll(ctx)
-	if whole {
-		a.keep(got)
+	if !whole {
+		// Said out loud because the cost lands somewhere else entirely: the
+		// machine pushed this set keeps it until the host restarts, and every
+		// read outside it asks a person. Silence here reads as a chatty gate.
+		log.Printf("chat: read-only set is incomplete, %d actions; some reads will ask", len(got))
+		return got
 	}
+	a.keep(got)
 	return got
 }
 
@@ -69,24 +72,9 @@ func (a *appReads) keep(held []string) {
 	a.held, a.expires = held, time.Now().Add(appReadsTTL)
 }
 
-// fetchAll reads every featured app at once, reporting whether all of them
-// answered. An app that did not answer contributes nothing, so its tools ask.
+// fetchAll reads every featured app. One that did not answer contributes
+// nothing, so its tools fall outside the set and ask.
 func (a *appReads) fetchAll(ctx context.Context) ([]string, bool) {
-	out := make([][]string, len(featured))
-	var missed atomic.Bool
-	var wg sync.WaitGroup
-	for i, slug := range featured {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			got, err := a.fetch(ctx, slug)
-			if err != nil {
-				missed.Store(true)
-				return
-			}
-			out[i] = got
-		}()
-	}
-	wg.Wait()
-	return slices.Concat(out...), !missed.Load()
+	out, whole := fanOut(ctx, a.fetch, func(string) []string { return nil })
+	return slices.Concat(out...), whole
 }
