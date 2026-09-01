@@ -110,7 +110,11 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, user stri
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	s.forgetMachine(r.Context(), user, machine)
+	if err := s.forgetMachine(r.Context(), user, machine); err != nil {
+		log.Printf("chat: erased %s but could not forget its app session: %v", machine, err)
+		fail(w, http.StatusBadGateway, "your machine was erased, but account cleanup is incomplete; please retry")
+		return
+	}
 	log.Printf("chat: erased %s at the account holder's request", machine)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -177,21 +181,25 @@ func (s *Server) disconnectAll(ctx context.Context, held []composio.Connection) 
 // it, and anything left behind would attach to the new machine as if it were the
 // old one.
 //
-// Best effort from here on, deliberately: the machine is already gone, and
-// refusing now would tell someone their data survived when it did not.
-func (s *Server) forgetMachine(ctx context.Context, user, machine string) {
+// The persisted session pointer is fallible account data, so its deletion is
+// reported to the caller. In-memory cleanup follows only after that succeeds.
+func (s *Server) forgetMachine(ctx context.Context, user, machine string) error {
+	// Do the only fallible cleanup first. Returning an error lets the client
+	// retry the idempotent purge instead of being told all account data is gone
+	// while this row survives and would be reused at the next sign-in.
+	if s.apps != nil {
+		if err := s.apps.Delete(ctx, user); err != nil {
+			return err
+		}
+	}
 	if b := s.dropBridge(machine); b != nil {
 		b.Close()
 	}
 	if s.caps != nil {
 		s.caps.Revoke(machine)
 	}
-	if s.apps != nil {
-		if err := s.apps.Delete(ctx, user); err != nil {
-			log.Printf("chat: could not forget the app session for %s: %v", machine, err)
-		}
-	}
 	s.forgetApps(machine)
+	return nil
 }
 
 // fail writes an error status. The client reads only the code, never the body,

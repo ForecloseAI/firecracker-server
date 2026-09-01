@@ -504,6 +504,12 @@ PostgREST with the **caller's own access token** plus the publishable key, so
 row-level security — not a `WHERE` clause somebody remembered to write — is what
 isolates one person from another. This service still holds no Supabase secret.
 
+Before enabling the feature, run `deploy/supabase.sql` in the Supabase SQL
+editor. It creates the `app_sessions` resource, enables row-level security, and
+grants authenticated callers access only through the per-user policy. Apply it
+before setting `COMPOSIO_API_KEY`; otherwise session provisioning remains
+unavailable.
+
 ### Nothing is gated yet
 
 **Connected-app calls are not filtered.** Unlike `Bash`, which stops at the

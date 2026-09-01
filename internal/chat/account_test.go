@@ -1,14 +1,25 @@
 package chat
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
+	"cracked/internal/agentapi"
 	"cracked/internal/composio"
 )
+
+type failingAppsStore struct{ deleteErr error }
+
+func (f *failingAppsStore) Get(context.Context, string) (agentapi.Apps, error) {
+	return agentapi.Apps{}, nil
+}
+func (f *failingAppsStore) Put(context.Context, string, agentapi.Apps) error { return nil }
+func (f *failingAppsStore) Delete(context.Context, string) error             { return f.deleteErr }
 
 // fakeControl records what the gateway asked the control plane to do, and can be
 // told to refuse. The shared stubControl answers every path with a VM view, so a
@@ -108,6 +119,24 @@ func TestDeleteAccountReportsAFailure(t *testing.T) {
 	fc.fail = true
 	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", w.Code)
+	}
+}
+
+// A surviving app_sessions row is account data and would be silently reused on
+// the next sign-in. The response must therefore fail so the idempotent deletion
+// can be retried once PostgREST is healthy.
+func TestDeleteAccountReportsAppSessionCleanupFailure(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	s.apps = &failingAppsStore{deleteErr: errors.New("postgrest unavailable")}
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", w.Code, w.Body)
+	}
+	fc.mu.Lock()
+	deletes := len(fc.deleted)
+	fc.mu.Unlock()
+	if deletes != 1 {
+		t.Errorf("machine deletion attempts = %d, want 1", deletes)
 	}
 }
 

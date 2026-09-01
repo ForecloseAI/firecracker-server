@@ -8,6 +8,34 @@ import (
 	"testing"
 )
 
+// Stored rows are caller-writable by design, because RLS lets each person own
+// their row. The broker must not add the project-wide key until the destination
+// has been pinned to the provider's exact origin.
+func TestOnlyComposioCanReceiveTheProjectKey(t *testing.T) {
+	valid := []string{
+		"https://backend.composio.dev/mcp/sess_1",
+		"https://backend.composio.dev/api/mcp?session=sess_1",
+	}
+	for _, raw := range valid {
+		if err := validateComposioSessionURL(raw); err != nil {
+			t.Errorf("valid URL %q rejected: %v", raw, err)
+		}
+	}
+
+	invalid := []string{
+		"https://attacker.example/mcp",
+		"http://backend.composio.dev/mcp",
+		"https://backend.composio.dev.attacker.example/mcp",
+		"https://backend.composio.dev:443/mcp",
+		"https://user@backend.composio.dev/mcp",
+	}
+	for _, raw := range invalid {
+		if err := validateComposioSessionURL(raw); err == nil {
+			t.Errorf("untrusted URL %q was accepted", raw)
+		}
+	}
+}
+
 // The app opens by fetching every agent's thread in parallel and connecting the
 // stream, so first sign-in is exactly when a dozen requests arrive at once. A
 // check-then-mark would have all of them pass the check and mint a dozen

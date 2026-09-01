@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net/url"
 	"time"
 
 	"cracked/internal/agent"
@@ -59,6 +61,9 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	if err != nil {
 		return err
 	}
+	if err := validateComposioSessionURL(held.SessionURL); err != nil {
+		return err
+	}
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
@@ -68,6 +73,17 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		return err
 	}
 	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID})
+}
+
+// validateComposioSessionURL is the boundary between caller-writable storage
+// and the broker that adds the project-wide API key. A user can edit their own
+// PostgREST row, so only the provider's exact HTTPS origin may receive that key.
+func validateComposioSessionURL(raw string) error {
+	target, err := url.Parse(raw)
+	if err != nil || target.Scheme != "https" || target.Host != "backend.composio.dev" || target.User != nil {
+		return fmt.Errorf("connected apps: refusing non-Composio session URL")
+	}
+	return nil
 }
 
 // sessionFor is this person's session, minted and recorded on first use.
