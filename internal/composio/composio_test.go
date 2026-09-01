@@ -186,3 +186,123 @@ func TestDisconnectToleratesAnEmptyBody(t *testing.T) {
 		t.Errorf("sent %s %s", gotMethod, gotPath)
 	}
 }
+
+// A toolkit's copy comes from the provider, so nothing about an app is written
+// down here to go stale.
+func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"slug":"gmail","name":"Gmail","meta":{
+			"logo":"https://logos.composio.dev/api/gmail","description":"Google's email service"}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Toolkit(context.Background(), "gmail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/toolkits/gmail" {
+		t.Errorf("asked for %q", gotPath)
+	}
+	want := Toolkit{Slug: "gmail", Name: "Gmail",
+		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service"}
+	if got != want {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// THE test for this pair. toolkit_slug is SINGULAR here, and the plural form is
+// not rejected -- it is ignored, answering with every config in the project. A
+// caller that trusted the first row back would mint a link against whichever app
+// happened to sort first, and connect the wrong one to somebody's account.
+//
+// It is the reverse of connected_accounts, where the plural user_ids is live and
+// the singular is ignored. Neither is guessable, so both are pinned here.
+func TestAuthConfigLooksUpByTheSingularSlug(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth_configs" && r.Method == http.MethodGet:
+			gotQuery = r.URL.RawQuery
+			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"}}]}`))
+		default:
+			json.NewEncoder(w).Encode(map[string]any{
+				"redirect_url": "https://connect.composio.dev/link/lk_1",
+				"expires_at":   "2099-01-01T00:00:00Z"})
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := New("k", srv.URL).Link(context.Background(), "u", "gmail", "https://back"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "toolkit_slug=gmail") {
+		t.Errorf("query was %q, which must carry the singular toolkit_slug", gotQuery)
+	}
+	if strings.Contains(gotQuery, "toolkit_slugs") {
+		t.Errorf("query %q uses the plural, which the provider ignores", gotQuery)
+	}
+}
+
+// A config the lookup did not find is created, because the provider will not
+// infer one from the toolkit and the link call refuses to run without an id.
+func TestAuthConfigIsCreatedWhenTheAppHasNoneYet(t *testing.T) {
+	var created string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth_configs" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"items":[]}`)) // nobody has connected this app yet
+		case r.URL.Path == "/auth_configs" && r.Method == http.MethodPost:
+			var body struct {
+				Toolkit struct {
+					Slug string `json:"slug"`
+				} `json:"toolkit"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			created = body.Toolkit.Slug
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"auth_config":{"id":"ac_new"}}`))
+		default:
+			var body linkReq
+			json.NewDecoder(r.Body).Decode(&body)
+			if body.AuthConfigID != "ac_new" {
+				t.Errorf("the link used auth_config_id %q", body.AuthConfigID)
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"redirect_url": "https://connect.composio.dev/link/lk_2",
+				"expires_at":   "2099-01-01T00:00:00Z"})
+		}
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Link(context.Background(), "u", "asana", "https://back")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != "asana" {
+		t.Errorf("created a config for %q", created)
+	}
+	if got.URL != "https://connect.composio.dev/link/lk_2" {
+		t.Errorf("link url is %q", got.URL)
+	}
+	if got.ExpiresAt.IsZero() {
+		t.Error("the deadline was dropped, so nobody can tell a stale link from a fresh one")
+	}
+}
+
+// A link with no url is an error, not a link. Handing one to a screen would
+// render a button that goes nowhere.
+func TestALinkWithNoURLIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth_configs" && r.Method == http.MethodGet {
+			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"}}]}`))
+			return
+		}
+		w.Write([]byte(`{"expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+	if _, err := New("k", srv.URL).Link(context.Background(), "u", "gmail", ""); err == nil {
+		t.Fatal("a link with no url was accepted")
+	}
+}
