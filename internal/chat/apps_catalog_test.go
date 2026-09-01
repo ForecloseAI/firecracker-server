@@ -19,19 +19,32 @@ func kits(slugs ...string) []composio.Toolkit {
 	return out
 }
 
+// stubCatalog answers for any slug without a provider, counting the fetches.
+func stubCatalog() (*appCatalog, *atomic.Int64) {
+	var calls atomic.Int64
+	c := &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
+		calls.Add(1)
+		return composio.Toolkit{Slug: slug, Name: labelFor(slug), Logo: "https://l/" + slug}, nil
+	}}
+	return c, &calls
+}
+
 // THE test for the projection. A person may hold several connections for one
 // app -- an abandoned attempt beside a working account -- and taking the first
 // would report a connected Gmail as unconnected.
 func TestAnActiveConnectionWinsOverAnAbandonedOne(t *testing.T) {
+	// One on either side of the working one, so neither "take the first" nor
+	// "take the last" passes this by accident.
 	held := []composio.Connection{
 		{ID: "ca_1", Toolkit: "gmail", Status: "INITIATED"},
-		{ID: "ca_2", Toolkit: "gmail", Status: statusActive},
+		{ID: "ca_2", Toolkit: "gmail", Status: composio.StatusActive},
+		{ID: "ca_3", Toolkit: "gmail", Status: "EXPIRED"},
 	}
 	got := projectApps(kits("gmail"), held)
 	if len(got) != 1 {
 		t.Fatalf("got %d rows", len(got))
 	}
-	if !got[0].Connected || got[0].Status != statusActive {
+	if !got[0].Connected || got[0].Status != composio.StatusActive {
 		t.Errorf("row is %+v, want connected and ACTIVE", got[0])
 	}
 }
@@ -76,11 +89,7 @@ func TestTheProjectionIsNeverNull(t *testing.T) {
 // The copy is fetched once and then kept, so opening the screen does not cost
 // six round trips per person.
 func TestTheCatalogIsFetchedOncePerTTL(t *testing.T) {
-	var calls atomic.Int64
-	c := &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
-		calls.Add(1)
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug)}, nil
-	}}
+	c, calls := stubCatalog()
 	for range 3 {
 		if got := c.toolkits(context.Background()); len(got) != len(featured) {
 			t.Fatalf("got %d apps, want %d", len(got), len(featured))
@@ -129,11 +138,7 @@ func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 
 // A stale copy is refreshed rather than served forever.
 func TestAStaleCatalogIsRefetched(t *testing.T) {
-	var calls atomic.Int64
-	c := &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
-		calls.Add(1)
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug)}, nil
-	}}
+	c, calls := stubCatalog()
 	c.toolkits(context.Background())
 	c.mu.Lock()
 	c.expires = time.Now().Add(-time.Second)

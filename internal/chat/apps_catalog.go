@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cracked/internal/composio"
@@ -81,26 +82,22 @@ func (a *appCatalog) keep(held []composio.Toolkit) {
 // six round trips in series is a second they watch.
 func (a *appCatalog) fetchAll(ctx context.Context) ([]composio.Toolkit, bool) {
 	out := make([]composio.Toolkit, len(featured))
-	ok := make([]bool, len(featured))
+	var missed atomic.Bool
 	var wg sync.WaitGroup
 	for i, slug := range featured {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if got, err := a.fetch(ctx, slug); err == nil {
-				out[i], ok[i] = got, true
-				return
+			got, err := a.fetch(ctx, slug)
+			if err != nil {
+				missed.Store(true)
+				got = composio.Toolkit{Slug: slug, Name: labelFor(slug)}
 			}
-			out[i] = composio.Toolkit{Slug: slug, Name: labelFor(slug)}
+			out[i] = got
 		}()
 	}
 	wg.Wait()
-	for _, got := range ok {
-		if !got {
-			return out, false
-		}
-	}
-	return out, true
+	return out, !missed.Load()
 }
 
 // labelFor is the best name a slug alone can give, for an app whose metadata
@@ -114,9 +111,6 @@ func labelFor(slug string) string {
 	}
 	return strings.Join(words, " ")
 }
-
-// statusActive is the provider's word for a connection that works.
-const statusActive = "ACTIVE"
 
 // App is one row of the Apps screen.
 type App struct {
@@ -147,35 +141,34 @@ type App struct {
 func projectApps(toolkits []composio.Toolkit, held []composio.Connection) []App {
 	out := make([]App, 0, len(toolkits))
 	for _, kit := range toolkits {
-		app := App{
+		conn := connectionFor(held, kit.Slug)
+		out = append(out, App{
 			Slug: kit.Slug, Name: kit.Name, Description: kit.Description,
 			LogoURL: kit.Logo, Initial: initialOf(kit.Name), Hue: hueOf(kit.Slug),
-		}
-		if conn, ok := connectionFor(held, kit.Slug); ok {
-			app.Connected, app.Status = conn.Status == statusActive, conn.Status
-			app.ConnectionID = conn.ID
-		}
-		out = append(out, app)
+			Connected:    conn.Status == composio.StatusActive,
+			ConnectionID: conn.ID, Status: conn.Status,
+		})
 	}
 	return out
 }
 
-// connectionFor picks the connection that describes an app's state.
+// connectionFor picks the connection that describes an app's state, or the zero
+// one when this person holds none -- which projects to exactly the unconnected
+// row, so there is no second return value to check.
 //
 // A person may hold several for one app -- an abandoned attempt beside a working
 // account -- so an ACTIVE one wins over anything else. Taking the first would let
 // a stale INITIATED row report a connected app as unconnected.
-func connectionFor(held []composio.Connection, slug string) (composio.Connection, bool) {
+func connectionFor(held []composio.Connection, slug string) composio.Connection {
 	var found composio.Connection
-	var ok bool
 	for _, conn := range held {
 		if !strings.EqualFold(conn.Toolkit, slug) {
 			continue
 		}
-		if conn.Status == statusActive {
-			return conn, true
+		if conn.Status == composio.StatusActive {
+			return conn
 		}
-		found, ok = conn, true
+		found = conn
 	}
-	return found, ok
+	return found
 }

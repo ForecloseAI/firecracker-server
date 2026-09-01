@@ -181,6 +181,11 @@ type Connection struct {
 	Status string
 }
 
+// StatusActive is the provider's word for a connection that works. Written down
+// here rather than at the call site: this package is where the vocabulary is
+// documented, so it should be the one holding the constant too.
+const StatusActive = "ACTIVE"
+
 // connectionsResp is one page of GET /connected_accounts.
 type connectionsResp struct {
 	Items []struct {

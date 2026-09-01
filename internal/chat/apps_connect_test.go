@@ -1,65 +1,11 @@
 package chat
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
-
-	"cracked/internal/composio"
 )
-
-// provider stands the whole provider up: the connections a person holds, the
-// auth config a link needs, and a record of what was actually asked for.
-type provider struct {
-	mu      sync.Mutex
-	held    string // the connections body
-	deleted []string
-	linked  []string
-}
-
-// serve starts it and returns a gateway pointed at it.
-func (p *provider) serve(t *testing.T) (*Server, string) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		switch {
-		case r.Method == http.MethodDelete:
-			p.deleted = append(p.deleted, strings.TrimPrefix(r.URL.Path, "/connected_accounts/"))
-			w.WriteHeader(http.StatusNoContent)
-		case r.URL.Path == "/connected_accounts/link":
-			var body struct {
-				AuthConfigID string `json:"auth_config_id"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			p.linked = append(p.linked, body.AuthConfigID)
-			json.NewEncoder(w).Encode(map[string]any{
-				"redirect_url": "https://connect.composio.dev/link/lk_1",
-				"expires_at":   "2099-01-01T00:00:00Z"})
-		case r.URL.Path == "/auth_configs":
-			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"}}]}`))
-		default:
-			w.Write([]byte(p.held))
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	v, mint := testAuth(t)
-	s := &Server{
-		auth: v, bridges: map[string]*Bridge{}, appsClaims: map[string]appsClaim{},
-		cfg: Config{Origin: "https://chat.example.com", Token: "fleet-token",
-			ComposioCallback: "https://chat.example.com/v1/apps/connected"},
-		composio: composio.New("k", srv.URL),
-	}
-	s.catalog = &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug)}, nil
-	}}
-	return s, mint(testUserID, "tester@example.com")
-}
 
 // Connecting a featured app hands back a link and the deadline it dies on.
 func TestConnectMintsALinkWithItsDeadline(t *testing.T) {
