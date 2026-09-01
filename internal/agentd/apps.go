@@ -221,10 +221,15 @@ func (s *appsServer) listing(ctx context.Context) ([]*mcpsdk.Tool, string, error
 	if err == nil {
 		var listed []*mcpsdk.Tool
 		if listed, err = listAppTools(ctx, sess); err == nil {
-			return s.store(listed), url, nil
+			if s.store(url, listed) {
+				return listed, url, nil
+			}
+			return nil, url, errRepointed
 		}
 	}
-	s.noteFailure()
+	if !s.noteFailure(url) {
+		return nil, url, errRepointed
+	}
 	return nil, url, err
 }
 
@@ -239,20 +244,29 @@ func (s *appsServer) cached() ([]*mcpsdk.Tool, string, error) {
 	return s.listed, s.url, nil
 }
 
-// store keeps a freshly read tool list and clears the cooldown.
-func (s *appsServer) store(listed []*mcpsdk.Tool) []*mcpsdk.Tool {
+// store keeps a freshly read tool list and clears the cooldown, provided the
+// server still points at the session that produced it.
+func (s *appsServer) store(url string, listed []*mcpsdk.Tool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.url != url {
+		return false
+	}
 	s.listed, s.failedAt = listed, time.Time{}
-	return listed
+	return true
 }
 
 // noteFailure starts the cooldown, so the next agent built does not pay the
-// same timeout again straight away.
-func (s *appsServer) noteFailure() {
+// same timeout again straight away. A failure from a session that was replaced
+// in flight must not cool down its replacement.
+func (s *appsServer) noteFailure(url string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.url != url {
+		return false
+	}
 	s.failedAt = time.Now()
+	return true
 }
 
 // session hands back a live session, reconnecting if the last one died.

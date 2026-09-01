@@ -108,6 +108,29 @@ func TestSetURLToTheSameSessionKeepsIt(t *testing.T) {
 	}
 }
 
+// A tools/list can still be in flight after the host repoints the machine. Its
+// result belongs to the captured URL and must not repopulate the new session's
+// cache or put the new session into cooldown on failure.
+func TestARepointDiscardsStaleListingState(t *testing.T) {
+	const oldURL = "https://backend.composio.dev/mcp/old"
+	const newURL = "https://backend.composio.dev/mcp/new"
+	a := newAppsServer(oldURL)
+	a.SetURL(newURL)
+
+	if a.store(oldURL, []*mcpsdk.Tool{namedTool("STALE", "stale")}) {
+		t.Fatal("a listing from the old session was accepted")
+	}
+	if a.noteFailure(oldURL) {
+		t.Fatal("a failure from the old session was accepted")
+	}
+	if a.listed != nil {
+		t.Fatal("the old session repopulated the listing cache")
+	}
+	if !a.failedAt.IsZero() {
+		t.Fatal("the old session put the new session into cooldown")
+	}
+}
+
 // Connected-app calls are NOT gated today, deliberately: the permission layer
 // is still to be written and a name-shaped guess at it let writes through while
 // reading as enforcement. This test pins that state so the day somebody wires a
