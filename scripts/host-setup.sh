@@ -7,6 +7,9 @@ USER_NAME="${CRACKED_USER:-cracked}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"
 KERNEL_VERSION="${KERNEL_VERSION:-6.18}"
 GUEST_CIDR="172.16.0.0/16"
+# The one host port a guest may reach: the connected-apps broker, which holds
+# the provider credential so no guest has to. Must match CHAT_APPS_ADDR.
+APPS_PORT="${APPS_PORT:-8092}"
 # The Go toolchain is pinned to whatever go.mod asks for, so resolve the repo
 # root rather than trusting the caller's cwd.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -238,6 +241,30 @@ setup_firewall() {
   # guest reaches sshd and the control plane on 172.16.0.1 and the ENI address.
   iptables-nft -C INPUT -i tap+ -m conntrack --ctstate NEW -j DROP 2>/dev/null \
     || iptables-nft -I INPUT 1 -i tap+ -m conntrack --ctstate NEW -j DROP
+
+  # The single exception, inserted ABOVE the drop above -- which is why it comes
+  # after it here, since both go in at position 1.
+  #
+  # This is the connected-apps broker. A guest needs to reach its own app
+  # integrations, and the provider's endpoint requires a key that is authority
+  # over EVERY user's connected accounts; that key cannot live on a machine its
+  # owner has root on. So the host holds it and the guest gets a ticket, and this
+  # rule is what lets the guest hand that ticket in.
+  #
+  # Narrow on purpose: one TCP port, only from a tap, and only to an address on
+  # the guest side -- so it opens the broker and not sshd, not the control plane
+  # on 172.16.0.1, and nothing on the ENI.
+  iptables-nft -C INPUT -i tap+ -p tcp -d "$GUEST_CIDR" --dport "$APPS_PORT" \
+      -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null \
+    || iptables-nft -I INPUT 1 -i tap+ -p tcp -d "$GUEST_CIDR" --dport "$APPS_PORT" \
+      -m conntrack --ctstate NEW -j ACCEPT
+
+  # The broker binds every interface, because tap addresses come and go with the
+  # VMs. The port is not in the security group, and the rule above is the only
+  # way in -- but say it out loud on the host's own uplink too, so a security
+  # group edited by somebody else cannot quietly expose it.
+  iptables-nft -C INPUT -i "$dev" -p tcp --dport "$APPS_PORT" -j DROP 2>/dev/null \
+    || iptables-nft -A INPUT -i "$dev" -p tcp --dport "$APPS_PORT" -j DROP
 
   command -v netfilter-persistent >/dev/null && netfilter-persistent save || \
     echo "WARN: netfilter-persistent not installed; rules will not survive reboot"

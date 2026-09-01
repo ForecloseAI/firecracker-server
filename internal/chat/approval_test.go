@@ -27,7 +27,7 @@ func TestFreeTextIsRefusedAtAToolGate(t *testing.T) {
 
 // The same rule for the other two button-only kinds.
 func TestFreeTextIsRefusedOnButtonAsks(t *testing.T) {
-	for _, kind := range []string{askConfirm, askHandoff} {
+	for _, kind := range []string{askConfirm, askHandoff, askConnect} {
 		if _, ok := decisionBody(ui(kind), approvalReq{Verdict: verdictApproved, Answer: "x"}); ok {
 			t.Errorf("%s accepted a free-text answer", kind)
 		}
@@ -54,6 +54,10 @@ func TestDecisionBodies(t *testing.T) {
 		{"handoff done", ui(askHandoff), approvalReq{Verdict: verdictApproved},
 			map[string]any{"answer": "done"}, false},
 		{"handoff cancel", ui(askHandoff), approvalReq{Verdict: verdictDenied},
+			map[string]any{"answer": "not now"}, false},
+		{"connect done", ui(askConnect), approvalReq{Verdict: verdictApproved},
+			map[string]any{"answer": "done"}, false},
+		{"connect not now", ui(askConnect), approvalReq{Verdict: verdictDenied},
 			map[string]any{"answer": "not now"}, false},
 		{"text answered", ui(askText), approvalReq{Verdict: verdictApproved, Answer: "Lisbon"},
 			map[string]any{"answer": "Lisbon"}, false},

@@ -1,12 +1,25 @@
 package chat
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+
+	"cracked/internal/agentapi"
+	"cracked/internal/composio"
 )
+
+type failingAppsStore struct{ deleteErr error }
+
+func (f *failingAppsStore) Get(context.Context, string) (agentapi.Apps, error) {
+	return agentapi.Apps{}, nil
+}
+func (f *failingAppsStore) Put(context.Context, string, agentapi.Apps) error { return nil }
+func (f *failingAppsStore) Delete(context.Context, string) error             { return f.deleteErr }
 
 // fakeControl records what the gateway asked the control plane to do, and can be
 // told to refuse. The shared stubControl answers every path with a VM view, so a
@@ -106,6 +119,24 @@ func TestDeleteAccountReportsAFailure(t *testing.T) {
 	fc.fail = true
 	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", w.Code)
+	}
+}
+
+// A surviving app_sessions row is account data and would be silently reused on
+// the next sign-in. The response must therefore fail so the idempotent deletion
+// can be retried once PostgREST is healthy.
+func TestDeleteAccountReportsAppSessionCleanupFailure(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	s.apps = &failingAppsStore{deleteErr: errors.New("postgrest unavailable")}
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", w.Code, w.Body)
+	}
+	fc.mu.Lock()
+	deletes := len(fc.deleted)
+	fc.mu.Unlock()
+	if deletes != 1 {
+		t.Errorf("machine deletion attempts = %d, want 1", deletes)
 	}
 }
 
@@ -229,5 +260,78 @@ func TestDeleteAccountDoesNotTreatAConflictAsSuccess(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", w.Code)
+	}
+}
+
+// fakeProvider records the revokes an account deletion asks for.
+type fakeProvider struct {
+	mu       sync.Mutex
+	revoked  []string
+	listFail bool
+}
+
+// server stands the provider up and points a client at it.
+func (f *fakeProvider) server(t *testing.T) *composio.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodDelete {
+			f.revoked = append(f.revoked, strings.TrimPrefix(r.URL.Path, "/connected_accounts/"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if f.listFail {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{"items":[
+			{"id":"ca_gmail","status":"ACTIVE","toolkit":{"slug":"gmail"}},
+			{"id":"ca_slack","status":"ACTIVE","toolkit":{"slug":"slack"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return composio.New("k", srv.URL)
+}
+
+// Erasing an account hands back the grants that came with it. Without this the
+// person is told their data is gone while a live Google grant keeps their inbox
+// reachable -- confirmed against the real provider before this was written.
+func TestDeleteAccountRevokesTheProviderGrants(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fp := &fakeProvider{}
+	s.composio = fp.server(t)
+
+	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if len(fp.revoked) != 2 {
+		t.Fatalf("revoked %v, want both accounts", fp.revoked)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.purged) != 1 {
+		t.Errorf("the machine was not purged: %v", fc.purged)
+	}
+}
+
+// THE ordering test. Revoking runs FIRST, so a provider that cannot be reached
+// costs a retry and nothing else -- revoking after the machine was destroyed
+// would leave the person with no data AND a live key to their inbox, which is
+// the worst of both and the one outcome they cannot fix themselves.
+func TestAFailedRevokeDestroysNothing(t *testing.T) {
+	s, fc, tok := accountServer(t)
+	fp := &fakeProvider{listFail: true}
+	s.composio = fp.server(t)
+
+	w := call(t, s, tok, "DELETE", "/v1/account", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", w.Code, w.Body)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleted) != 0 {
+		t.Errorf("the machine was deleted anyway: %v", fc.deleted)
 	}
 }

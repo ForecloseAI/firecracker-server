@@ -451,6 +451,85 @@ a message dropped here would sit in the person's transcript with no reply ever
 coming. Refusing costs nothing, because the next ordinary start picks the skill
 up anyway.
 
+## Connected apps
+
+An agent can work with the person's own Gmail, Slack, Calendar or Asana through
+an integration provider, rather than by driving a signed-in page in Chrome. It
+searches for a tool, and if the app is not connected yet it hands the person a
+**Connect** card, waits, and then retries the call it was already making — so the
+original request finishes without anyone repeating it.
+
+Off unless `COMPOSIO_API_KEY` is set on `cracked-chat`. With no key, no session is
+minted, no guest-facing port opens, and an agent's tool surface is exactly what it
+was before.
+
+### Why there is a broker
+
+The provider's session endpoint needs the **project** API key: the session URL on
+its own answers `Unauthorized`. That key is authority over every user's connected
+accounts, and a guest is a machine its owner has root on — so it cannot live
+there. The host keeps it and hands each guest a ticket instead:
+
+```
+guest                      host                              provider
+agentd ──▶ http://172.16.<4N+1>:8092/apps/<ticket>
+                             │  ticket ─▶ which session
+                             │  source address must match that guest
+                             │  adds x-api-key
+                             └──────────────▶ the person's own session
+```
+
+A ticket names no user, is pinned to one guest's address, and works only on a
+port reachable from a tap. `host-setup.sh` opens exactly that: one TCP port, only
+from `tap+`, only to an address on the guest side — and drops it on the uplink, so
+a security group edited by somebody else cannot expose it. Tickets are re-minted
+on every push and dropped when a machine is created or erased, because slots are
+recycled and a route that outlived its machine is how one person's agent would end
+up acting as another.
+
+This is the token broker `rootfs/Dockerfile:207` sketches for the Anthropic key,
+built for this case first.
+
+### What is stored, and where
+
+| | |
+|---|---|
+| the connections themselves | the provider's, keyed on the Supabase user id |
+| which session belongs to whom | `app_sessions` in the project's Postgres, one row per person |
+| the ticket a guest dials | in memory on the host, and `apps.json` on the guest |
+
+The row is a pointer, never a record of truth: losing it costs one API call to
+mint a fresh session, never somebody's connections. It is reached through
+PostgREST with the **caller's own access token** plus the publishable key, so
+row-level security — not a `WHERE` clause somebody remembered to write — is what
+isolates one person from another. This service still holds no Supabase secret.
+
+Before enabling the feature, run `deploy/supabase.sql` in the Supabase SQL
+editor. It creates the `app_sessions` resource, enables row-level security, and
+grants authenticated callers access only through the per-user policy. Apply it
+before setting `COMPOSIO_API_KEY`; otherwise session provisioning remains
+unavailable.
+
+### Nothing is gated yet
+
+**Connected-app calls are not filtered.** Unlike `Bash`, which stops at the
+approval gate when it looks destructive, a call to a connected app runs as soon
+as an agent makes it — sending an email included. The permission layer that will
+decide which actions need a person is deliberately still to be written.
+
+What stood here before was a guess from the tool's name, and it was worse than
+nothing: it read as enforcement while classifying `GITHUB_CREATE_A_CHECK_SUITE`
+as read-only, because the name contains `CHECK`. Names cannot carry this — the
+provider exposes no read-only annotation to ask instead (`COMPOSIO_GET_TOOL_SCHEMAS`
+returns only a description and an input schema), and 126 of the first 500 toolkit
+slugs contain an underscore, so even "the verb is the second word" is wrong for
+`MICROSOFT_TEAMS_SEND_MESSAGE`.
+
+Until that layer exists, the only thing between an agent and a live account is
+the `connected-apps` skill telling it to ask first, which is guidance and not a
+control. `beforeHook` in `internal/agentd/browser_tool.go` is the seam the real
+one plugs into.
+
 ## Operational notes
 
 - **Never `poweroff` inside a guest.** On x86 that stops the guest but leaves
@@ -459,9 +538,14 @@ up anyway.
 - A control-plane restart **kills running VMs** but preserves every workspace.
   The startup sweep guarantees no orphan processes and no stray taps.
 - Guests are firewalled off from IMDS (`169.254.0.0/16`), the VPC, each other,
-  and the host itself. Verify after any firewall change:
-  `curl -m 3 http://169.254.169.254/latest/meta-data/iam/` from inside a guest
-  must time out.
+  and the host — with **one exception**: TCP 8092 on their own tap address, the
+  connected-apps broker, and only when it is running. Verify after any firewall
+  change, from inside a guest:
+  `curl -m 3 http://169.254.169.254/latest/meta-data/iam/` must time out, and so
+  must `curl -m 3 http://172.16.0.1:8080/healthz` — the control plane is still
+  unreachable. `curl -m 3 http://<gateway>:8092/apps/anything` should answer
+  **404**, which is the broker refusing a ticket it did not issue rather than
+  nothing listening.
 - `MaxVMs` is 5 in `internal/vm/vm.go`. Raise to 6 only after confirming host
   memory headroom at steady state — swap is off, so overcommit means the OOM
   killer reaps a live VM.

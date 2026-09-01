@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"net/url"
 	"strconv"
+	"strings"
 
 	"cracked/internal/agentapi"
 )
@@ -74,6 +76,13 @@ func askMessage(m Message, ev agentapi.Event) Message {
 		m.Text = "Allow " + ev.Tool + "?"
 	}
 	m.UI = askUIOf(ev)
+	// A connect card's URL comes from the GUEST, unlike a handoff's, which the
+	// host mints. Set here rather than beside the handoff URL in buildThread and
+	// in the feed, because this mapper is the one thing those two share -- so the
+	// allow-list check cannot be present on one path and missing from the other.
+	if ev.Kind == askConnect && ev.UI != nil && connectHostAllowed(ev.UI.URL) {
+		m.URL = ev.UI.URL
+	}
 	if ev.Shot != "" {
 		// Relative to the API root the client already holds, NOT including /v1:
 		// the client joins this onto a base URL that ends in /v1, so naming the
@@ -187,4 +196,28 @@ func verdictOf(decision string) string {
 		return "approved"
 	}
 	return "denied"
+}
+
+// connectHostsSuffix is the domain a connect link must live under. A var so a
+// test can point it somewhere harmless.
+var connectHostsSuffix = "composio.dev"
+
+// connectHostAllowed reports whether a connect link may be rendered as a button.
+//
+// This is the first URL on a card that the GUEST authors -- every other one, the
+// handoff's included, is minted by the host. A card carries more trust than a
+// link in a sentence, so a prompt-injected agent raising "Connect your Gmail"
+// pointing at a page that merely looks like Google is a real attack. Failing
+// this check drops the button and leaves the rest of the card, which degrades to
+// the person reading the request and ignoring it.
+func connectHostAllowed(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == connectHostsSuffix || strings.HasSuffix(host, "."+connectHostsSuffix)
 }
