@@ -134,3 +134,28 @@ func TestOnlyClientForBuildsAGuestClient(t *testing.T) {
 		}
 	}
 }
+
+// A malformed broker address must stop the service coming up rather than turn
+// connected apps off in silence: NewAppsGateway returns nil for one, which opens
+// no listener and short-circuits every push, with a valid key set.
+func TestAMalformedBrokerAddressIsRefusedAtStartup(t *testing.T) {
+	base := Config{
+		Origin: "https://chat.example.com", VNCOrigin: "https://vnc.example.com",
+		Token: "t", SupabaseURL: "https://p.supabase.co",
+	}
+	off := base
+	off.AppsAddr = "8092" // a port with no host, which is the likely typo
+	if err := off.validate(); err != nil {
+		t.Fatalf("a bad address was refused with no provider configured: %v", err)
+	}
+	on := off
+	on.ComposioKey, on.SupabasePublishable = "ak_x", "sb_publishable_x"
+	if err := on.validate(); err == nil {
+		t.Fatal("a malformed CHAT_APPS_ADDR was accepted with the feature on")
+	}
+	good := on
+	good.AppsAddr = "0.0.0.0:8092"
+	if err := good.validate(); err != nil {
+		t.Fatalf("a good address was refused: %v", err)
+	}
+}

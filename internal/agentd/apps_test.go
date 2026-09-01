@@ -278,3 +278,24 @@ func TestADialInFlightBlocksNobody(t *testing.T) {
 	}
 	close(release)
 }
+
+// Redaction must not destroy the cause. The case most worth classifying
+// downstream -- a timeout on a URL we had to redact -- is exactly the case where
+// the message changes, so errors.New went false precisely when it mattered.
+func TestRedactionKeepsTheCause(t *testing.T) {
+	const url = "https://backend.composio.dev/mcp/sess_SECRET"
+	wrapped := fmt.Errorf("Post %q: %w", url, context.DeadlineExceeded)
+
+	got := redactURL(wrapped, url)
+	if strings.Contains(got.Error(), "sess_SECRET") {
+		t.Fatalf("the session url survived: %v", got)
+	}
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Error("a timeout stopped looking like a timeout once redacted")
+	}
+	// An error with nothing to redact is handed back untouched, chain and all.
+	plain := fmt.Errorf("dial: %w", context.Canceled)
+	if got := redactURL(plain, url); !errors.Is(got, context.Canceled) {
+		t.Error("an unredacted error lost its cause")
+	}
+}

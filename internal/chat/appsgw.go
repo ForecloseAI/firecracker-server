@@ -37,6 +37,10 @@ type AppsGateway struct {
 	routes map[string]appsRoute
 }
 
+// errNoGuestAddress is what registering a machine with no address is refused
+// with. Its ticket could never be served, so minting one would be a lie.
+var errNoGuestAddress = errors.New("cannot route to a machine with no address")
+
 // appsRouteCap bounds the table. Only MaxVMs machines are ever live, but a
 // long-running process accumulates a route per machine it has ever pushed to,
 // and an unbounded map on a service that runs for weeks is a leak by another
@@ -68,6 +72,14 @@ func NewAppsGateway(key, addr string) *AppsGateway {
 // recycled, so a ticket that outlived its machine is exactly how one person's
 // agent would end up acting as another.
 func (g *AppsGateway) Register(machine, guestIP, hostIP, upstream string) (string, error) {
+	// A machine still coming up has no address yet, and route() rejects a ticket
+	// whose guestIP is empty -- so registering one mints a URL that can only ever
+	// 404, while the caller is told the push succeeded. It also skips the
+	// address half of dropLocked, leaving any stale route for a recycled address
+	// in place.
+	if guestIP == "" {
+		return "", errNoGuestAddress
+	}
 	target, err := url.Parse(upstream)
 	if err != nil {
 		return "", err

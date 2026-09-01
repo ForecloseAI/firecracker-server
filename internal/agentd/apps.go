@@ -111,8 +111,27 @@ func redactURL(err error, url string) error {
 	if msg == err.Error() {
 		return err
 	}
-	return errors.New(msg)
+	return redacted{msg: msg, cause: err}
 }
+
+// redacted is an error whose message has been rewritten but whose cause is
+// intact.
+//
+// errors.New would have been simpler and was what shipped, but it throws the
+// chain away -- and the case that most wants classifying downstream, a timeout
+// on a URL we had to redact, is exactly the case where the message changed. So
+// errors.Is(err, context.DeadlineExceeded) went false precisely when it
+// mattered.
+type redacted struct {
+	msg   string
+	cause error
+}
+
+// Error is the rewritten message, with nothing secret left in it.
+func (r redacted) Error() string { return r.msg }
+
+// Unwrap keeps errors.Is and errors.As working through the redaction.
+func (r redacted) Unwrap() error { return r.cause }
 
 // errRecentlyFailed is what an agent built during a cooldown is told. It reads
 // into the agent's log, never to the model: the agent simply has no app tools

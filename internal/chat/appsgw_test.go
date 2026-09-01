@@ -240,3 +240,16 @@ func TestTheRouteTableIsBounded(t *testing.T) {
 		t.Errorf("the table grew to %d routes", n)
 	}
 }
+
+// A machine still coming up has no address, and route() rejects a ticket whose
+// guestIP is empty -- so registering one would hand the guest a URL that can
+// only 404 while telling the caller the push worked.
+func TestRegisterRefusesAMachineWithNoAddress(t *testing.T) {
+	gw := NewAppsGateway("k", "0.0.0.0:8092")
+	if _, err := gw.Register("m1", "", "172.16.0.1", "https://example.com/mcp"); err == nil {
+		t.Fatal("a machine with no address was given a ticket")
+	}
+	if len(gw.routes) != 0 {
+		t.Errorf("a route was stored anyway: %v", gw.routes)
+	}
+}

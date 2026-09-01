@@ -263,8 +263,13 @@ setup_firewall() {
   # VMs. The port is not in the security group, and the rule above is the only
   # way in -- but say it out loud on the host's own uplink too, so a security
   # group edited by somebody else cannot quietly expose it.
+  #
+  # INSERTED, not appended. At the end of the chain it sits below whatever ufw,
+  # docker or a cloud-init template left there, and a blanket ACCEPT above it
+  # means it never matches. Position relative to the tap rules does not matter:
+  # they match -i tap+ and this matches the uplink, so the two never overlap.
   iptables-nft -C INPUT -i "$dev" -p tcp --dport "$APPS_PORT" -j DROP 2>/dev/null \
-    || iptables-nft -A INPUT -i "$dev" -p tcp --dport "$APPS_PORT" -j DROP
+    || iptables-nft -I INPUT 1 -i "$dev" -p tcp --dport "$APPS_PORT" -j DROP
 
   command -v netfilter-persistent >/dev/null && netfilter-persistent save || \
     echo "WARN: netfilter-persistent not installed; rules will not survive reboot"
