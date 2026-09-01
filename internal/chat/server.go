@@ -24,6 +24,8 @@ type Server struct {
 	// off without a flag.
 	composio *composio.Client
 	apps     AppsStore
+	// catalog is the featured apps' copy, shared by every person on the fleet.
+	catalog *appCatalog
 	// gw is how a guest reaches its session without holding the credential.
 	gw *AppsGateway
 
@@ -51,6 +53,7 @@ func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server
 			s.apps = store
 		}
 		s.gw = NewAppsGateway(cfg.ComposioKey, cfg.AppsAddr)
+		s.catalog = newAppCatalog(s.composio)
 	}
 	return s
 }
