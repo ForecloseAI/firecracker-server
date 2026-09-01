@@ -2,6 +2,7 @@ package chat
 
 import (
 	"net/http"
+	"time"
 
 	"cracked/internal/composio"
 )
@@ -68,4 +69,88 @@ func projectConnections(held []composio.Connection) []Connection {
 		})
 	}
 	return out
+}
+
+// ConnectLink is where a person signs in to authorise an app.
+type ConnectLink struct {
+	RedirectURL string `json:"redirectUrl"`
+	// ExpiresAt is the provider's own deadline, about ten minutes out. Sent so
+	// the screen can ask for a fresh link rather than show a dead button to
+	// somebody who put their phone down and came back.
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// connectApp mints the page a person authorises one app on.
+func (s *Server) connectApp(w http.ResponseWriter, r *http.Request, user string) {
+	if s.composio == nil {
+		fail(w, http.StatusBadGateway, "connecting apps is not available here")
+		return
+	}
+	slug := r.PathValue("slug")
+	if !isFeatured(slug) {
+		// Refused here rather than passed through. The provider supports over a
+		// thousand apps and would happily mint a link for any of them, but this
+		// build has tested six -- and an arbitrary slug from a client is not a
+		// thing to hand onward.
+		fail(w, http.StatusBadRequest, "that app is not one this version can connect")
+		return
+	}
+	link, err := s.composio.Link(r.Context(), user, slug, s.cfg.ComposioCallback)
+	if err != nil {
+		fail(w, http.StatusBadGateway, "could not start connecting that app")
+		return
+	}
+	writeJSON(w, http.StatusCreated, ConnectLink{RedirectURL: link.URL, ExpiresAt: link.ExpiresAt})
+}
+
+// isFeatured reports whether this build offers an app.
+func isFeatured(slug string) bool {
+	for _, s := range featured {
+		if s == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// disconnectApp hands one account's authorisation back.
+//
+// The id is resolved against THIS person's connections first. Ids are the only
+// thing standing between one person's accounts and another's, and a delete
+// straight through would let anybody holding an id revoke a stranger's Gmail.
+//
+// An id that is not theirs answers 404, the same as one already gone. Not 403:
+// the client treats a 404 on delete as success -- "the row is where they wanted
+// it either way" -- and confirming that an id exists but belongs to somebody
+// else is itself an answer worth not giving.
+func (s *Server) disconnectApp(w http.ResponseWriter, r *http.Request, user string) {
+	if s.composio == nil {
+		fail(w, http.StatusBadGateway, "connecting apps is not available here")
+		return
+	}
+	held, err := s.composio.Connections(r.Context(), user)
+	if err != nil {
+		fail(w, http.StatusBadGateway, "could not check your connected accounts")
+		return
+	}
+	id := r.PathValue("id")
+	if !owns(held, id) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if err := s.composio.Disconnect(r.Context(), id); err != nil {
+		fail(w, http.StatusBadGateway, "could not disconnect that account")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// owns reports whether a connection id is one of this person's.
+func owns(held []composio.Connection, id string) bool {
+	for _, conn := range held {
+		if conn.ID == id && id != "" {
+			return true
+		}
+	}
+	return false
 }
