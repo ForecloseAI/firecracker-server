@@ -1,11 +1,19 @@
 package chat
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // Stored rows are caller-writable by design, because RLS lets each person own
@@ -157,5 +165,59 @@ func TestAMalformedBrokerAddressIsRefusedAtStartup(t *testing.T) {
 	good.AppsAddr = "0.0.0.0:8092"
 	if err := good.validate(); err != nil {
 		t.Fatalf("a good address was refused: %v", err)
+	}
+}
+
+// heldAppsStore answers with one already-minted session, so a push can be
+// driven without a provider or a database.
+type heldAppsStore struct{ held agentapi.Apps }
+
+func (h *heldAppsStore) Get(context.Context, string) (agentapi.Apps, error) { return h.held, nil }
+func (h *heldAppsStore) Put(context.Context, string, agentapi.Apps) error   { return nil }
+func (h *heldAppsStore) Delete(context.Context, string) error               { return nil }
+
+// The read-only set is resolved BEFORE the ticket is minted, not between the
+// ticket and the push.
+//
+// On a cold cache that fetch is a round trip to the provider. pushApps runs
+// detached, so a machine erased and recreated while it is in flight leaves the
+// old goroutine holding a ticket forgetApps has already dropped -- which it then
+// pushes over the replacement's good one, and the replacement's claim is latched
+// pushed, so nothing tries again. Ordering is not what closes that window, but a
+// provider round trip inside it is this PR's to not add.
+//
+// Pinned by what the gateway holds WHILE the fetch runs, so moving the call back
+// after Register fails this rather than merely reordering two lines.
+func TestTheReadOnlySetIsResolvedBeforeTheTicketExists(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer guest.Close()
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(guest.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	var ticketsWhenFetched int
+	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
+		gw.mu.Lock()
+		ticketsWhenFetched = len(gw.routes)
+		gw.mu.Unlock()
+		return []string{slug + "_GET"}, nil
+	}}
+	s := &Server{gw: gw, reads: reads, appsClaims: map[string]appsClaim{},
+		apps: &heldAppsStore{held: agentapi.Apps{
+			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
+
+	guestPort, _ := strconv.Atoi(port)
+	cl := agent.New(host, guestPort)
+	if err := s.pushApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: host}, cl); err != nil {
+		t.Fatalf("push failed: %v", err)
+	}
+	if ticketsWhenFetched != 0 {
+		t.Errorf("the provider was asked with %d ticket(s) already minted -- the fetch "+
+			"sits between Register and SetApps, widening the window where an erased "+
+			"machine's push lands on its replacement", ticketsWhenFetched)
 	}
 }

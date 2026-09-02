@@ -64,6 +64,18 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	if err := validateComposioSessionURL(held.SessionURL); err != nil {
 		return err
 	}
+	// Resolved BEFORE the ticket exists, though nothing here needs it yet.
+	//
+	// On a cold cache this is a round trip to the provider, and everything
+	// between Register and SetApps widens a window that already had teeth: this
+	// runs detached, so a machine erased and recreated mid-push leaves the old
+	// goroutine holding a ticket forgetApps has already dropped. It then pushes
+	// that dead ticket over the replacement's good one -- and the replacement's
+	// claim is latched pushed, so nothing tries again and the machine has no
+	// connected apps until the host restarts. Ordering does not close that
+	// window, which is the claim's to close; it declines to widen it by a
+	// provider round trip, which is this PR's to not open.
+	reads := s.reads.slugs(ctx)
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
@@ -73,7 +85,7 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		return err
 	}
 	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		ReadOnly: s.reads.slugs(ctx)})
+		ReadOnly: reads})
 }
 
 // validateComposioSessionURL is the boundary between caller-writable storage
