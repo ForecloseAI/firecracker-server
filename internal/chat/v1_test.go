@@ -13,8 +13,8 @@ import (
 )
 
 // The client treats any non-2xx as failure and does not read the body, so a
-// missing token must produce 401 -- never the web page's 302 to an HTML login,
-// which would surface as an unreadable error.
+// missing token must produce 401 -- never a redirect to an HTML page, which
+// would surface as an unreadable error.
 func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
 	s := &Server{}
 	w := httptest.NewRecorder()
@@ -32,13 +32,13 @@ func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
 // roster is one machine's agents plus their profiles.
 func roster() ([]agentapi.Status, []agentapi.Profile) {
 	return []agentapi.Status{
-		{ID: "boss", Name: "Boss", Type: "boss"},
-		{ID: "cody", Name: "Cody", Type: "coder",
-			Task: &agentapi.Task{Title: "Reconciling invoices"}},
-	}, []agentapi.Profile{
-		{Key: "boss", Description: "Runs the team", Browser: true},
-		{Key: "coder", Description: "Writes code", Browser: false},
-	}
+			{ID: "boss", Name: "Boss", Type: "boss"},
+			{ID: "cody", Name: "Cody", Type: "coder",
+				Task: &agentapi.Task{Title: "Reconciling invoices"}},
+		}, []agentapi.Profile{
+			{Key: "boss", Description: "Runs the team", Browser: true},
+			{Key: "coder", Description: "Writes code", Browser: false},
+		}
 }
 
 // The projection is what the whole roster screen renders from.
@@ -113,9 +113,8 @@ func TestUnknownProfileStillGetsAShape(t *testing.T) {
 	}
 }
 
-// 204 is load-bearing: the client calls res.json() on any other 2xx and would
-// stubGuest answers the two calls a roster fetch makes, and counts them so a
-// test can prove listing never reaches the agent-starting event route.
+// stubGuest answers the two calls a roster fetch makes, and counts anything
+// else so a test can prove listing never reaches the agent-starting event route.
 func stubGuest(t *testing.T, hits *int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()

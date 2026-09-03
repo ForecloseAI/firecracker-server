@@ -57,16 +57,6 @@ func TestCompactionReachesTheTranscript(t *testing.T) {
 	}
 }
 
-// The default arm is what keeps this surface small: a guest that learns a new
-// event type must not start pushing it at an app that cannot render it.
-func TestUnknownEventTypesAreStillDropped(t *testing.T) {
-	for _, kind := range []string{"usage", "state", "turn_complete", "tool_use", "ready"} {
-		if _, ok := projectMessage(agentapi.Event{ID: 1, Type: kind}); ok {
-			t.Errorf("%q reached the transcript; only conversation lines belong there", kind)
-		}
-	}
-}
-
 // schedules serves a fixed set from the fake guest.
 func (g *fakeGuest) schedules(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()

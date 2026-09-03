@@ -14,11 +14,6 @@ import (
 	"cracked/internal/agentapi"
 )
 
-const (
-	// beat keeps the socket alive through proxies and a sleeping phone.
-	beat = 25 * time.Second
-)
-
 // tick is how often the gateway asks the guest what changed. A message can
 // therefore take up to this long to appear. A var, like guestPort, so a test
 // does not have to spend a second per poll.
@@ -127,7 +122,7 @@ func (f *feed) run(r *http.Request, w io.Writer,
 	}
 	poll := time.NewTicker(tick)
 	defer poll.Stop()
-	heart := time.NewTicker(beat)
+	heart := time.NewTicker(heartbeat)
 	defer heart.Stop()
 	stale := 0
 	for {

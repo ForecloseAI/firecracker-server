@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func feedOver(t *testing.T, wait time.Duration,
 		t.Fatal(err)
 	}
 	oldPort := guestPort
-	guestPort = atoi(t, port)
+	guestPort, _ = strconv.Atoi(port)
 	t.Cleanup(func() { guestPort = oldPort })
 
 	f := newFeed("m1", func() string { return "" })
@@ -57,15 +58,6 @@ func feedOver(t *testing.T, wait time.Duration,
 		<-done
 		return w.Body.String(), false
 	}
-}
-
-func atoi(t *testing.T, s string) int {
-	t.Helper()
-	n := 0
-	for _, c := range s {
-		n = n*10 + int(c-'0')
-	}
-	return n
 }
 
 // The leak this exists to close.

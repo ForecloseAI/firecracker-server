@@ -41,10 +41,12 @@ func TestTokenIsRedactedFromTheURL(t *testing.T) {
 	}
 }
 
-// Sign-in carries a password, and answers with a token. Neither may be logged.
+// A credential in either body must not reach the journal. There is no sign-in
+// route here -- identity lives in Supabase -- so this is the backstop for a
+// client that posts one anyway, and for anything that answers with a token.
 func TestCredentialsAreRedactedBothWays(t *testing.T) {
 	body := strings.NewReader(`{"email":"a@b.com","password":"hunter2"}`)
-	r := httptest.NewRequest("POST", "/v1/auth/sign-in", body)
+	r := httptest.NewRequest("POST", "/v1/profile", body)
 	got := capture(t, true, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"userId":"a@b.com","token":"tok_live_credential"}`))
 	}, r)

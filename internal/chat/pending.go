@@ -52,28 +52,26 @@ func buildPending(r agentapi.Raised) *Pending {
 	return p
 }
 
-// confirmPending renders a gated tool call. The batch option is offered only
-// for Bash, because gate.applyScope hardcodes a Bash grant.
+// confirmPending renders a gated tool call.
+//
+// Batch is offered for every gated tool, not only Bash. The old restriction
+// existed because the TypeScript gate hardcoded a Bash grant whatever was
+// approved; this gate scopes the grant to the tool actually being asked about.
 func confirmPending(r agentapi.Raised) *Pending {
-	p := &Pending{
+	return &Pending{
 		ID: r.ID, Prompt: promptFor(r.Tool), Detail: r.Preview,
+		UI: UI{Kind: "confirm", Options: []Option{
+			{ID: "once", Label: "Yes", Tone: "ok"},
+			{ID: "batch", Label: fmt.Sprintf("Yes, next %d for an hour", batchUses), Tone: "warn"},
+			{ID: "deny", Label: "No", Tone: "bad"},
+		}},
 		bodies: map[string]map[string]any{
 			"once": {"decision": "allow"},
-			"deny": {"decision": "deny", "reason": "the person declined"},
+			"batch": {"decision": "allow", "scope": "batch",
+				"max_uses": batchUses, "ttl_seconds": 3600},
+			"deny": {"decision": "deny", "reason": declined},
 		},
 	}
-	p.UI = UI{Kind: "confirm", Options: []Option{{ID: "once", Label: "Yes", Tone: "ok"}}}
-	// Offered for every gated tool, not only Bash. The old restriction existed
-	// because the TypeScript gate hardcoded a Bash grant whatever was approved;
-	// this gate scopes the grant to the tool actually being asked about.
-	p.bodies["batch"] = map[string]any{
-		"decision": "allow", "scope": "batch",
-		"max_uses": batchUses, "ttl_seconds": 3600,
-	}
-	p.UI.Options = append(p.UI.Options, Option{
-		ID: "batch", Label: fmt.Sprintf("Yes, next %d for an hour", batchUses), Tone: "warn"})
-	p.UI.Options = append(p.UI.Options, Option{ID: "deny", Label: "No", Tone: "bad"})
-	return p
 }
 
 // promptFor gives a gated call a one-line human title.
@@ -124,7 +122,7 @@ func textCard(p *Pending) {
 		{ID: freeText, Label: "Send", Tone: "ok"},
 		{ID: "skip", Label: "Not now", Tone: "bad"},
 	}}
-	p.bodies["skip"] = map[string]any{"decision": "deny", "reason": "the person declined"}
+	p.bodies["skip"] = map[string]any{"decision": "deny", "reason": declined}
 }
 
 // yesNo is the two-button set shared by confirm cards.

@@ -166,15 +166,13 @@ func (s *Server) disconnectAll(ctx context.Context, held []composio.Connection) 
 	errs := make(chan error, len(held))
 	slots := make(chan struct{}, revokeFanout)
 	for _, conn := range held {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			if err := s.composio.Disconnect(ctx, conn.ID); err != nil {
 				errs <- err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -219,9 +217,8 @@ func fail(w http.ResponseWriter, code int, msg string) {
 // the person asks is "what runs on its own while I am not here", and an answer
 // split across one call per agent could not be asked at all.
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	list, err := cl.Schedules()
@@ -243,9 +240,8 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, user stri
 // request IS the person, and undoing a commitment they made needs no permission
 // from them.
 func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	if err := cl.DeleteSchedule(r.PathValue("id")); err != nil {
@@ -261,17 +257,22 @@ func (s *Server) cancelSchedule(w http.ResponseWriter, r *http.Request, user str
 }
 
 // guestOf resolves a person to their machine's daemon, booting the machine if
-// this is their first call.
-func guestOf(ctx context.Context, s *Server, user string) (*agent.Client, error) {
+// this is their first call, and answers the caller itself when it cannot.
+//
+// Every route needs the same client and reports the same failure, so the
+// refusal lives here rather than being spelled out at each of them.
+func (s *Server) guestOf(w http.ResponseWriter, r *http.Request, user string) (*agent.Client, bool) {
 	machine := machineFor(user)
 	if machine == "" {
-		return nil, ErrNoVM
+		fail(w, http.StatusBadGateway, ErrNoVM.Error())
+		return nil, false
 	}
 	view, err := s.ensureMachine(machine)
 	if err != nil {
-		return nil, err
+		fail(w, http.StatusBadGateway, err.Error())
+		return nil, false
 	}
-	return s.clientFor(ctx, user, view), nil
+	return s.clientFor(r.Context(), user, view), true
 }
 
 // clientFor is a machine's client, with its connected-apps session in place.
@@ -288,9 +289,8 @@ func (s *Server) clientFor(ctx context.Context, user string, view vmView) *agent
 
 // listTypes is the gallery: what this person can still add.
 func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	profiles, err := cl.AgentTypes()
@@ -315,9 +315,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	s.activate(w, cl, req.TemplateID, machineFor(user))
@@ -383,9 +382,8 @@ func lookupType(cl *agent.Client, typeKey string) (agentapi.Profile, []agentapi.
 // answers 409 for both "no such agent" and "that is the boss", and a client
 // retrying on 409 would retry a missing agent forever.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -440,9 +438,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 		fail(w, http.StatusBadRequest, "text is required")
 		return
 	}
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	sent, err := cl.PostMessage(r.PathValue("id"), agent.Send{Text: req.Text, File: req.File})

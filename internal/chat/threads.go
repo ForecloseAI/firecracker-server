@@ -31,9 +31,8 @@ type Thread struct {
 // This starts nothing: the guest serves a poll straight off disk, which is what
 // makes the client's parallel load over the whole roster cheap.
 func (s *Server) getThread(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")

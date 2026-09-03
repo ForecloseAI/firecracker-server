@@ -20,8 +20,10 @@ const bodyCap = 400
 const captureCap = 8 << 10
 
 // secrets are redacted before anything is written. A token arrives in the query
-// string because SSE cannot set headers, and sign-in carries a password: both
-// would otherwise sit in the journal in the clear.
+// string because SSE cannot set headers, and a body may carry one too. Without
+// this they would sit in the journal in the clear. There is no sign-in here --
+// identity lives in Supabase -- so the password pattern is a backstop for a body
+// that carries one anyway, not a route this service serves.
 var secrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(token=)[^&\s"]+`),
 	regexp.MustCompile(`(?i)("password"\s*:\s*)"[^"]*"`),

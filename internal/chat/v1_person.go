@@ -18,9 +18,8 @@ const maxUploadV1 = 20 << 20
 // getProfile reports what the machine knows about the person, and whether
 // onboarding has happened.
 func (s *Server) getProfile(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	p, err := cl.Person()
@@ -38,9 +37,8 @@ func (s *Server) putProfile(w http.ResponseWriter, r *http.Request, user string)
 		fail(w, http.StatusBadRequest, "could not read the profile")
 		return
 	}
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	if err := cl.SetPerson(p); err != nil {
@@ -63,9 +61,8 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request, user string)
 		return
 	}
 	defer file.Close()
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	saved, err := cl.Upload(header.Filename, file)
@@ -82,9 +79,8 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request, user string)
 // must stay behind the same session check as the rest of /v1 instead of becoming
 // a URL that works for anyone holding it.
 func (s *Server) getShot(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	body, err := cl.Shot(r.PathValue("id"), r.PathValue("name"))
@@ -116,9 +112,8 @@ const maxAttachmentV1 = 20<<20 + 1<<20
 // and this is the hop that actually faces a browser, so dropping that decision
 // at this end would make the care taken at the other end worth nothing.
 func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request, user string) {
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	resp, err := cl.Attachment(r.PathValue("id"), r.PathValue("name"))

@@ -100,8 +100,7 @@ func TestOperatorCookieIsNotAUserSession(t *testing.T) {
 // A well-formed token signed by anyone else must be refused.
 func TestForgedAndMalformedTokensAreRefused(t *testing.T) {
 	v, _ := testAuth(t)
-	other, mintElsewhere := testAuth(t) // a different project, different keys
-	_ = other
+	_, mintElsewhere := testAuth(t) // a different project, different keys
 	for name, tok := range map[string]string{
 		"empty":            "",
 		"garbage":          "not-a-jwt",

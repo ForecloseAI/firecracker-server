@@ -101,9 +101,7 @@ func fanOut[E any](ctx context.Context, fetch func(context.Context, string) (E, 
 	var missed atomic.Bool
 	var wg sync.WaitGroup
 	for i, slug := range featured {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := fetch(ctx, slug)
 			if err != nil {
 				// Named, with its reason. The callers only say how MANY apps are
@@ -115,7 +113,7 @@ func fanOut[E any](ctx context.Context, fetch func(context.Context, string) (E, 
 				got = miss(slug)
 			}
 			out[i] = got
-		}()
+		})
 	}
 	wg.Wait()
 	return out, !missed.Load()

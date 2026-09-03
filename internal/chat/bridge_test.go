@@ -20,12 +20,20 @@ func deadControl(t *testing.T) *Control {
 	return NewControl(srv.URL, "test-token")
 }
 
+// testBridge is a bridge over that dead control plane, stopped when the test
+// ends. Every bridge test starts here.
+func testBridge(t *testing.T) *Bridge {
+	t.Helper()
+	b := newBridge("alice", deadControl(t), nil)
+	t.Cleanup(b.stop)
+	return b
+}
+
 // TestBridgeRevivesAfterIdleStop is the regression guard: a bridge that idled
 // out stays in the server's map, so Subscribe must restart its consumer or
 // every later page load gets a connected-looking stream that never delivers.
 func TestBridgeRevivesAfterIdleStop(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	if b.ctx.Err() != nil {
 		t.Fatal("a fresh bridge must be running")
 	}
@@ -44,8 +52,7 @@ func TestBridgeRevivesAfterIdleStop(t *testing.T) {
 // TestBridgeKeepsLastAcrossRestart checks the revived stream resumes from the
 // same event id, so the idle gap produces neither a hole nor duplicates.
 func TestBridgeKeepsLastAcrossRestart(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	b.onEvent(agentapi.Event{ID: 42, Type: "text", Text: "hello"})
 	b.stopIfEmpty()
 	b.Subscribe()
@@ -60,8 +67,7 @@ func TestBridgeIdleTimerStopsConsumer(t *testing.T) {
 	old := idleGrace
 	idleGrace = 10 * time.Millisecond
 	defer func() { idleGrace = old }()
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	b.Unsubscribe(b.Subscribe())
 	if !eventually(func() bool { return b.ctx.Err() != nil }) {
 		t.Fatal("idle timer never stopped the consumer")

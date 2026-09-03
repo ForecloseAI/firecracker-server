@@ -18,9 +18,8 @@ import (
 // records both the handing out of work and the answers coming back. Workers'
 // own transcripts stay on their own logs, which is where they belong.
 //
-// A worker that needs the PERSON is the case this does not cover, and it is why
-// pending interactions are about to stop being reconstructed from one agent's
-// event log at all.
+// A worker that needs the PERSON is the case this does not cover, which is why
+// pending interactions come from the hub rather than from this log.
 const chatAgent = agentapi.BossID
 
 // guestPort is where agentd listens inside every VM. A var, not a const, so a
@@ -49,13 +48,12 @@ type Frame struct {
 	PendingID string `json:"pending_id,omitempty"`
 	// Agent names who is asking, on pending cards only. Any agent can raise its
 	// hand, and the person answers THAT agent -- so the card has to say which.
-	Agent    string `json:"agent,omitempty"`
-	Prompt   string `json:"prompt,omitempty"`
-	Detail   string `json:"detail,omitempty"`
-	UI       *UI    `json:"ui,omitempty"`
-	Decision string `json:"decision,omitempty"`
-	OK       bool   `json:"ok,omitempty"`
-	DurMS    int64  `json:"duration_ms,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	UI     *UI    `json:"ui,omitempty"`
+	OK     bool   `json:"ok,omitempty"`
+	DurMS  int64  `json:"duration_ms,omitempty"`
 }
 
 // Bridge consumes one VM's event log and fans frames out to browsers.
@@ -87,43 +85,33 @@ func newBridge(id string, control *Control, caps *Caps) *Bridge {
 	return b
 }
 
-// startLocked launches the guest consumer. The caller holds b.mu.
+// startLocked launches the guest consumers. The caller holds b.mu.
 func (b *Bridge) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.ctx, b.stop = ctx, cancel
-	go b.run(ctx)
+	go b.reconnect(ctx, b.consume, func(err error) {
+		b.emit(Frame{Kind: "state", State: "reconnecting"})
+		log.Printf("chat bridge %s: %v", b.id, err)
+	})
 	// A second consumer on the SAME context: the transcript comes from the
 	// boss's log, but a raised hand can come from any agent on the machine, and
 	// one log cannot carry both. Sharing the context is what keeps the lifecycle
 	// single -- stopIfEmpty cancels both, Subscribe revives both.
-	go b.runPending(ctx)
+	go b.reconnect(ctx, b.consumePending, func(err error) {
+		log.Printf("chat bridge %s: pending: %v", b.id, err)
+	})
 }
 
-// run reconnects to the guest forever, re-resolving its IP each time because a
-// delete/recreate moves the VM to a different slot and a different address.
-func (b *Bridge) run(ctx context.Context) {
+// reconnect runs one consumer forever, re-resolving the guest's IP each time
+// because a delete/recreate moves the VM to a different slot and a different
+// address. onErr is how that consumer's failures are reported; the transcript
+// also tells the page it is reconnecting, and raised hands do not.
+func (b *Bridge) reconnect(ctx context.Context, consume func(context.Context) error,
+	onErr func(error)) {
 	delay := backoffBase
 	for ctx.Err() == nil {
-		if err := b.consume(ctx); err != nil && ctx.Err() == nil {
-			b.emit(Frame{Kind: "state", State: "reconnecting"})
-			log.Printf("chat bridge %s: %v", b.id, err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-		delay = min(delay*2, backoffMax)
-	}
-}
-
-// runPending reconnects to the machine's raised hands forever, on the same
-// backoff as the transcript.
-func (b *Bridge) runPending(ctx context.Context) {
-	delay := backoffBase
-	for ctx.Err() == nil {
-		if err := b.consumePending(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("chat bridge %s: pending: %v", b.id, err)
+		if err := consume(ctx); err != nil && ctx.Err() == nil {
+			onErr(err)
 		}
 		select {
 		case <-ctx.Done():
@@ -170,9 +158,7 @@ func (b *Bridge) onPending(c agentapi.PendingChange) {
 
 // known reports whether a card is already being shown.
 func (b *Bridge) known(id string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.pending[id]
+	_, ok := b.Pending(id)
 	return ok
 }
 

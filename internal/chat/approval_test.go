@@ -139,11 +139,19 @@ func TestAskMessageCarriesItsUI(t *testing.T) {
 	}
 }
 
+// coderOver stands a gateway over a fake guest holding one coder and the given
+// log, which is the shape every test below needs.
+func coderOver(t *testing.T, events ...agentapi.Event) (*Server, *fakeGuest, string) {
+	t.Helper()
+	g := &fakeGuest{roster: []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}},
+		events: events}
+	s, tok := serverOver(t, g)
+	return s, g, tok
+}
+
 // A message id that is not an ask must not settle anything.
 func TestApprovalRejectsANonAsk(t *testing.T) {
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}}}
-	g.events = []agentapi.Event{ev(4, "text")}
-	s, u := serverOver(t, g)
+	s, g, u := coderOver(t, ev(4, "text"))
 	w := call(t, s, u, "POST", "/v1/threads/coder/messages/4/approval", `{"verdict":"approved"}`)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
@@ -157,9 +165,7 @@ func TestApprovalRejectsANonAsk(t *testing.T) {
 func TestApprovalDelivers(t *testing.T) {
 	ask := ev(18, "approval_required")
 	ask.Tool, ask.Preview, ask.ApprovalID = "Bash", "rm -rf /tmp/x", "coder.ap_001"
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}}}
-	g.events = []agentapi.Event{ask}
-	s, u := serverOver(t, g)
+	s, g, u := coderOver(t, ask)
 
 	w := call(t, s, u, "POST", "/v1/threads/coder/messages/18/approval", `{"verdict":"approved"}`)
 	if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
@@ -178,9 +184,8 @@ func TestApprovalDelivers(t *testing.T) {
 func TestSettledAskIs409(t *testing.T) {
 	ask := ev(18, "approval_required")
 	ask.Tool, ask.ApprovalID = "Bash", "coder.ap_001"
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}}}
-	g.events, g.resolveStatus = []agentapi.Event{ask}, http.StatusNotFound
-	s, u := serverOver(t, g)
+	s, g, u := coderOver(t, ask)
+	g.resolveStatus = http.StatusNotFound
 	w := call(t, s, u, "POST", "/v1/threads/coder/messages/18/approval", `{"verdict":"approved"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", w.Code)
@@ -192,9 +197,7 @@ func TestSettledAskIs409(t *testing.T) {
 func TestFreeTextAtAToolGateIsRefusedOverHTTP(t *testing.T) {
 	ask := ev(18, "approval_required")
 	ask.Tool, ask.ApprovalID = "Bash", "coder.ap_001"
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}}}
-	g.events = []agentapi.Event{ask}
-	s, u := serverOver(t, g)
+	s, g, u := coderOver(t, ask)
 	w := call(t, s, u, "POST", "/v1/threads/coder/messages/18/approval",
 		`{"verdict":"approved","answer":"yes go ahead"}`)
 	if w.Code != http.StatusBadRequest {

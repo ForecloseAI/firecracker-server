@@ -9,7 +9,6 @@ import (
 
 	"cracked/internal/agent"
 	"cracked/internal/agentapi"
-	"cracked/internal/composio"
 	"cracked/internal/hostnet"
 )
 
@@ -127,15 +126,8 @@ func (s *Server) sessionFor(ctx context.Context, user string) (agentapi.Apps, er
 	// Carried across the re-mint. A person can set a policy before a machine has
 	// ever been pushed to -- the permissions screen does not wait for a session
 	// -- so the row can hold one with no URL beside it.
-	policy := held.Policy
-	held = appsOf(sess)
-	held.Policy = policy
+	held = agentapi.Apps{SessionURL: sess.URL, SessionID: sess.ID, Policy: held.Policy}
 	return held, s.apps.Put(ctx, user, held)
-}
-
-// appsOf is a minted session in the shape the guest is handed.
-func appsOf(sess composio.Session) agentapi.Apps {
-	return agentapi.Apps{SessionURL: sess.URL, SessionID: sess.ID}
 }
 
 // appsClaim is what this process has done about one machine's session.
@@ -181,7 +173,7 @@ func (s *Server) claimApps(machine string) bool {
 	if !held.pushed && time.Since(held.failed) < appsRetryAfter {
 		return false
 	}
-	s.evictClaimsLocked()
+	evictTo(s.appsClaims, appsClaimCap)
 	s.appsClaims[machine] = appsClaim{pushed: true, expires: time.Now().Add(appsMintTimeout)}
 	return true
 }
@@ -199,19 +191,23 @@ func (s *Server) doneApps(machine string, until time.Time) {
 	// another machine's claim may have evicted it while this push was crossing
 	// the internet, and re-adding it unchecked is how the table creeps past its
 	// cap one long push at a time.
-	s.evictClaimsLocked()
+	evictTo(s.appsClaims, appsClaimCap)
 	s.appsClaims[machine] = appsClaim{pushed: true, expires: until}
 }
 
-// evictClaimsLocked keeps the table bounded. Caller holds s.mu. Which entry goes
-// is not worth choosing: the cap is far above any live fleet, so an eviction
-// costs one redundant push and nothing else.
-func (s *Server) evictClaimsLocked() {
-	for machine := range s.appsClaims {
-		if len(s.appsClaims) < appsClaimCap {
+// evictTo keeps one of this package's bounded tables under its cap. The caller
+// holds whatever lock guards the map.
+//
+// Which entry goes is not worth choosing: both caps are far above any live
+// fleet, so nothing live is ever evicted in practice -- the point is only that
+// a service running for weeks does not keep an entry per machine it has ever
+// seen. An eviction costs one redundant push and nothing else.
+func evictTo[K comparable, V any](m map[K]V, limit int) {
+	for k := range m {
+		if len(m) < limit {
 			return
 		}
-		delete(s.appsClaims, machine)
+		delete(m, k)
 	}
 }
 

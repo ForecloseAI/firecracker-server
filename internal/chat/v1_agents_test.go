@@ -38,15 +38,15 @@ type resolution struct {
 	body map[string]any
 }
 
-// profiles is the catalog the fake serves: a boss plus two specialists, which
-// is enough to cover exclusion, activation and duplicates.
+// fakeProfiles is the catalog the fake serves: a boss plus two specialists,
+// which is enough to cover exclusion, activation and duplicates.
 var fakeProfiles = []agentapi.Profile{
 	{Key: "boss", Title: "Boss", Description: "Runs the team"},
 	{Key: "coder", Title: "Coder", Description: "Writes code"},
 	{Key: "researcher", Title: "Researcher", Description: "Reads the web", Browser: true},
 }
 
-// routes wires the four guest endpoints this pass depends on.
+// routes wires the guest endpoints these tests depend on.
 func (g *fakeGuest) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +179,7 @@ func serverOver(t *testing.T, g *fakeGuest) (*Server, string) {
 // call runs one request through the guard, as the app would reach it.
 func call(t *testing.T, s *Server, tok, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	var rdr *strings.Reader = strings.NewReader(body)
-	r := httptest.NewRequest(method, path, rdr)
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	s.Routes().ServeHTTP(w, r)
