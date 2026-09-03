@@ -49,8 +49,21 @@ check_branch() {
 # preflight refuses to ship a tree that is not the one under review.
 preflight() {
   check_branch
-  [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || [ "${ALLOW_DIRTY:-0}" = "1" ] || {
+  [ -z "$(git -C "$HERE" status --porcelain --untracked-files=all)" ] || [ "${ALLOW_DIRTY:-0}" = "1" ] || {
     echo "FATAL: working tree is dirty. ALLOW_DIRTY=1 to ship it anyway."; exit 1; }
+  # rsync does not understand .gitignore. Refuse ignored files too unless they
+  # are one of the generated paths excluded by sync_repo below; otherwise a
+  # local secret or stale source file could become part of the deploy.
+  local ignored
+  ignored="$(git -C "$HERE" ls-files --others --ignored --exclude-standard | while IFS= read -r path; do
+    case "$path" in
+      bin/*|rootfs/files/agentd|*/.DS_Store|.DS_Store) ;;
+      *) printf '%s\n' "$path" ;;
+    esac
+  done)"
+  [ -z "$ignored" ] || [ "${ALLOW_DIRTY:-0}" = "1" ] || {
+    printf 'FATAL: ignored files would be shipped:\n%s\n' "$ignored"
+    echo "Set ALLOW_DIRTY=1 to ship them intentionally."; exit 1; }
   make -C "$HERE" vet
   echo "shipping $(git -C "$HERE" rev-parse --short HEAD)"
 }

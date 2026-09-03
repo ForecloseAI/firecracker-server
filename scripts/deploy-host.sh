@@ -23,7 +23,9 @@ STAGES="test image binaries vms verify"
 CHANGED=""
 TOK=""
 LIVE_IDS=""
+LIVE_IDS_KNOWN=0
 IMAGE_CHANGED=0
+IMAGE_HASH=""
 RESTARTED_CRACKED=0
 EXPLICIT_STAGES=0
 
@@ -182,7 +184,9 @@ stage_image() {
   fi
   build_image
   verify_image
-  echo "$want" | sudo tee "$STAMP" >/dev/null
+  # Do not stamp yet. A VM that is not successfully recreated still uses the
+  # old, unlinked image, and the next deploy must retry the whole fleet.
+  IMAGE_HASH="$want"
   IMAGE_CHANGED=1
   echo "previous image kept at $BASE/images/rootfs.ext4.bak"
 }
@@ -194,7 +198,15 @@ install_binaries() {
   make -C "$HERE" build
   for b in cracked cracked-chat; do
     if same "$HERE/bin/$b" "/usr/local/bin/$b"; then
-      echo "$b unchanged"
+      local pid
+      pid="$(systemctl show -p MainPID --value "$b" 2>/dev/null || true)"
+      if systemctl is-active --quiet "$b" && [ -n "$pid" ] && [ "$pid" != "0" ] && \
+          same "$HERE/bin/$b" "/proc/$pid/exe"; then
+        echo "$b unchanged and already running"
+      else
+        echo "$b is installed but needs a restart"
+        CHANGED="$CHANGED $b"
+      fi
     else
       sudo install -m 0755 "$HERE/bin/$b" "/usr/local/bin/$b"
       CHANGED="$CHANGED $b"
@@ -232,17 +244,19 @@ stage_binaries() {
 # them, and from the workspaces on disk when it does not: the registry is in
 # memory only, so a cracked restart forgets every id while the disks remain.
 vm_ids() {
-  [ -z "$LIVE_IDS" ] || { echo "$LIVE_IDS"; return; }
-  local ids
-  ids="$(api GET /vms 2>/dev/null | jq -r '.vms[].id' 2>/dev/null || true)"
-  [ -n "$ids" ] || {
-    # Last resort, and it GUESSES: every workspace on disk, including machines
-    # that were not running. sudo because /var/lib/cracked is cracked:cracked
-    # and ubuntu cannot even traverse it -- without it this silently finds
-    # nothing and the fleet stays down.
-    echo "WARN: no record of what was running; guessing from the workspaces" >&2
-    ids="$(sudo ls "$BASE/workspaces" 2>/dev/null | sed 's/\.ext4$//')"
-  }
+  [ "$LIVE_IDS_KNOWN" = "0" ] || { echo "$LIVE_IDS"; return; }
+  local fleet ids
+  if fleet="$(api GET /vms 2>/dev/null)" &&
+      ids="$(printf '%s' "$fleet" | jq -r '.vms[].id' 2>/dev/null)"; then
+    echo "$ids"
+    return
+  fi
+  # Last resort, and it GUESSES: every workspace on disk, including machines
+  # that were not running. sudo because /var/lib/cracked is cracked:cracked
+  # and ubuntu cannot even traverse it -- without it this silently finds
+  # nothing and the fleet stays down.
+  echo "WARN: no record of what was running; guessing from the workspaces" >&2
+  ids="$(sudo ls "$BASE/workspaces" 2>/dev/null | sed 's/\.ext4$//')"
   echo "$ids"
 }
 
@@ -251,7 +265,7 @@ vm_ids() {
 # log and open tasks all come back. workspace_new:false is the proof.
 recreate() {
   local id="$1" had=0 out
-  [ -e "$BASE/workspaces/$id.ext4" ] && had=1
+  sudo test -e "$BASE/workspaces/$id.ext4" && had=1
   api DELETE "/vms/$id" >/dev/null 2>&1 || true
   out="$(api POST /vms -d "{\"id\":\"$id\"}")"
   echo "$out" | jq -c '{id, state, workspace_new}'
@@ -262,6 +276,14 @@ recreate() {
     echo "FATAL: $id came back on a NEW workspace; its data did not survive"
     exit 1
   fi
+}
+
+# stamp_image records that there are no remaining machines on the old image.
+# Keeping this in the vms stage makes an interrupted recreation retryable.
+stamp_image() {
+  [ "$IMAGE_CHANGED" = "1" ] || return
+  echo "$IMAGE_HASH" | sudo tee "$STAMP" >/dev/null
+  echo "recorded image recipe after all machines were recreated"
 }
 
 # stage_vms brings every machine back. A VM keeps running its old image until
@@ -277,7 +299,7 @@ stage_vms() {
     return
   fi
   local ids; ids="$(vm_ids)"
-  [ -n "$ids" ] || { echo "no machines to recreate"; return; }
+  [ -n "$ids" ] || { echo "no machines to recreate"; stamp_image; return; }
   echo "machines: $(echo "$ids" | tr '\n' ' ')"
   # Only ask when there is something to lose. If cracked was just restarted
   # they are already down, and declining would leave them down.
@@ -285,26 +307,34 @@ stage_vms() {
     confirm "recreate these? each is briefly down; workspaces are kept" || return
   fi
   for id in $ids; do recreate "$id"; done
+  stamp_image
 }
 
 # stage_verify proves what is running and records it, so the next deploy does
 # not have to reverse-engineer what was live from grepping binaries.
 stage_verify() {
   say "verify"
-  systemctl is-active cracked cracked-chat || true
-  if curl -fsS 127.0.0.1:8080/healthz >/dev/null; then
-    echo "healthz ok"
-  else
-    echo "WARN: healthz did not answer"
-  fi
-  for b in cracked cracked-chat; do
-    local pid; pid="$(systemctl show -p MainPID --value "$b")"
-    if same "$HERE/bin/$b" "/proc/$pid/exe"; then
-      echo "$b: running the binary just built"
+  local failed=0
+  for service in cracked cracked-chat; do
+    if systemctl is-active --quiet "$service"; then
+      echo "$service: active"
     else
-      echo "WARN: $b is NOT running the binary just built"
+      echo "FATAL: $service is not active"
+      failed=1
     fi
   done
+  curl -fsS 127.0.0.1:8080/healthz >/dev/null && echo "healthz ok" || {
+    echo "FATAL: healthz did not answer"; failed=1; }
+  for b in cracked cracked-chat; do
+    local pid; pid="$(systemctl show -p MainPID --value "$b" 2>/dev/null || true)"
+    if [ -n "$pid" ] && [ "$pid" != "0" ] && same "$HERE/bin/$b" "/proc/$pid/exe"; then
+      echo "$b: running the binary just built"
+    else
+      echo "FATAL: $b is NOT running the binary just built"
+      failed=1
+    fi
+  done
+  [ "$failed" = "0" ] || { echo "FATAL: deployment verification failed"; return 1; }
   echo "$COMMIT deployed $(date -u +%FT%TZ)" | sudo tee -a "$DEPLOYED"
 }
 
@@ -319,7 +349,14 @@ main() {
   # Recorded now, while the control plane still knows. The registry is in memory
   # only, so restarting cracked erases it -- asking after the restart is asking
   # a process that has already forgotten.
-  LIVE_IDS="$(api GET /vms 2>/dev/null | jq -r '.vms[].id' 2>/dev/null || true)"
+  local fleet ids
+  if fleet="$(api GET /vms 2>/dev/null)" && \
+      ids="$(printf '%s' "$fleet" | jq -r '.vms[].id' 2>/dev/null)"; then
+    LIVE_IDS="$ids"
+    LIVE_IDS_KNOWN=1
+  else
+    echo "WARN: could not snapshot the running fleet; workspace fallback may be used" >&2
+  fi
   echo "running now: $(echo "$LIVE_IDS" | tr '\n' ' ')"
   for s in $STAGES; do "stage_$s"; done
   say "done"
