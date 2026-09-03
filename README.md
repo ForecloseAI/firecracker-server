@@ -512,32 +512,28 @@ unavailable.
 
 ### Writes ask a person first
 
-**A connected-app action runs unasked only if the provider annotates it as
+**A connected-app action runs unasked only if the provider annotates it
 read-only.** Everything else raises a card and blocks until somebody answers:
-unknown actions, newly shipped ones, renamed ones, and every action whose name
-suggests one thing and does another.
+unknown, newly shipped, renamed, and every action whose name says one thing and
+does another. A refusal aborts the whole batch, reads included.
 
-Composio annotates its own catalogue and we keep no list of our own. Measured
-2026-09-02: 910 of 910 tools across the featured six carry an effect hint, 398
-are `readOnlyHint`, and none carries `readOnlyHint` alongside `destructiveHint`.
-It is right about the names that lie, which is why nothing here parses one —
-`GMAIL_SEND_DRAFT` is destructive, `GOOGLECALENDAR_CALENDAR_LIST_INSERT` creates
-despite the `LIST`, `SLACK_FIND_CHANNELS` genuinely reads. The set is fetched on
-the host, cached an hour, and pushed to each machine beside its session, so a
-tool shipped today is understood without rebuilding a rootfs. What is absent from
-it asks. An empty set therefore asks about everything: noisy, never permissive.
+We keep no list of our own. Measured 2026-09-02: 910 of 910 tools across the
+featured six carry an effect hint and 398 are `readOnlyHint`, and it is right
+about the names that lie — `GMAIL_SEND_DRAFT` is destructive,
+`GOOGLECALENDAR_CALENDAR_LIST_INSERT` creates despite the `LIST`,
+`SLACK_FIND_CHANNELS` genuinely reads. Fetched on the host, cached an hour, and
+pushed to each machine beside its session, so a tool shipped today is understood
+without rebuilding a rootfs. Absent from it means ask, so an empty set asks about
+everything: noisy, never permissive. One entry is ours —
+`GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text to a third party,
+and MCP's own rule is that annotations are untrusted hints.
 
-One entry is ours: `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text
-to an unrelated third-party service, so the host subtracts it before pushing.
-MCP's own rule is that annotations are untrusted hints.
-
-**What this does not do.** It is not an exfiltration control and must not be read
-as one. A guest has unrestricted outbound internet by design (see the firewall
-notes above), and `Bash` is gated only against its destructive denylist, so
-`curl` reaches anywhere without touching this gate at all. Nor does it inspect
-arguments: an approved send with a poisoned body is an approved send. What it
-buys is that loud, irreversible actions stop and ask, and that every one of them
-is on the record.
+**What this does not do.** It is not an exfiltration control. A guest has
+unrestricted outbound internet by design (see the firewall notes above) and
+`Bash` is gated only against its destructive denylist, so `curl` reaches anywhere
+without touching this. Nor does it inspect arguments: an approved send with a
+poisoned body is an approved send. What it buys is that loud, irreversible
+actions stop and ask, and that every one is on the record.
 
 ## Operational notes
 

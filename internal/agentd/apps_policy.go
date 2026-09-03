@@ -96,32 +96,37 @@ func callOf(entry any) (appCall, bool) {
 	return appCall{Slug: slug, Args: args}, true
 }
 
-// previewOf is what a person reads before allowing an action: what it will do,
-// and what with.
+// previewOf is what a person reads under the question: the arguments, and NOT
+// the slug -- both surfaces already title the card "Allow GMAIL_SEND_EMAIL?", so
+// repeating it spends the one line they read. Empty when there is nothing to add.
 //
-// The arguments carry it. "Send an email" is a question nobody can answer;
-// "send an email to dave@example.com" is one they can. Rendered as the provider
-// gave them rather than picked over by field name -- there are 910 tools and
-// their argument names are theirs to change, so a card that showed only the
-// fields we recognised would quietly show nothing at all for a tool we did not.
+// Rendered as the provider gave them rather than picked over by field name: 910
+// tools whose argument names are theirs to change, so a card showing only the
+// fields we recognised would show nothing at all for a tool we did not.
 func previewOf(c appCall) string {
 	if len(c.Args) == 0 {
-		return c.Slug
+		return ""
 	}
-	body, err := json.Marshal(c.Args)
-	if err != nil {
-		return c.Slug
-	}
-	return c.Slug + ": " + clip(string(body), previewCap)
+	// Cannot fail: Args came out of json.Unmarshal, so it holds only what json
+	// can put back.
+	body, _ := json.Marshal(c.Args)
+	return clip(string(body), previewCap)
 }
 
-// clip shortens to n runes, saying so rather than trailing off. Runes because
-// cutting bytes can halve a character and leave the card rendering a replacement
-// glyph over somebody's name.
+// clip shortens to n runes, saying so rather than trailing off. Ranging a string
+// yields the byte offset of each rune start, so the cut cannot halve a character
+// and leave a replacement glyph over somebody's name -- and it does that without
+// building a []rune of a whole mail body to keep 240 characters of it.
 func clip(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
+	if len(s) <= n { // n bytes or fewer is n runes or fewer
 		return s
 	}
-	return string(r[:n]) + "... (truncated)"
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i] + "... (truncated)"
+		}
+		count++
+	}
+	return s
 }

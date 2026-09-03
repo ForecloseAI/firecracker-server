@@ -214,10 +214,8 @@ func TestAPushInstallsTheReadOnlySet(t *testing.T) {
 	}
 }
 
-// THE trap. SetURL returns early when the session has not moved, and a re-push
-// carrying a fresher set on the SAME session is the ordinary case -- it is what
-// surfaceChanged is pinned to allow. Installed from SetURL, this update would be
-// the one that got dropped.
+// THE trap, and SetReadOnly's whole reason for being separate: a fresher set on
+// an unchanged session is the ordinary push, and SetURL returns early on it.
 func TestASetMovesEvenWhenTheSessionDoesNot(t *testing.T) {
 	s, _ := newTestServer(t)
 	const same = `"session_url":"https://backend.composio.dev/mcp/s","session_id":"s1"`

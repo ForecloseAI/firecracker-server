@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,8 +134,7 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 	}
 }
 
-// gated stands a session up whose provider says only `reads` are safe, and
-// returns the execute tool plus the gate its cards land on.
+// gated stands a session up whose provider calls only `reads` safe.
 func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
 	t.Helper()
 	a := fakeApps(t, namedTool("COMPOSIO_MULTI_EXECUTE_TOOL", "sent"))
@@ -147,33 +147,29 @@ func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
 	return tools[0], g
 }
 
-// answered runs one batch, settling every card raised with d, and reports what
-// the provider said along with the cards the person was shown. Check blocks the
-// caller, so the call runs in the background and the answers come from here.
+// answered runs one batch, settling every card with d, and reports what the
+// provider said and what the person was shown. Check parks the caller, so the
+// call runs in the background and the answers come from here.
 func answered(t *testing.T, tool anthropic.BetaTool, g *Gate, d Decision, body string) (string, []Event) {
 	t.Helper()
 	done := make(chan string, 1)
 	go func() {
-		out, err := tool.Execute(context.Background(), json.RawMessage(body))
-		if err != nil {
-			done <- "execute failed: " + err.Error()
-			return
-		}
-		done <- blockText(out)
+		out, _ := tool.Execute(context.Background(), json.RawMessage(body))
+		done <- blockText(out) // Execute never returns a Go error; see its doc
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	// Ticked, not spun: cards() parses the log off disk on every turn.
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	fail := time.After(5 * time.Second)
 	for {
 		select {
 		case got := <-done:
 			return got, cards(t, g)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the call never finished, so a card was raised that nothing answered")
-		}
-		for _, e := range cards(t, g) {
-			if g.IsPending(e.ApprovalID) {
-				g.Resolve(e.ApprovalID, d)
+		case <-fail:
+			t.Fatal("a card was raised that nothing answered")
+		case <-tick.C:
+			for _, e := range cards(t, g) {
+				g.Resolve(e.ApprovalID, d) // false when already answered
 			}
 		}
 	}
@@ -182,19 +178,15 @@ func answered(t *testing.T, tool anthropic.BetaTool, g *Gate, d Decision, body s
 // cards is every approval this agent has been shown.
 func cards(t *testing.T, g *Gate) []Event {
 	t.Helper()
-	events, _ := g.log.ReadAll()
-	var out []Event
-	for _, e := range events {
-		if e.Type == "approval_required" {
-			out = append(out, e)
-		}
+	events, err := g.log.ReadAll()
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
 	}
-	return out
+	return slices.DeleteFunc(events, func(e Event) bool { return e.Type != "approval_required" })
 }
 
-// THE test for this file. A send the person refused must not reach the provider
-// at all -- not be sent and reported as refused, not be queued. The fake answers
-// "sent", so its absence is the proof.
+// THE test for this file. A refused send must not reach the provider at all. The
+// fake answers "sent", so the absence of that word is the proof.
 func TestARefusedSendNeverReachesTheProvider(t *testing.T) {
 	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
 	got, shown := answered(t, tool, g, Decision{Decision: "deny", Reason: "not that one"},
@@ -223,9 +215,8 @@ func TestAnApprovedSendReachesTheProvider(t *testing.T) {
 	}
 }
 
-// A read the provider annotates as read-only runs silently. This is the half
-// that makes the other half worth reading: a gate that asks about everything
-// spends the attention it needs for the sends.
+// A read the provider calls read-only runs silently -- the half that makes the
+// other half worth reading, since a gate that asks about everything is ignored.
 func TestAReadTheProviderCallsSafeAsksNobody(t *testing.T) {
 	tool, g := gated(t, "GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS")
 	got, shown := answered(t, tool, g, Decision{Decision: "deny"},
@@ -239,8 +230,7 @@ func TestAReadTheProviderCallsSafeAsksNobody(t *testing.T) {
 	}
 }
 
-// A batch mixes freely -- the agent-facing skill tells agents to batch -- so the
-// gate must pick the send out of it and ask about that alone.
+// A batch mixes freely, so the gate must pick the send out and ask about it.
 func TestAMixedBatchAsksOnlyAboutTheSend(t *testing.T) {
 	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
 	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
@@ -249,20 +239,18 @@ func TestAMixedBatchAsksOnlyAboutTheSend(t *testing.T) {
 	if len(shown) != 1 {
 		t.Fatalf("%d cards, want one -- only the send needed a person", len(shown))
 	}
-	// Keyed on the ACTION. Grants are keyed on this string, so the meta-tool here
-	// would make one tap buy an hour of every action in every connected app.
+	// Keyed on the ACTION, not the meta-tool. See permit for why that matters.
 	if shown[0].Tool != "GMAIL_SEND_EMAIL" {
 		t.Errorf("the card is about %q", shown[0].Tool)
 	}
-	// And it names who the mail is going to. "Send an email?" is a question
-	// nobody can answer.
+	// And it names who the mail is going to.
 	if !strings.Contains(shown[0].Preview, "dave@example.com") {
 		t.Errorf("the card does not say who it is to: %q", shown[0].Preview)
 	}
 }
 
 // With no set at all -- a push that never landed, a provider having a bad day --
-// every action asks. Noisy, and never permissive.
+// every action asks.
 func TestWithNoReadOnlySetEvenAReadAsks(t *testing.T) {
 	tool, g := gated(t)
 	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
@@ -272,9 +260,8 @@ func TestWithNoReadOnlySetEvenAReadAsks(t *testing.T) {
 	}
 }
 
-// A batch that cannot be read is refused without asking and without running --
-// there is nothing to put on a card, and running it would be the fail-open the
-// deleted classifier shipped.
+// A batch nothing can read is refused without asking and without running: there
+// is nothing to put on a card.
 func TestAnUnreadableBatchIsRefusedWithoutAsking(t *testing.T) {
 	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
 	got, shown := answered(t, tool, g, Decision{Decision: "allow"}, `{"tools":"GMAIL_SEND_EMAIL"}`)
@@ -426,5 +413,57 @@ func TestRedactionKeepsTheCause(t *testing.T) {
 	plain := fmt.Errorf("dial: %w", context.Canceled)
 	if got := redactURL(plain, url); !errors.Is(got, context.Canceled) {
 		t.Error("an unredacted error lost its cause")
+	}
+}
+
+// The same action twice in one batch is two actions. A map keyed on slug would
+// collapse them, so one card would be answered and the provider would run both
+// sends -- to different people.
+func TestTheSameActionTwiceIsAskedAboutTwice(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"someone@else.com"}}]}`)
+	if len(shown) != 2 {
+		t.Fatalf("%d cards for two sends", len(shown))
+	}
+	if shown[0].Preview == shown[1].Preview {
+		t.Error("both cards describe the same send, so one recipient was lost")
+	}
+}
+
+// A refusal takes the whole batch with it, reads included. The provider runs a
+// batch as one request, so there is no half of it to run -- and the safe
+// direction is that nothing does.
+func TestARefusalAbortsTheWholeBatch(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, _ := answered(t, tool, g, Decision{Decision: "deny"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if strings.Contains(got, "sent") {
+		t.Error("the batch reached the provider after one of its actions was refused")
+	}
+}
+
+// An action with no arguments adds no detail line. The host renders the slug as
+// the card's title, so a preview repeating it would spend the one line a person
+// reads on something already above it.
+func TestAnActionWithNoArgumentsHasNoPreview(t *testing.T) {
+	if got := previewOf(appCall{Slug: "GMAIL_ARCHIVE_ALL"}); got != "" {
+		t.Errorf("preview is %q, which the card already says as its title", got)
+	}
+	if got := previewOf(appCall{Slug: "X", Args: map[string]any{"to": "d@e.com"}}); got != `{"to":"d@e.com"}` {
+		t.Errorf("preview is %q", got)
+	}
+}
+
+// A long argument is cut without splitting a character, and says it was cut.
+func TestALongArgumentIsClippedOnARuneBoundary(t *testing.T) {
+	got := previewOf(appCall{Slug: "X", Args: map[string]any{"body": strings.Repeat("é", 400)}})
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("a long body was not clipped: %d chars", len([]rune(got)))
+	}
+	if strings.ContainsRune(got, '�') {
+		t.Error("the cut landed inside a character")
 	}
 }

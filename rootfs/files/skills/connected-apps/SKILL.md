@@ -72,8 +72,10 @@ with the action and its arguments in front of them. Two things follow:
 - **Put the real values in the call.** The card shows what you actually passed,
   so a recipient or a channel you were going to fix afterwards is what they will
   be answering about.
-- **Batch what belongs together.** Each action in a batch is asked about on its
-  own, and answering once for ten sends of the same kind covers the rest.
+- **A refusal stops the whole batch.** Each action is asked about on its own, but
+  the batch goes out as one request - so if the person declines any part of it,
+  none of it happens, the reads included. Put reads you depend on in their own
+  call rather than alongside something that might be refused.
 
 **Prefer a draft where one exists.** `GMAIL_CREATE_EMAIL_DRAFT` and
 `SLACK_SEND_MESSAGE_DRAFT` put the words in front of the person in the app they

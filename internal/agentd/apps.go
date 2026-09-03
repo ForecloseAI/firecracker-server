@@ -178,9 +178,7 @@ type appsServer struct {
 	listed []*mcpsdk.Tool
 
 	// reads is the actions the provider annotates as only reading, pushed by the
-	// host rather than compiled in here. Absent from it means a person is asked,
-	// so an empty map is a machine that asks about everything: noisy, and never
-	// permissive. That direction is what lets it live outside the binary.
+	// host rather than compiled in. Absent means ask -- see agentapi.Apps.
 	reads map[string]bool
 }
 
@@ -201,10 +199,8 @@ func newAppsServer(a agentapi.Apps) *appsServer {
 // Separate from SetURL, which returns early when the session has not moved --
 // and a re-push carrying a fresher set on the SAME session is the ordinary case,
 // the one surfaceChanged is pinned to allow. Folded together, the update this
-// design exists to deliver is the one that would be dropped.
-//
-// SetURL does not clear it either. The set describes the provider's catalogue,
-// not this session, so a re-ticket must not blank it.
+// design exists to deliver is the one that would be dropped. SetURL does not
+// clear it either: the set is the provider's catalogue, not this session.
 func (s *appsServer) SetReadOnly(slugs []string) {
 	held := make(map[string]bool, len(slugs))
 	for _, slug := range slugs {
@@ -214,9 +210,8 @@ func (s *appsServer) SetReadOnly(slugs []string) {
 	defer s.mu.Unlock()
 	s.reads = held
 	if len(held) == 0 && s.url != "" {
-		// Said once, here, rather than per call. A machine in this state asks
-		// about every read, which to a person looks like a cautious gate rather
-		// than a push that never landed -- and nothing else would say so.
+		// Once here rather than per call. Such a machine asks about every read,
+		// which looks like a cautious gate rather than a push that never landed.
 		log.Printf("agentd: session but no read-only actions; every app call will ask")
 	}
 }
@@ -262,23 +257,22 @@ func (s *appsServer) Tools(ctx context.Context, d toolDeps) ([]anthropic.BetaToo
 	if listed == nil {
 		return nil, nil // this machine has no session, which is not an error
 	}
-	return wrapAll(listed, s, appsNoun, s.gate(d), d), nil
+	return wrapAll(listed, s, appsNoun, s.hook(d), d), nil
 }
 
-// gate asks a person before any action the provider does not call read-only.
+// hook asks a person before any action the provider does not call read-only.
 //
-// Closed over ONE agent's deps, which is sound because the wrapping is per agent
-// even though the listing is cached -- see the note on listed. Nothing here
-// reads a tool name to decide: the classifier that did was deleted from this
-// package for calling GITHUB_CREATE_A_CHECK_SUITE read-only.
-func (s *appsServer) gate(d toolDeps) beforeHook {
+// Closed over ONE agent's deps, sound because the wrapping is per agent even
+// though the listing is cached -- see the note on listed. Nothing here reads a
+// tool NAME to decide; the classifier that did was deleted from this package.
+func (s *appsServer) hook(d toolDeps) beforeHook {
 	return func(ctx context.Context, name string, args map[string]any) error {
 		calls, err := callsIn(name, args)
 		if err != nil {
 			return err
 		}
 		for _, c := range calls {
-			if err := s.permit(ctx, d, c); err != nil {
+			if err := s.permit(ctx, d.gate, c); err != nil {
 				return err
 			}
 		}
@@ -286,17 +280,23 @@ func (s *appsServer) gate(d toolDeps) beforeHook {
 	}
 }
 
-// permit runs one action, or asks about it and waits.
+// permit decides one action, asking a person and waiting when the provider does
+// not call it read-only. It runs nothing: the batch goes out afterwards, whole.
+//
+// So a refusal anywhere aborts ALL of it, reads included -- the call never
+// reaches the provider. That is the safe direction and the only coherent one,
+// since the provider executes the batch as one request and cannot be asked for
+// part of it.
 //
 // Asked per action rather than per call, so every card names one thing and every
 // grant is scoped to one slug. The key handed to Check is the SLUG and never the
-// meta-tool: grants are keyed on that string, so passing the wrapper would make
-// one tap buy an hour of every action in every connected app.
-func (s *appsServer) permit(ctx context.Context, d toolDeps, c appCall) error {
+// meta-tool: grants key on that string, so passing the wrapper would make one tap
+// buy an hour of every action in every connected app.
+func (s *appsServer) permit(ctx context.Context, g *Gate, c appCall) error {
 	if s.reading(c.Slug) {
 		return nil
 	}
-	return d.gate.Check(ctx, c.Slug, previewOf(c), c.Args)
+	return g.Check(ctx, c.Slug, previewOf(c), c.Args)
 }
 
 // listing returns the session's tool list, fetching it once if it is cold.
