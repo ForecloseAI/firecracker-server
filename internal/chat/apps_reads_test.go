@@ -26,7 +26,7 @@ func TestTheReadOnlySetIsFetchedOncePerTTL(t *testing.T) {
 		return []string{slug + "_GET"}, nil
 	})
 	for range 3 {
-		if got := a.slugs(context.Background()); len(got) != len(featured) {
+		if got, _ := a.slugs(context.Background()); len(got) != len(featured) {
 			t.Fatalf("got %d, want one per app", len(got))
 		}
 	}
@@ -48,7 +48,7 @@ func TestAnAppThatDidNotAnswerIsAbsentAndNotCached(t *testing.T) {
 		return []string{slug + "_GET"}, nil
 	})
 
-	got := a.slugs(context.Background())
+	got, _ := a.slugs(context.Background())
 	if slices.Contains(got, "slack_GET") {
 		t.Fatal("an app that failed to answer contributed slugs")
 	}
@@ -58,7 +58,7 @@ func TestAnAppThatDidNotAnswerIsAbsentAndNotCached(t *testing.T) {
 
 	down = false
 	calls.Store(0)
-	if got = a.slugs(context.Background()); calls.Load() == 0 {
+	if got, _ = a.slugs(context.Background()); calls.Load() == 0 {
 		t.Fatal("a partial answer was cached for an hour, so slack's reads keep asking")
 	}
 	if !slices.Contains(got, "slack_GET") {
@@ -88,7 +88,7 @@ func TestAnEmptyAnswerIsStillAnAnswer(t *testing.T) {
 	a, calls := stubReads(func(string) ([]string, error) { return nil, nil })
 	a.slugs(context.Background())
 	calls.Store(0)
-	if got := a.slugs(context.Background()); len(got) != 0 {
+	if got, _ := a.slugs(context.Background()); len(got) != 0 {
 		t.Fatalf("got %v", got)
 	}
 	if calls.Load() != 0 {

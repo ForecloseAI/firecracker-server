@@ -49,20 +49,24 @@ func (s *Server) ensureApps(ctx context.Context, user string, view vmView, cl *a
 func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *agent.Client) {
 	ctx, cancel := context.WithTimeout(ctx, appsMintTimeout)
 	defer cancel()
-	if err := s.pushApps(ctx, user, view, cl); err != nil {
+	until, err := s.pushApps(ctx, user, view, cl)
+	if err != nil {
 		log.Printf("chat: connected apps unavailable for %s: %v", view.ID, err)
 		s.failApps(view.ID)
+		return
 	}
+	s.doneApps(view.ID, until)
 }
 
-// pushApps hands this person's machine a ticket to their session.
-func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) error {
+// pushApps hands this person's machine a ticket to their session, reporting how
+// long the read-only set it pushed is good for.
+func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (time.Time, error) {
 	held, err := s.sessionFor(ctx, user)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if err := validateComposioSessionURL(held.SessionURL); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	// Resolved BEFORE the ticket exists, though nothing here needs it yet.
 	//
@@ -75,17 +79,20 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// connected apps until the host restarts. Ordering does not close that
 	// window, which is the claim's to close; it declines to widen it by a
 	// provider round trip, which is this PR's to not open.
-	reads := s.reads.slugs(ctx)
+	reads, until := s.reads.slugs(ctx)
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
 	hostIP, _, _ := hostnet.SlotAddrs(view.Slot)
 	guestURL, err := s.gw.Register(view.ID, view.GuestIP, hostIP, held.SessionURL)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
-	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		ReadOnly: reads})
+	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
+		ReadOnly: reads}); err != nil {
+		return time.Time{}, err
+	}
+	return until, nil
 }
 
 // validateComposioSessionURL is the boundary between caller-writable storage
@@ -129,7 +136,16 @@ func appsOf(sess composio.Session) agentapi.Apps {
 // appsClaim is what this process has done about one machine's session.
 type appsClaim struct {
 	pushed bool
-	failed time.Time
+	// expires is when a pushed claim stops counting, which is the deadline of
+	// the read-only set that push handed over.
+	//
+	// A pushed claim used to latch forever, so the TTL governed only what the
+	// NEXT machine to boot was told: a set fetched during an outage stayed
+	// partial, and a tool the provider stopped annotating readOnlyHint stayed
+	// read-only on every live machine until the host restarted. A deadline is
+	// what makes expiry reach machines that already have a copy.
+	expires time.Time
+	failed  time.Time
 }
 
 // appsClaimCap bounds the table, for the reason appsRouteCap does: a service
@@ -144,15 +160,42 @@ const appsClaimCap = 256
 // parallel and connecting the stream, so first sign-in is exactly when a dozen
 // requests arrive at once -- and a check-then-mark would let all of them pass
 // and mint a dozen sessions for one person.
+//
+// A claim is taken with the IN-FLIGHT deadline, not the set's: the push has not
+// happened yet and has nothing to report. doneApps replaces it with the real one
+// on success, failApps with a cooldown on failure -- so a goroutine that dies
+// without doing either frees the machine after appsMintTimeout rather than
+// stranding it, which is the same bound the push itself runs under.
 func (s *Server) claimApps(machine string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if held := s.appsClaims[machine]; held.pushed || time.Since(held.failed) < appsRetryAfter {
+	held := s.appsClaims[machine]
+	if held.pushed && time.Now().Before(held.expires) {
+		return false
+	}
+	if !held.pushed && time.Since(held.failed) < appsRetryAfter {
 		return false
 	}
 	s.evictClaimsLocked()
-	s.appsClaims[machine] = appsClaim{pushed: true}
+	s.appsClaims[machine] = appsClaim{pushed: true, expires: time.Now().Add(appsMintTimeout)}
 	return true
+}
+
+// doneApps records a push that landed, due again when its set goes stale.
+//
+// The re-push goes through pushApps like the first one, which mints a fresh
+// ticket and drops the old. That rotation is why this is not on a timer: it
+// happens on the next request to reach the machine, so a machine nobody is using
+// is not re-ticketed on a schedule for a set nobody is reading.
+func (s *Server) doneApps(machine string, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Usually an overwrite of this machine's own in-flight claim, but not always:
+	// another machine's claim may have evicted it while this push was crossing
+	// the internet, and re-adding it unchecked is how the table creeps past its
+	// cap one long push at a time.
+	s.evictClaimsLocked()
+	s.appsClaims[machine] = appsClaim{pushed: true, expires: until}
 }
 
 // evictClaimsLocked keeps the table bounded. Caller holds s.mu. Which entry goes
