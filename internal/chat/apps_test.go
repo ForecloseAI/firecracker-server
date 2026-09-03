@@ -474,3 +474,28 @@ func TestTheMarkIgnoresEverythingThatChangesNoActions(t *testing.T) {
 		t.Error("holding nothing marks the same as holding two apps")
 	}
 }
+
+// The floor under the resolved set, and it is there for a flow this service
+// never sees: an agent mints its own connect link through the provider, and the
+// page a person lands on afterwards is deliberately anonymous. Without the
+// floor, connecting Gmail that way and immediately asking an agent to read it
+// raises a card on every read until the Apps screen is next opened or the claim
+// runs out -- up to an hour of the feature working and looking broken.
+func TestTheFeaturedAppsAreResolvedWhetherOrNotTheyAreConnected(t *testing.T) {
+	got := withFeatured([]string{"notion"})
+	if got[0] != "notion" {
+		t.Errorf("got %v, want this person's own apps first -- they are what "+
+			"survives if the push fills up", got)
+	}
+	for _, app := range featured {
+		if !slices.Contains(got, app) {
+			t.Errorf("%s is missing, so connecting it mid-conversation asks about "+
+				"its reads until the machine next comes due", app)
+		}
+	}
+	// A featured app they have already connected is not resolved twice: that is
+	// a second round trip for the same answer.
+	if two := withFeatured([]string{"gmail"}); len(two) != len(featured) {
+		t.Errorf("got %v, want gmail counted once", two)
+	}
+}

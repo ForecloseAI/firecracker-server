@@ -132,21 +132,32 @@ const appsResolveCap = 32
 // appsToResolve is the apps whose actions this person's machine needs resolved,
 // and whether the list is actually theirs.
 //
-// Their CONNECTED apps, in any status. Not the featured six, which was the right
-// set only while those were the only apps anybody could connect: an action in an
-// app somebody has not connected cannot run whatever we say about it, so
-// resolving it spends a round trip and a slice of the push on nothing.
+// Their CONNECTED apps, in any status, and then the featured ones on top.
+//
+// The connected apps are the substance. The featured list was the right set
+// only while those were the only apps anybody could connect: an action in an app
+// somebody has not connected cannot run whatever we say about it, so resolving a
+// thousand of them would spend a thousand round trips on nothing.
 //
 // Any status, including INITIATED, and that is the useful half. A row exists at
-// the provider from the moment a link is minted -- by this service's connect
-// route or by an agent's own connect card -- so an app somebody is signing into
-// right now is already in the next push, rather than asking about its reads
+// the provider from the moment a link is minted, so an app somebody is signing
+// into right now is already in the next push rather than asking about its reads
 // until the machine next comes due.
 //
+// The featured apps stay on the end anyway, and that is a floor rather than a
+// leftover. A person can connect an app WITHOUT this service ever hearing about
+// it: an agent mints its own link through the provider, and the page they land
+// on afterwards is deliberately anonymous. Nothing then re-pushes until the Apps
+// screen is next opened or the claim runs out -- up to an hour of a freshly
+// connected app raising a card on every read, which is the feature working and
+// looking broken. Covering the handful most people connect costs about four
+// hundred entries of a bounded push and no round trips once the fleet-wide cache
+// is warm, and it is exactly the set that used to be resolved for everybody.
+//
 // Never an error. A push that cannot read this person's connections falls back
-// to the featured apps and says the answer is a guess: a machine with no
-// resolved actions asks about everything, and a provider having a bad minute
-// should not turn every agent chatty.
+// to the floor alone and says the answer is a guess: a machine with no resolved
+// actions asks about everything, and a provider having a bad minute should not
+// turn every agent chatty.
 func (s *Server) appsToResolve(ctx context.Context, user string) ([]string, string, bool) {
 	held, err := s.composio.Connections(ctx, user)
 	if err != nil {
@@ -157,7 +168,21 @@ func (s *Server) appsToResolve(ctx context.Context, user string) ([]string, stri
 		// for a change and drop a ticket over nothing.
 		return featured, "", false
 	}
-	return appsIn(held), appsMark(held), true
+	return withFeatured(appsIn(held)), appsMark(held), true
+}
+
+// withFeatured adds the floor to a person's own apps, keeping theirs first.
+//
+// Order matters twice over: theirs are what the caps are bounded in favour of,
+// and theirs are what survives if the push fills up. The floor is small enough
+// that it never gets there.
+func withFeatured(apps []string) []string {
+	for _, app := range featured {
+		if !slices.Contains(apps, app) {
+			apps = append(apps, app)
+		}
+	}
+	return apps
 }
 
 // appsMark is a person's connected apps reduced to one comparable string.

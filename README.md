@@ -551,9 +551,12 @@ set asks about everything: noisy, never permissive. One entry is ours —
 `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text to a third party,
 and MCP's own rule is that annotations are untrusted hints.
 
-Resolved over the apps a person has **connected**, in any status, rather than
-over a list written down here: an action in an app nobody has connected cannot
-run whatever we say about it, and a thousand apps' worth would not fit. Only the
+Resolved over the apps a person has **connected**, in any status, plus the
+featured few as a floor. An action in an app nobody has connected cannot run
+whatever we say about it, and a thousand apps' worth would not fit; the floor is
+there because an agent can mint its own connect link without this service ever
+hearing about it, and a freshly connected app should not raise a card on every
+read until the next push. Only the
 `auto` and `never` answers are sent, because the guest already reads an unknown
 slug as ask — the same policy in half the bytes, which is what keeps the push
 under the 256 KiB the guest will accept (`appsBodyCap`, and exceeding it takes
