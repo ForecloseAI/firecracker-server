@@ -102,7 +102,7 @@ func (c *Client) get(path string, out any) error {
 }
 
 // post sends a JSON body and discards a success response.
-func (c *Client) post(path string, body any, hdr map[string]string) error {
+func (c *Client) post(path string, body any, idempotencyKey string) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -112,8 +112,8 @@ func (c *Client) post(path string, body any, hdr map[string]string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range hdr {
-		req.Header.Set(k, v)
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	return c.send(req)
 }
@@ -181,11 +181,7 @@ func (c *Client) send(req *http.Request) error {
 // SendMessage queues a user turn for one agent. The idempotency key lets a
 // retried or double-clicked send collapse instead of queueing it twice.
 func (c *Client) SendMessage(agentID, text, idempotencyKey string) error {
-	hdr := map[string]string{}
-	if idempotencyKey != "" {
-		hdr["Idempotency-Key"] = idempotencyKey
-	}
-	return c.post("/agents/"+agentID+"/messages", map[string]string{"text": text}, hdr)
+	return c.post("/agents/"+agentID+"/messages", map[string]string{"text": text}, idempotencyKey)
 }
 
 // Sent is what the guest reports back about a queued message. LastEventID is
@@ -195,15 +191,6 @@ type Sent struct {
 	MessageID   string `json:"message_id"`
 	State       string `json:"session_state"`
 	LastEventID int    `json:"last_event_id"`
-}
-
-// Post queues a user turn and reports what the guest recorded.
-//
-// No idempotency key: the header exists, but keying on the text collapses a
-// deliberate repeat into silence, and a duplicate message is a far better
-// failure than one that vanishes with no error.
-func (c *Client) Post(agentID, text string) (Sent, error) {
-	return c.PostMessage(agentID, Send{Text: text})
 }
 
 // PostMessage sends a turn with everything the client attached to it, which is
@@ -265,7 +252,7 @@ func (c *Client) Resolve(approvalID string, body map[string]any) error {
 
 // Interrupt stops one agent's turn and revokes its outstanding consent grants.
 func (c *Client) Interrupt(agentID string) error {
-	return c.post("/agents/"+agentID+"/interrupt", map[string]string{}, nil)
+	return c.post("/agents/"+agentID+"/interrupt", map[string]string{}, "")
 }
 
 // Person reports what the machine knows about whoever it works for.

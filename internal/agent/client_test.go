@@ -8,17 +8,24 @@ import (
 	"testing"
 )
 
-// clientFor points a Client at a test server standing in for a guest.
-func clientFor(t *testing.T, h http.HandlerFunc) *Client {
+// hostPort splits a test server's address the way a guest is addressed: by IP
+// and port, never by URL.
+func hostPort(t *testing.T, srv *httptest.Server) (string, int) {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
 	u, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, _ := strconv.Atoi(u.Port())
-	return New(u.Hostname(), p)
+	return u.Hostname(), p
+}
+
+// clientFor points a Client at a test server standing in for a guest.
+func clientFor(t *testing.T, h http.HandlerFunc) *Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return New(hostPort(t, srv))
 }
 
 func TestHealth(t *testing.T) {

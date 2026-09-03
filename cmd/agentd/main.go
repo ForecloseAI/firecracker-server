@@ -28,9 +28,6 @@ import (
 	"cracked/internal/agentd"
 )
 
-// agentID is the one agent this phase runs. The roster arrives next.
-const agentID = "boss"
-
 func main() {
 	once := flag.String("once", "", "run one turn with this prompt and exit, instead of serving")
 	addr := flag.String("addr", "127.0.0.1:8081", "address to serve on")
@@ -120,29 +117,17 @@ func serve(ctx context.Context, sup *agentd.Supervisor, addr string) error {
 // without a client. The profile flag names which agent it addresses: "boss"
 // unless a specialist is being tried out.
 func runOnce(sup *agentd.Supervisor, profile, prompt string) error {
-	id := profile
-	if id != agentd.BossID {
-		if _, err := sup.Create(profile, profile); err != nil {
-			// Already on the roster from an earlier run, which is fine.
-			_ = err
-		}
+	if profile != agentd.BossID {
+		// An error means it is already on the roster from an earlier run.
+		_, _ = sup.Create(profile, profile)
 	}
-	agent, err := sup.Get(id)
+	agent, err := sup.Get(profile)
 	if err != nil {
 		return err
 	}
 	from := agent.Log().LastID()
 	turnErr := agent.Turn(context.Background(), prompt)
-	if err := replay(agent, from); err != nil {
-		return err
-	}
-	reportMemory()
-	return turnErr
-}
-
-// replay prints the events this turn appended, which is the same data a Phase 3
-// SSE client will receive.
-func replay(agent *agentd.Agent, from int) error {
+	// The events this turn appended: the same data an SSE client receives.
 	events, err := agent.Log().Since(from)
 	if err != nil {
 		return err
@@ -150,7 +135,8 @@ func replay(agent *agentd.Agent, from int) error {
 	for _, e := range events {
 		show(e)
 	}
-	return nil
+	reportMemory()
+	return turnErr
 }
 
 // show renders one event for the terminal.
@@ -181,7 +167,7 @@ func show(e agentd.Event) {
 
 // reportMemory prints the Go-heap side of the memory picture. Process RSS is
 // sampled from outside (ps or /usr/bin/time -l), because the two diverge and
-// the plan tracks both from Phase 1 rather than measuring at the end.
+// both are worth tracking.
 func reportMemory() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)

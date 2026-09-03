@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"testing"
 )
 
@@ -21,12 +19,8 @@ func fakeGuest(t *testing.T, body string) (ip string, port int, hits *int) {
 		fmt.Fprint(w, body)
 	}))
 	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, _ := strconv.Atoi(u.Port())
-	return u.Hostname(), p, &n
+	ip, port = hostPort(t, srv)
+	return ip, port, &n
 }
 
 // The daemon's report is hand-written here rather than marshalled from the Go

@@ -8,15 +8,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"cracked/internal/vm"
 )
-
-var seq atomic.Uint64
-
-// nextSeq returns a monotonically increasing counter for generated VM ids.
-func nextSeq() uint64 { return seq.Add(1) }
 
 // handleProxy forwards a subtree to one guest port, rejecting VMs that are not
 // running. httputil.ReverseProxy upgrades WebSockets transparently.

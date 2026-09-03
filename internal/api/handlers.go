@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 
 	"cracked/internal/vm"
 )
@@ -164,11 +165,11 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeVMErr(w, err)
 		return
 	}
-	// Drop the usage watermark too: a ?purge=true recreate resets the guest's
-	// event log to id 1, and a stale high watermark would skip it entirely.
 	s.usage.Forget(v.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": v.ID, "purged": purge})
 }
+
+var seq atomic.Uint64
 
 // generateID builds a unique id when the caller supplies none. The random
 // suffix matters: the sequence restarts at 1 on every server restart, but
@@ -176,7 +177,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 func generateID() string {
 	var b [2]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("vm-%d", nextSeq())
+		return fmt.Sprintf("vm-%d", seq.Add(1))
 	}
-	return fmt.Sprintf("vm-%d-%s", nextSeq(), hex.EncodeToString(b[:]))
+	return fmt.Sprintf("vm-%d-%s", seq.Add(1), hex.EncodeToString(b[:]))
 }

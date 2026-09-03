@@ -18,18 +18,13 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 	return s, s.Routes()
 }
 
-// The dashboard must never set a cookie. One would be scoped to "/", and the
-// untrusted guest serves same-origin content under /vms/{id}/agent/, so an
-// injected page there could ride it and drive the whole fleet.
-func TestDashboardSetsNoCookie(t *testing.T) {
+// The dashboard serves the embedded page.
+func TestDashboardServesTheEmbeddedPage(t *testing.T) {
 	_, h := newTestServer(t)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/dashboard?token=s3cret", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if c := w.Result().Cookies(); len(c) != 0 {
-		t.Errorf("dashboard set %d cookie(s): %v", len(c), c)
 	}
 	if !strings.Contains(w.Body.String(), "<title>cracked</title>") {
 		t.Error("dashboard body is not the embedded page")
@@ -57,7 +52,7 @@ func TestVNCQueryTokenSetsPathScopedCookie(t *testing.T) {
 // content under /vms/{id}/agent/ where an injected page could ride it.
 func TestDashboardRoutesSetNoCookie(t *testing.T) {
 	_, h := newTestServer(t)
-	for _, path := range []string{"/stats", "/metrics", "/vms/alice/stats"} {
+	for _, path := range []string{"/dashboard", "/stats", "/metrics", "/vms/alice/stats"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("GET", path+"?token=s3cret", nil))
 		if c := w.Result().Cookies(); len(c) != 0 {
