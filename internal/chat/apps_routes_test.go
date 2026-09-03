@@ -64,7 +64,8 @@ func (p *provider) route(w http.ResponseWriter, r *http.Request) {
 		// the ONLY thing standing between a slug and a minted link. A stub that
 		// only knew gmail would refuse the others by itself and the test would
 		// pass with the check deleted.
-		fmt.Fprintf(w, `{"items":[{"id":"ac_1","toolkit":{"slug":%q}}]}`,
+		fmt.Fprintf(w, `{"items":[{"id":"ac_1","toolkit":{"slug":%q},
+			"is_composio_managed":true,"status":"ENABLED"}]}`,
 			r.URL.Query().Get("toolkit_slug"))
 	default:
 		w.Write([]byte(p.held))

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"cracked/internal/agent"
@@ -49,28 +51,40 @@ func (s *Server) ensureApps(ctx context.Context, user string, view vmView, cl *a
 func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *agent.Client) {
 	ctx, cancel := context.WithTimeout(ctx, appsMintTimeout)
 	defer cancel()
-	until, err := s.pushApps(ctx, user, view, cl)
+	done, err := s.pushApps(ctx, user, view, cl)
 	if err != nil {
 		log.Printf("chat: connected apps unavailable for %s: %v", view.ID, err)
 		s.failApps(view.ID)
 		return
 	}
-	s.doneApps(view.ID, until)
+	s.doneApps(view.ID, done)
+}
+
+// pushed is what a push that landed leaves behind: when the answer it handed
+// over stops counting, and which apps it was an answer ABOUT.
+//
+// The second is what lets a connection made after the push reach the machine
+// before its hour is up. Without it, connecting an app and then asking an agent
+// to use it means every read in that app raising a card until the machine next
+// comes due -- which is the whole feature working and looking broken.
+type pushed struct {
+	until time.Time
+	apps  string
 }
 
 // pushApps hands this person's machine a ticket to their session, reporting how
 // long the answer it pushed is good for.
-func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (time.Time, error) {
+func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (pushed, error) {
 	held, err := s.sessionFor(ctx, user)
 	if err != nil {
-		return time.Time{}, err
+		return pushed{}, err
 	}
 	if err := validateComposioSessionURL(held.SessionURL); err != nil {
-		return time.Time{}, err
+		return pushed{}, err
 	}
 	// Resolved BEFORE the ticket exists, though nothing here needs it yet.
 	//
-	// On a cold cache this is a round trip to the provider, and everything
+	// On a cold cache this is several round trips to the provider, and everything
 	// between Register and SetApps widens a window that already had teeth: this
 	// runs detached, so a machine erased and recreated mid-push leaves the old
 	// goroutine holding a ticket forgetApps has already dropped. It then pushes
@@ -79,20 +93,112 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// connected apps until the host restarts. Ordering does not close that
 	// window, which is the claim's to close; it declines to widen it by a
 	// provider round trip.
-	actions, until := s.kinds.resolved(ctx, held.Policy)
+	apps, mark, whole := s.appsToResolve(ctx, user)
+	actions, until := s.kinds.resolved(ctx, apps, held.Policy)
+	if !whole {
+		// Guessed at, so it does not get to stand for an hour. The apps below are
+		// the featured six rather than this person's own, which is right for
+		// somebody who has connected some of them and wrong for everybody else.
+		until = earlier(until, time.Now().Add(appsRetry))
+	}
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
 	hostIP, _, _ := hostnet.SlotAddrs(view.Slot)
 	guestURL, err := s.gw.Register(view.ID, view.GuestIP, hostIP, held.SessionURL)
 	if err != nil {
-		return time.Time{}, err
+		return pushed{}, err
 	}
 	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
 		Actions: actions}); err != nil {
-		return time.Time{}, err
+		return pushed{}, err
 	}
-	return until, nil
+	return pushed{until: until, apps: mark}, nil
+}
+
+// appsResolveCap bounds how many apps one push asks the provider about.
+//
+// Separate from appsActionCap, which bounds the BYTES a machine is handed: this
+// one bounds the fan-out that produces them. An app's actions are a round trip
+// each, they go out at once, and they all have to land inside appsMintTimeout
+// alongside minting the session -- so somebody who has connected two hundred
+// apps must not aim two hundred simultaneous requests at the provider every time
+// one of their machines boots.
+//
+// Far above anybody real, like the other two. What it costs when it bites is the
+// tail of a very long list asking about its reads.
+const appsResolveCap = 32
+
+// appsToResolve is the apps whose actions this person's machine needs resolved,
+// and whether the list is actually theirs.
+//
+// Their CONNECTED apps, in any status. Not the featured six, which was the right
+// set only while those were the only apps anybody could connect: an action in an
+// app somebody has not connected cannot run whatever we say about it, so
+// resolving it spends a round trip and a slice of the push on nothing.
+//
+// Any status, including INITIATED, and that is the useful half. A row exists at
+// the provider from the moment a link is minted -- by this service's connect
+// route or by an agent's own connect card -- so an app somebody is signing into
+// right now is already in the next push, rather than asking about its reads
+// until the machine next comes due.
+//
+// Never an error. A push that cannot read this person's connections falls back
+// to the featured apps and says the answer is a guess: a machine with no
+// resolved actions asks about everything, and a provider having a bad minute
+// should not turn every agent chatty.
+func (s *Server) appsToResolve(ctx context.Context, user string) ([]string, string, bool) {
+	held, err := s.composio.Connections(ctx, user)
+	if err != nil {
+		log.Printf("chat: could not read connections for %s, resolving the "+
+			"featured apps instead: %v", user, err)
+		// No mark: a guess must not be remembered as the set this machine was
+		// answered about, or the first route to see the real one would take it
+		// for a change and drop a ticket over nothing.
+		return featured, "", false
+	}
+	return appsIn(held), appsMark(held), true
+}
+
+// appsMark is a person's connected apps reduced to one comparable string.
+//
+// Sorted and deduplicated, so it says only WHICH apps -- the provider's ordering
+// is not stable enough to compare, and a second account for an app already
+// connected changes nothing about what may run unasked. Status is left out for
+// the same reason: a connection expiring does not reclassify a single action.
+//
+// A string rather than a hash: it is a few hundred bytes at worst, and a log
+// line naming the apps is worth more than one naming a number.
+func appsMark(held []composio.Connection) string {
+	apps := make([]string, 0, len(held))
+	for _, conn := range held {
+		if conn.Toolkit != "" && !slices.Contains(apps, conn.Toolkit) {
+			apps = append(apps, conn.Toolkit)
+		}
+	}
+	slices.Sort(apps)
+	return strings.Join(apps, ",")
+}
+
+// appsIn is the apps a person holds an account for, in the order the provider
+// listed them, without repeats -- somebody can hold several accounts for one app
+// and resolving it twice would cost a second round trip for the same answer.
+func appsIn(held []composio.Connection) []string {
+	out := make([]string, 0, len(held))
+	seen := make(map[string]bool, len(held))
+	for _, conn := range held {
+		if conn.Toolkit == "" || seen[conn.Toolkit] {
+			continue
+		}
+		seen[conn.Toolkit] = true
+		if len(out) == appsResolveCap {
+			log.Printf("chat: %d connected apps is the most one push resolves; "+
+				"%s and anything after it will ask", appsResolveCap, conn.Toolkit)
+			return out
+		}
+		out = append(out, conn.Toolkit)
+	}
+	return out
 }
 
 // validateComposioSessionURL is the boundary between caller-writable storage
@@ -141,6 +247,11 @@ func appsOf(sess composio.Session) agentapi.Apps {
 // appsClaim is what this process has done about one machine's session.
 type appsClaim struct {
 	pushed bool
+	// apps is the mark of the connected set the pushed answer was about, so a
+	// route that sees a different one knows this machine is holding an answer to
+	// a question that has changed. Empty on an in-flight or guessed-at claim,
+	// which nothing compares against.
+	apps string
 	// expires is when a pushed claim stops counting, which is the deadline of
 	// the answer that push handed over.
 	//
@@ -192,7 +303,7 @@ func (s *Server) claimApps(machine string) bool {
 // ticket and drops the old. That rotation is why this is not on a timer: it
 // happens on the next request to reach the machine, so a machine nobody is using
 // is not re-ticketed on a schedule for a set nobody is reading.
-func (s *Server) doneApps(machine string, until time.Time) {
+func (s *Server) doneApps(machine string, done pushed) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Usually an overwrite of this machine's own in-flight claim, but not always:
@@ -200,7 +311,31 @@ func (s *Server) doneApps(machine string, until time.Time) {
 	// the internet, and re-adding it unchecked is how the table creeps past its
 	// cap one long push at a time.
 	s.evictClaimsLocked()
-	s.appsClaims[machine] = appsClaim{pushed: true, expires: until}
+	s.appsClaims[machine] = appsClaim{pushed: true, expires: done.until, apps: done.apps}
+}
+
+// noteApps drops a machine's claim when the apps behind it have changed, so the
+// next request pushes an answer about the apps this person actually holds.
+//
+// Called from wherever this service reads somebody's connections for its own
+// reasons, which is the only place it learns of a connection made anywhere else
+// -- an agent's own connect card never touches this service, and the page
+// somebody lands on afterwards is deliberately anonymous (see connected.go).
+// The Apps screen opening is what usually catches it, which is where a person
+// who just connected something is standing.
+//
+// The hour-long claim remains the backstop. This only shortens the wait.
+func (s *Server) noteApps(machine, mark string) {
+	s.mu.Lock()
+	held, ok := s.appsClaims[machine]
+	stale := ok && held.pushed && held.apps != "" && held.apps != mark
+	s.mu.Unlock()
+	if !stale {
+		return
+	}
+	log.Printf("chat: %s was answered about %q and now holds %q; pushing again",
+		machine, held.apps, mark)
+	s.forgetApps(machine)
 }
 
 // evictClaimsLocked keeps the table bounded. Caller holds s.mu. Which entry goes

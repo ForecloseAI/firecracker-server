@@ -10,13 +10,22 @@ import (
 	"cracked/internal/composio"
 )
 
-// kits is a catalogue answer for the featured apps.
+// kits is a catalogue answer: apps this build could actually offer, which means
+// the provider holds credentials for each of them.
 func kits(slugs ...string) []composio.Toolkit {
 	out := make([]composio.Toolkit, 0, len(slugs))
 	for _, s := range slugs {
-		out = append(out, composio.Toolkit{Slug: s, Name: labelFor(s), Logo: "https://l/" + s})
+		out = append(out, composio.Toolkit{Slug: s, Name: labelFor(s),
+			Logo: "https://l/" + s, ManagedAuth: true})
 	}
 	return out
+}
+
+// grouped is one app filed under one heading.
+func grouped(slug, group string) composio.Toolkit {
+	kit := kits(slug)[0]
+	kit.Categories = []composio.Category{{ID: group, Name: labelFor(group)}}
+	return kit
 }
 
 // bySlug is one app's row, or a zero row.
@@ -34,13 +43,22 @@ func bySlug(kits []composio.Toolkit, slug string) composio.Toolkit {
 	return composio.Toolkit{}
 }
 
-// stubCatalog answers for any slug without a provider, counting the fetches.
+// stubCatalog answers with the featured apps and nothing else, counting the
+// walks of the catalogue.
 func stubCatalog() (*appCatalog, *atomic.Int64) {
+	return catalogOf(kits(featured...))
+}
+
+// catalogOf answers with one fixed catalogue, counting the walks.
+func catalogOf(held []composio.Toolkit) (*appCatalog, *atomic.Int64) {
 	var calls atomic.Int64
-	c := &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
-		calls.Add(1)
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug), Logo: "https://l/" + slug}, nil
-	}}
+	c := &appCatalog{
+		fetch: func(context.Context) ([]composio.Toolkit, error) {
+			calls.Add(1)
+			return held, nil
+		},
+		groupings: func(context.Context) ([]composio.Category, error) { return nil, nil },
+	}
 	return c, &calls
 }
 
@@ -101,8 +119,8 @@ func TestTheProjectionIsNeverNull(t *testing.T) {
 	}
 }
 
-// The copy is fetched once and then kept, so opening the screen does not cost
-// six round trips per person.
+// The catalogue is walked once and then kept, so opening the screen does not
+// cost a walk of a thousand apps per person.
 func TestTheCatalogIsFetchedOncePerTTL(t *testing.T) {
 	c, calls := stubCatalog()
 	for range 3 {
@@ -110,24 +128,28 @@ func TestTheCatalogIsFetchedOncePerTTL(t *testing.T) {
 			t.Fatalf("got %d apps, want %d", len(got), len(featured))
 		}
 	}
-	if n := calls.Load(); n != int64(len(featured)) {
-		t.Errorf("fetched %d times, want %d -- the cache is not holding", n, len(featured))
+	if n := calls.Load(); n != 1 {
+		t.Errorf("walked it %d times, want once -- the cache is not holding", n)
 	}
 }
 
-// An app whose metadata could not be read still appears, named after its own
-// slug: somebody who cannot see Slack on the list cannot connect it either.
-// And a partial answer is NOT cached, so a bad minute is not kept for an hour.
+// An app whose copy could not be read still appears, named after its own slug:
+// somebody who cannot see Slack on the list cannot connect it either, and a
+// blank Apps screen during a provider outage is the worse of the two answers.
+// Nothing is cached, so a bad minute is not kept for an hour.
 func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 	var calls atomic.Int64
 	fail := true
-	c := &appCatalog{fetch: func(_ context.Context, slug string) (composio.Toolkit, error) {
-		calls.Add(1)
-		if fail && slug == "slack" {
-			return composio.Toolkit{}, errors.New("provider had a bad minute")
-		}
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug), Logo: "https://l/" + slug}, nil
-	}}
+	c := &appCatalog{
+		fetch: func(context.Context) ([]composio.Toolkit, error) {
+			calls.Add(1)
+			if fail {
+				return nil, errors.New("provider had a bad minute")
+			}
+			return kits(featured...), nil
+		},
+		groupings: func(context.Context) ([]composio.Category, error) { return nil, nil },
+	}
 	got := c.toolkits(context.Background())
 	if len(got) != len(featured) {
 		t.Fatalf("got %d apps, want all %d", len(got), len(featured))
@@ -140,7 +162,7 @@ func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 	calls.Store(0)
 	got = c.toolkits(context.Background())
 	if calls.Load() == 0 {
-		t.Fatal("a partial answer was cached for an hour")
+		t.Fatal("a failed walk was cached for an hour")
 	}
 	if slack := bySlug(got, "slack"); slack.Logo == "" {
 		t.Errorf("the retry did not pick up the real copy: %+v", slack)

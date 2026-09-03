@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,17 +127,67 @@ func TestAPolicyItCannotSetIsRefused(t *testing.T) {
 	}
 }
 
-// An app this build does not offer is refused before the store is touched, for
-// the same reason connecting one is: an arbitrary slug from a client is not a
-// thing to write into somebody's row.
-func TestAPolicyForAnAppThisBuildDoesNotOfferIsRefused(t *testing.T) {
+// A permission can be set for any app, including one nobody has connected yet.
+//
+// This is a PREFERENCE and not a boundary, so an entry for an app with no
+// connection behind it is simply inert: it resolves against no actions and
+// reaches no machine. Refusing one would mean somebody could not say how an app
+// should behave until after they had already connected it, which is backwards,
+// and it would put the provider's availability in front of a settings screen.
+func TestAPolicyCanBeSetForAnAppNobodyHasConnectedYet(t *testing.T) {
 	s, tok, store := withStore(t, `{"items":[]}`)
 	if w := call(t, s, tok, "PUT", "/v1/apps/salesforce/policy",
-		`{"capability":"write","policy":"auto"}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400", w.Code)
+		`{"capability":"write","policy":"auto"}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
-	if store.stored().Policy != nil {
-		t.Errorf("it was stored anyway: %v", store.stored().Policy)
+	if got := store.stored().Policy["salesforce"]["write"]; got != "auto" {
+		t.Errorf("stored %q, want the answer they gave", got)
+	}
+}
+
+// What replaced the allowlist. A slug reaches a URL and a stored row, so it has
+// to look like a slug -- and without a list to check it against, the row itself
+// is what needs the bound.
+func TestASlugThatIsNotOneIsRefusedBeforeTheStoreIsTouched(t *testing.T) {
+	for name, slug := range map[string]string{
+		"a path":         "../../admin",
+		"shouting":       "GMAIL",
+		"a whole essay":  strings.Repeat("a", slugCap+1),
+		"query smuggled": "gmail?x=1",
+	} {
+		s, tok, store := withStore(t, `{"items":[]}`)
+		w := call(t, s, tok, "PUT", "/v1/apps/"+slug+"/policy",
+			`{"capability":"write","policy":"auto"}`)
+		// Anything but a 2xx. Some of these never reach the handler at all --
+		// the mux cleans a traversal into a redirect and refuses a path that
+		// matches no route -- and that is just as good an answer. What this is
+		// really pinning is the line below: nothing was written.
+		if w.Code/100 == 2 {
+			t.Errorf("%s: status %d, want a refusal", name, w.Code)
+		}
+		if store.stored().Policy != nil {
+			t.Errorf("%s: it was stored anyway: %v", name, store.stored().Policy)
+		}
+	}
+}
+
+// The bound the allowlist used to provide by accident. Nothing else limits how
+// many apps a row can carry now, and that row is read on every push.
+func TestAPolicyRowStopsGrowingAtItsCap(t *testing.T) {
+	s, tok, store := withStore(t, `{"items":[]}`)
+	store.held = agentapi.Apps{Policy: map[string]map[string]string{}}
+	for i := range policyAppCap {
+		store.held.Policy[fmt.Sprintf("app%d", i)] = map[string]string{"write": "auto"}
+	}
+	if w := call(t, s, tok, "PUT", "/v1/apps/onemore/policy",
+		`{"capability":"write","policy":"auto"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 on the %dst app", w.Code, policyAppCap+1)
+	}
+	// An app already in the row is still settable, or somebody at the cap could
+	// never change their mind about anything.
+	if w := call(t, s, tok, "PUT", "/v1/apps/app0/policy",
+		`{"capability":"write","policy":"never"}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d: a row at its cap froze the apps already in it", w.Code)
 	}
 }
 

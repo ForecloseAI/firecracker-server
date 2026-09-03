@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"cracked/internal/composio"
 )
@@ -24,9 +25,9 @@ type Server struct {
 	// off without a flag.
 	composio *composio.Client
 	apps     AppsStore
-	// catalog is the featured apps' copy, shared by every person on the fleet.
+	// catalog is the provider's whole catalogue, shared by every person on the
+	// fleet: what can be offered, what it is called, and how it is grouped.
 	catalog *appCatalog
-	// reads is which of their actions only read, shared the same way.
 	// kinds is what kind of thing each connected-app action is, shared the same
 	// way. It is what a person's policy is resolved against. Not `caps`, which
 	// this struct already uses for the VNC grants.
@@ -41,12 +42,16 @@ type Server struct {
 	// call sites, and a delete forgotten in one of them is a machine that never
 	// gets its apps back.
 	appsClaims map[string]appsClaim
+	// connects is when each person last minted connect links, which is what
+	// bounds the one route here that can leave permanent state at the provider.
+	connects map[string][]time.Time
 }
 
 // NewServer wires the chat service together.
 func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server {
 	s := &Server{cfg: cfg, control: control, caps: caps, auth: auth,
 		bridges: map[string]*Bridge{}, appsClaims: map[string]appsClaim{},
+		connects: map[string][]time.Time{},
 		composio: composio.New(cfg.ComposioKey, cfg.ComposioBase)}
 	// Only alongside a provider. A store with nothing to remember would be a
 	// live database dependency bought for nothing.

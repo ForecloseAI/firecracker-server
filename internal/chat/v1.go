@@ -42,6 +42,10 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/stream", s.apiGuard(s.streamV1))
 	mux.HandleFunc("DELETE /v1/account", s.apiGuard(s.deleteAccount))
 	mux.HandleFunc("GET /v1/apps", s.apiGuard(s.listApps))
+	// Ahead of {slug} in the file for readability only -- the mux prefers the
+	// literal whatever the order, which is what keeps "catalog" from being read
+	// as an app called catalog.
+	mux.HandleFunc("GET /v1/apps/catalog", s.apiGuard(s.browseApps))
 	mux.HandleFunc("GET /v1/apps/connections", s.apiGuard(s.listAppConnections))
 	mux.HandleFunc("POST /v1/apps/{slug}/connect", s.apiGuard(s.connectApp))
 	mux.HandleFunc("DELETE /v1/apps/connections/{id}", s.apiGuard(s.disconnectApp))

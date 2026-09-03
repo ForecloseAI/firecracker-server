@@ -2,11 +2,13 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -179,18 +181,21 @@ func (h *heldAppsStore) Get(context.Context, string) (agentapi.Apps, error) { re
 func (h *heldAppsStore) Put(context.Context, string, agentapi.Apps) error   { return nil }
 func (h *heldAppsStore) Delete(context.Context, string) error               { return nil }
 
-// The read-only set is resolved BEFORE the ticket is minted, not between the
-// ticket and the push.
+// Everything that crosses the internet happens BEFORE the ticket is minted, not
+// between the ticket and the push.
 //
-// On a cold cache that fetch is a round trip to the provider. pushApps runs
-// detached, so a machine erased and recreated while it is in flight leaves the
-// old goroutine holding a ticket forgetApps has already dropped -- which it then
-// pushes over the replacement's good one, and the replacement's claim is latched
-// pushed, so nothing tries again. Ordering is not what closes that window, but a
-// provider round trip inside it is this PR's to not add.
+// On a cold cache that is now several round trips: this person's connections,
+// and then each of those apps' actions. pushApps runs detached, so a machine
+// erased and recreated while it is in flight leaves the old goroutine holding a
+// ticket forgetApps has already dropped -- which it then pushes over the
+// replacement's good one, and the replacement's claim is latched pushed, so
+// nothing tries again. Ordering is not what closes that window, but every round
+// trip moved inside it widens it.
 //
-// Pinned by what the gateway holds WHILE the fetch runs, so moving the call back
-// after Register fails this rather than merely reordering two lines.
+// Pinned by what the gateway holds WHILE each call runs, so moving one back
+// after Register fails this rather than merely reordering two lines. Both are
+// checked: reading the connections was added after this test was written, and a
+// test that only watched the capability fetch would not have noticed.
 func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -202,14 +207,27 @@ func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 	}
 
 	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
-	var ticketsWhenFetched int
-	kinds, _ := stubCaps(func(app string) (map[string]string, error) {
+	var mu sync.Mutex
+	tickets := map[string]int{}
+	note := func(what string) {
 		gw.mu.Lock()
-		ticketsWhenFetched = len(gw.routes)
+		held := len(gw.routes)
 		gw.mu.Unlock()
+		mu.Lock()
+		tickets[what] = held
+		mu.Unlock()
+	}
+	kinds, _ := stubCaps(func(app string) (map[string]string, error) {
+		note("actions")
 		return map[string]string{app + "_GET": composio.CapRead}, nil
 	})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		note("connections")
+		w.Write([]byte(`{"items":[{"id":"ca_1","status":"ACTIVE","toolkit":{"slug":"gmail"}}]}`))
+	}))
+	defer provider.Close()
 	s := &Server{gw: gw, kinds: kinds, appsClaims: map[string]appsClaim{},
+		composio: composio.New("k", provider.URL),
 		apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 
@@ -218,10 +236,16 @@ func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 	if _, err := s.pushApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: host}, cl); err != nil {
 		t.Fatalf("push failed: %v", err)
 	}
-	if ticketsWhenFetched != 0 {
-		t.Errorf("the provider was asked with %d ticket(s) already minted -- the fetch "+
-			"sits between Register and SetApps, widening the window where an erased "+
-			"machine's push lands on its replacement", ticketsWhenFetched)
+	for _, what := range []string{"connections", "actions"} {
+		held, asked := tickets[what]
+		if !asked {
+			t.Fatalf("the %s were never read, so this pins nothing", what)
+		}
+		if held != 0 {
+			t.Errorf("the %s were read with %d ticket(s) already minted -- that call "+
+				"sits between Register and SetApps, widening the window where an "+
+				"erased machine's push lands on its replacement", what, held)
+		}
 	}
 }
 
@@ -240,13 +264,13 @@ func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 
 	// A set that is still good keeps the machine out: re-pushing rotates its
 	// ticket, so doing it per request would 404 anything in flight for nothing.
-	s.doneApps("m1", time.Now().Add(appCapsTTL))
+	s.doneApps("m1", pushed{until: time.Now().Add(appCapsTTL)})
 	if s.claimApps("m1") {
 		t.Error("a machine holding a fresh set was pushed again anyway")
 	}
 
 	// Once the set it was handed is stale, it is due another push.
-	s.doneApps("m1", time.Now().Add(-time.Second))
+	s.doneApps("m1", pushed{until: time.Now().Add(-time.Second)})
 	if !s.claimApps("m1") {
 		t.Error("a machine holding a stale set was never pushed again, so a tool " +
 			"the provider stopped calling read-only stays read-only there until restart")
@@ -289,11 +313,28 @@ func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 		t.Fatal(err)
 	}
 	kinds, _ := stubCaps(func(string) (map[string]string, error) { return nil, nil })
-	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"),
+	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"), composio: connectedTo(t, "gmail"),
 		kinds: kinds, appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 	guestPort, _ := strconv.Atoi(port)
 	return s, agent.New(host, guestPort), &body
+}
+
+// connectedTo stands up a provider that reports these apps as connected, which
+// is what a push now resolves over.
+func connectedTo(t *testing.T, apps ...string) *composio.Client {
+	t.Helper()
+	rows := make([]string, 0, len(apps))
+	for _, app := range apps {
+		rows = append(rows, fmt.Sprintf(
+			`{"id":"ca_%s","status":"ACTIVE","toolkit":{"slug":%q}}`, app, app))
+	}
+	body := `{"items":[` + strings.Join(rows, ",") + `]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return composio.New("k", srv.URL)
 }
 
 // A push that landed has to say so on the SET's clock, not the one the claim was
@@ -344,5 +385,92 @@ func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 	}
 	if s.claimApps("m1") {
 		t.Error("a failure was retried immediately rather than on the cooldown")
+	}
+}
+
+// THE test for what makes opening the catalogue usable rather than merely
+// possible. An app connected after a machine was pushed is an app whose reads
+// raise a card until that machine next comes due -- up to an hour of the feature
+// working and looking broken. The claim remembers WHICH apps its answer was
+// about, so the next read of somebody's connections notices.
+func TestAnAppConnectedAfterThePushBringsTheMachineBackEarly(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail"})
+
+	s.noteApps(machine, "gmail")
+	if _, held := s.appsClaims[machine]; !held {
+		t.Fatal("an unchanged set dropped the claim, so every screen re-pushes")
+	}
+	s.noteApps(machine, "gmail,notion")
+	if _, held := s.appsClaims[machine]; held {
+		t.Error("a newly connected app left the machine on its old answer")
+	}
+}
+
+// A guessed-at answer is not remembered as the set it was about. A push that
+// could not read somebody's connections resolves the featured apps instead, and
+// letting that stand as the mark would make the first route to see the real list
+// take it for a change and drop a live ticket over nothing.
+func TestAGuessedAnswerIsNotRememberedAsTheSet(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL)})
+	s.noteApps(machine, "gmail,notion")
+	if _, held := s.appsClaims[machine]; !held {
+		t.Error("a guess was compared against the real list and lost the claim")
+	}
+}
+
+// What a push resolves over: this person's own apps, deduplicated, in any
+// status. INITIATED is the useful half -- a row exists at the provider from the
+// moment a link is minted, so an app somebody is signing into right now is
+// already in the next push rather than asking about its reads until the machine
+// comes due.
+func TestThePushResolvesTheAppsThisPersonActuallyHolds(t *testing.T) {
+	got := appsIn([]composio.Connection{
+		{ID: "ca_1", Toolkit: "gmail", Status: composio.StatusActive},
+		{ID: "ca_2", Toolkit: "gmail", Status: "EXPIRED"},
+		{ID: "ca_3", Toolkit: "notion", Status: "INITIATED"},
+		{ID: "ca_4", Toolkit: ""},
+	})
+	if !slices.Equal(got, []string{"gmail", "notion"}) {
+		t.Errorf("got %v, want each app once and the nameless row dropped", got)
+	}
+}
+
+// The fan-out is bounded. Every app's actions are a round trip, they go out at
+// once, and they all have to land inside appsMintTimeout alongside minting the
+// session -- so somebody who has connected two hundred apps must not aim two
+// hundred simultaneous requests at the provider every time a machine boots.
+func TestTheFanOutIsBoundedByWhatOnePushMayAsk(t *testing.T) {
+	held := make([]composio.Connection, 0, appsResolveCap*2)
+	for i := range appsResolveCap * 2 {
+		held = append(held, composio.Connection{Toolkit: fmt.Sprintf("app%d", i)})
+	}
+	if got := appsIn(held); len(got) != appsResolveCap {
+		t.Errorf("resolving %d apps, want at most %d", len(got), appsResolveCap)
+	}
+}
+
+// The mark says only WHICH apps, so it does not churn on things that change
+// nothing: the provider's ordering is not stable, a second account for an app
+// already connected adds no actions, and a connection expiring reclassifies
+// none of them.
+func TestTheMarkIgnoresEverythingThatChangesNoActions(t *testing.T) {
+	one := appsMark([]composio.Connection{
+		{ID: "ca_1", Toolkit: "notion", Status: composio.StatusActive},
+		{ID: "ca_2", Toolkit: "gmail", Status: composio.StatusActive},
+	})
+	two := appsMark([]composio.Connection{
+		{ID: "ca_3", Toolkit: "gmail", Status: "EXPIRED"},
+		{ID: "ca_4", Toolkit: "gmail", Status: composio.StatusActive},
+		{ID: "ca_5", Toolkit: "notion", Status: composio.StatusActive},
+	})
+	if one != two {
+		t.Errorf("%q and %q differ, so a machine re-pushes over a reordered list", one, two)
+	}
+	if same := appsMark(nil); same == one {
+		t.Error("holding nothing marks the same as holding two apps")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"cracked/internal/agentapi"
@@ -44,6 +46,11 @@ func (s *Server) heldApps(w http.ResponseWriter, r *http.Request, user string) (
 		fail(w, http.StatusBadGateway, "could not check your connected accounts")
 		return nil, false
 	}
+	// The only place this service learns that somebody connected an app
+	// somewhere else -- an agent's own connect card never reaches here, and the
+	// page a person lands on afterwards is deliberately anonymous. Hung off the
+	// read every one of these routes already does, so it costs nothing.
+	s.noteApps(machineFor(user), appsMark(held))
 	return held, true
 }
 
@@ -63,9 +70,10 @@ type Connection struct {
 
 // listAppConnections is every account this person has connected.
 //
-// Strictly more than the Apps screen shows: an agent can connect any app the
-// provider supports, not only the six offered here, so somebody may hold
-// accounts this build would never list. Those still have to be visible and
+// Can still be more than any screen lists: an agent connects an app by asking
+// the provider directly, and the catalogue this build browses is a filtered view
+// of theirs. An account for something we would not offer today -- an app since
+// withdrawn, one whose credentials moved -- still has to be visible and
 // disconnectable.
 func (s *Server) listAppConnections(w http.ResponseWriter, r *http.Request, user string) {
 	if s.composio == nil {
@@ -139,10 +147,17 @@ func (s *Server) setAppPolicy(w http.ResponseWriter, r *http.Request, user strin
 		return
 	}
 	// Two refusals, not one condition: collapsing them with || short-circuits the
-	// decode, so an app we do not offer answered 200 with an empty body and did
-	// nothing at all.
+	// decode, so a slug we refuse answered 200 with an empty body and did nothing
+	// at all.
+	//
+	// The shape is all that is checked, and no catalogue lookup: this is a
+	// preference, not a boundary, and a preference about an app somebody has not
+	// connected is simply inert -- it resolves against no actions and reaches no
+	// machine. Refusing one would mean a person could not set how an app should
+	// behave until after they had already connected it, which is backwards, and
+	// it would put the provider's availability in front of a setting screen.
 	slug := r.PathValue("slug")
-	if !slices.Contains(featured, slug) {
+	if !validSlug(slug) {
 		fail(w, http.StatusBadRequest, "that app is not one this version can set permissions for")
 		return
 	}
@@ -157,6 +172,14 @@ func (s *Server) setAppPolicy(w http.ResponseWriter, r *http.Request, user strin
 	stored, err := s.apps.Get(r.Context(), user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "could not read your permissions")
+		return
+	}
+	// A bound on the row rather than on the app, which is what dropping the
+	// allowlist costs: nothing now stops a client setting a preference about a
+	// slug nobody has heard of, and the row is read on every push. Far above
+	// what anyone reaches, since it takes a settings screen tap per entry.
+	if _, held := stored.Policy[slug]; !held && len(stored.Policy) >= policyAppCap {
+		fail(w, http.StatusBadRequest, "that is more apps than this version keeps permissions for")
 		return
 	}
 	if err := s.savePolicy(r.Context(), user, stored, slug, req); err != nil {
@@ -218,18 +241,32 @@ type ConnectLink struct {
 
 // connectApp mints the page a person authorises one app on.
 //
-// A slug this build does not offer is refused here rather than passed through.
-// The provider supports over a thousand apps and would happily mint a link for
-// any of them, but this build has tested six -- and an arbitrary slug from a
-// client is not a thing to hand onward.
+// The catalogue is the gate, and it is a real one rather than a formality. This
+// is the only route that creates provider state which OUTLIVES the request: a
+// link needs an auth config, and one is created for any app nobody has connected
+// yet. That config is project-wide, it is what every later connection to that
+// app is minted against, and nothing here deletes it -- so a slug straight from
+// a client would let anybody signed in leave a config behind for every app in
+// somebody else's catalogue, and count them against this project's plan.
+//
+// Passing the catalogue means the provider carries the app, it has credentials
+// of its own for it, and it is not being withdrawn. Those are exactly the three
+// things that decide whether the config this may create can ever work.
 func (s *Server) connectApp(w http.ResponseWriter, r *http.Request, user string) {
 	if s.composio == nil {
 		fail(w, http.StatusBadGateway, "connecting apps is not available here")
 		return
 	}
 	slug := r.PathValue("slug")
-	if !slices.Contains(featured, slug) {
+	if !validSlug(slug) || !s.offers(r.Context(), slug) {
 		fail(w, http.StatusBadRequest, "that app is not one this version can connect")
+		return
+	}
+	if !s.mayConnect(user) {
+		// 429 rather than a refusal about the app: nothing is wrong with what
+		// they asked for, and the client should show a "try again in a moment"
+		// rather than "we do not have that app".
+		fail(w, http.StatusTooManyRequests, "that is a lot of apps at once; try again in a minute")
 		return
 	}
 	link, err := s.composio.Link(r.Context(), user, slug, s.cfg.ComposioCallback)
@@ -238,6 +275,24 @@ func (s *Server) connectApp(w http.ResponseWriter, r *http.Request, user string)
 		return
 	}
 	writeJSON(w, http.StatusCreated, ConnectLink{RedirectURL: link.URL, ExpiresAt: link.ExpiresAt})
+}
+
+// offers reports whether this build will put somebody through an app's sign-in.
+//
+// During a catalogue outage it falls back to the featured apps, which is exactly
+// the gate this route had before the catalogue was opened: six slugs written
+// down here, every one of them already driven end to end and already holding a
+// config in any deployment that has been used. So the fallback cannot create
+// anything new and cannot fail in a way that sticks -- and a person who cannot
+// reach the provider's catalogue can still connect the apps most of them came
+// for.
+func (s *Server) offers(ctx context.Context, slug string) bool {
+	held := s.catalog.current(ctx)
+	if held == nil {
+		return slices.Contains(featured, slug)
+	}
+	_, ok := held.get(slug)
+	return ok
 }
 
 // disconnectApp hands one account's authorisation back.
@@ -268,7 +323,88 @@ func (s *Server) disconnectApp(w http.ResponseWriter, r *http.Request, user stri
 		fail(w, http.StatusBadGateway, "could not disconnect that account")
 		return
 	}
+	// The machine is holding an answer about an app this person no longer has.
+	// Harmless in itself -- the calls fail at the provider either way -- but the
+	// claim's mark now describes a set that is gone, and noteApps compares
+	// against the list as it was read at the top of this handler. Dropping it
+	// here is what stops the next read seeing "unchanged" and leaving a stale
+	// answer standing for the rest of the hour.
+	s.forgetApps(machineFor(user))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// browseApps is the rest of the catalogue: every app this build can connect,
+// grouped, searchable and paged.
+//
+// A second route rather than query parameters on the Apps screen, because it
+// answers a different question. GET /v1/apps is "what are we putting in front of
+// you", a short list whose whole shape is a JSON array; this is "what else is
+// there", which needs headings, a page and a cursor. Folding them together would
+// have turned an array into an object and broken every client that has the first
+// one.
+func (s *Server) browseApps(w http.ResponseWriter, r *http.Request, user string) {
+	if s.composio == nil {
+		writeJSON(w, http.StatusOK, Catalog{Apps: []App{}})
+		return
+	}
+	held := s.catalog.current(r.Context())
+	if held == nil {
+		// 502 rather than an empty catalogue: an empty one reads as "there are no
+		// other apps", which is a wrong answer a person would believe and act on.
+		fail(w, http.StatusBadGateway, "could not read the list of apps just now")
+		return
+	}
+	mine, ok := s.heldApps(w, r, user)
+	if !ok {
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	group := r.URL.Query().Get("category")
+	kits, next := held.browse(query, group, cursorOf(r), browsePage)
+	out := Catalog{Groups: held.groups, Apps: projectApps(kits, mine), NextCursor: markCursor(next)}
+	// Only on the screen as it first opens. Once somebody has searched or picked
+	// a heading they are looking at one list, and previews of other headings
+	// underneath it are furniture in the way of the answer.
+	if query == "" && group == "" && cursorOf(r) == 0 {
+		out.Sections = held.preview()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// Catalog is the browse screen: the headings, a page of apps, and where the next
+// page starts.
+type Catalog struct {
+	// Groups is every heading with something under it, so the screen can offer
+	// them all without asking what each contains.
+	Groups []Group `json:"categories,omitempty"`
+	// Sections is a few apps under each of the leading headings -- the "here is
+	// a taste of what there is" the screen opens on. Absent once somebody has
+	// searched or chosen.
+	Sections []Section `json:"sections,omitempty"`
+	// Apps is this page of the full list, in the provider's usage order.
+	Apps []App `json:"apps"`
+	// NextCursor is empty when this was the last page.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// cursorOf reads where a page starts, treating anything unreadable as the
+// beginning. A cursor is an offset into a list that is rebuilt every hour, so it
+// is already approximate: somebody paging across a refresh may see a row twice
+// or miss one, which is a better trade than holding a snapshot per reader.
+func cursorOf(r *http.Request) int {
+	from, err := strconv.Atoi(r.URL.Query().Get("cursor"))
+	if err != nil || from < 0 {
+		return 0
+	}
+	return from
+}
+
+// markCursor renders where the next page starts, or nothing when there is none.
+func markCursor(from int) string {
+	if from == 0 {
+		return ""
+	}
+	return strconv.Itoa(from)
 }
 
 // owns reports whether a connection id is one of this person's.

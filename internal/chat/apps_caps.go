@@ -10,9 +10,9 @@ import (
 	"cracked/internal/composio"
 )
 
-// appCapsTTL is how long the capability map is kept. An hour, matching the
-// catalogue: it is the provider's answer, the same for
-// everyone on the fleet, and it moves only when they ship or re-annotate a tool.
+// appCapsTTL is how long one app's capability map is kept. An hour, matching the
+// catalogue: it is the provider's answer, the same for everyone on the fleet, and
+// it moves only when they ship or re-annotate a tool.
 const appCapsTTL = time.Hour
 
 // appsRetry is how long a machine keeps an INCOMPLETE answer before it is pushed
@@ -20,47 +20,101 @@ const appCapsTTL = time.Hour
 //
 // Far shorter than the TTL, because an incomplete answer is one an outage made:
 // what is missing from it asks a person, and healing that should not wait an
-// hour. Far longer than appsRetryAfter, because it is not free -- an incomplete
-// answer is never cached, so every machine coming due re-fans-out across six
-// apps, and a 30-second cadence would aim that at a provider already having a
-// bad day.
+// hour. Far longer than appsRetryAfter, because it is not free -- what is missing
+// is never cached, so every machine coming due re-fetches it, and a 30-second
+// cadence would aim that at a provider already having a bad day.
 const appsRetry = 5 * time.Minute
 
-// appCaps is what kind of thing each of the featured apps' actions is, as the
-// PROVIDER annotates it. No catalogue of our own -- 910 tools we would otherwise
-// keep in step with somebody else's release.
+// appsActionCap bounds how many actions one machine is pushed.
+//
+// The guest refuses a push over appsBodyCap, 256 KiB, and does it in a way that
+// takes the SESSION down with the set rather than just the set -- see
+// internal/agentd/routes_apps.go, which says so. That used to be unreachable
+// because the answer covered six apps and nothing else; now it covers whatever a
+// person has connected, so something has to be the thing that gives.
+//
+// The arithmetic: ~55 bytes per entry, measured at ~50 KB for the 910 tools of
+// the featured six on 2026-09-02. Dropping the ask entries below roughly halves
+// what a real answer carries, so 2000 is about 110 KB -- comfortably under the
+// guest's ceiling, and well past what anyone reaches. The featured six, all
+// connected, resolve to about four hundred.
+//
+// Sized to be unreachable rather than snug, deliberately: what it costs when it
+// bites is a person's last few apps asking about reads, and that is a cost they
+// cannot see the reason for.
+const appsActionCap = 2000
+
+// appCapsCap bounds the per-app cache, for the reason appsClaimCap does: the
+// catalogue is a thousand apps deep now, and a service running for weeks must
+// not keep an entry for every app anybody on the fleet has ever connected.
+const appCapsCap = 256
+
+// appCaps is what kind of thing each app's actions are, as the PROVIDER
+// annotates them. No catalogue of our own -- hundreds of tools per app we would
+// otherwise keep in step with somebody else's release.
 //
 // Fleet-wide and cached, unlike the policy it is resolved against, which is one
 // person's and stored. Keeping the expensive half shared is the whole reason the
-// two are separate: a person changing a setting must not cost six round trips.
+// two are separate: a person changing a setting must not cost a round trip per
+// app they have connected.
+//
+// Keyed per app rather than held as one set, which is what opening the catalogue
+// changed. A set covering six named apps could be fetched whole and expire
+// whole; there is no whole to fetch when the apps in question are whichever ones
+// this person happens to have connected.
 type appCaps struct {
 	// fetch is a field so a test can answer without a provider.
 	fetch func(context.Context, string) (map[string]string, error)
 
-	mu      sync.Mutex
-	held    map[string]map[string]string
+	mu   sync.Mutex
+	held map[string]capsEntry
+}
+
+// capsEntry is one app's actions and when they go stale.
+type capsEntry struct {
+	caps    map[string]string
 	expires time.Time
 }
 
 // newAppCaps prepares the cache. It fetches nothing until asked.
 func newAppCaps(c *composio.Client) *appCaps {
-	return &appCaps{fetch: c.Capabilities}
+	return &appCaps{fetch: c.Capabilities, held: map[string]capsEntry{}}
 }
 
-// resolved is what each action needs from this person: auto to run, ask to raise
-// a card, never to refuse. Flattened by slug, so the guest looks up one string
+// resolved is what each action needs from this person: auto to run, never to
+// refuse, and ABSENT to ask. Flattened by slug, so the guest looks up one string
 // and holds no vocabulary of its own.
+//
+// apps is what to resolve over -- the apps this person has connected, since an
+// action in an app they have not connected cannot run whatever we say about it.
+// Their order decides what survives the cap.
+//
+// Nothing that resolves to asking is sent. The guest already treats an unknown
+// slug as ask (needs() in internal/agentd/apps.go), so this is the same policy
+// expressed in half the bytes -- and the bytes are the thing that has a ceiling.
 //
 // The deadline is the caller's, not this cache's: a machine is pushed a COPY and
 // keeps it until pushed again, so what it governs is when that machine is due
 // another push.
-func (a *appCaps) resolved(ctx context.Context,
+func (a *appCaps) resolved(ctx context.Context, apps []string,
 	policy map[string]map[string]string) (map[string]string, time.Time) {
-	held, until := a.capabilities(ctx)
+	held, until := a.capabilities(ctx, apps)
 	out := make(map[string]string)
-	for app, slugs := range held {
-		for slug, capability := range slugs {
-			out[slug] = actionFor(capability, policy[app][capability])
+	for _, app := range apps {
+		for slug, capability := range held[app] {
+			action := actionFor(capability, policy[app][capability])
+			if action == agentapi.ActionAsk {
+				continue
+			}
+			if len(out) == appsActionCap {
+				// Said out loud, because nobody can see the reason from the
+				// outside: the apps past this point ask about their reads, which
+				// reads as a gate having a bad day rather than a ceiling.
+				log.Printf("chat: %d actions is the most one machine is pushed; "+
+					"%s and anything after it will ask", appsActionCap, app)
+				return out, until
+			}
+			out[slug] = action
 		}
 	}
 	return out, until
@@ -88,56 +142,121 @@ func actionFor(capability, chosen string) string {
 	return agentapi.ActionAsk
 }
 
-// capabilities is every featured app's actions and what kind each is.
+// capabilities is each of these apps' actions and what kind each is, with the
+// deadline of the soonest thing in it.
 //
-// Never fails, and an incomplete answer is never cached: what is missing from it
-// asks a person, and caching that would spend an hour asking about reads that
+// Never fails, and what could not be read is never cached: what is missing from
+// it asks a person, and caching that would spend an hour asking about reads that
 // are perfectly safe.
-func (a *appCaps) capabilities(ctx context.Context) (map[string]map[string]string, time.Time) {
-	if held, until, ok := a.fresh(); ok {
-		return held, until
+func (a *appCaps) capabilities(ctx context.Context,
+	apps []string) (map[string]map[string]string, time.Time) {
+	held := make(map[string]map[string]string, len(apps))
+	until := time.Now().Add(appCapsTTL)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	// Parallel because this sits in front of a machine somebody is waiting on,
+	// and an app's tools are a round trip each: a person with a dozen connected
+	// would otherwise wait a dozen of them in series, inside a mint timeout that
+	// also has to cover minting the session itself.
+	for _, app := range apps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			caps, expires, ok := a.appCapabilities(ctx, app)
+			mu.Lock()
+			defer mu.Unlock()
+			if !ok {
+				// Not cached, and the machine given it comes back on the short
+				// clock rather than the full TTL -- an outage's answer must not
+				// outlive it.
+				until = earlier(until, time.Now().Add(appsRetry))
+				return
+			}
+			held[app] = caps
+			until = earlier(until, expires)
+		}()
 	}
-	got, whole := a.fetchAll(ctx)
-	if !whole {
+	wg.Wait()
+	if len(held) != len(apps) {
 		// Said out loud because the cost lands somewhere else entirely: the
 		// machine pushed this keeps it until pushed again, and every action
 		// missing from it asks. Silence here reads as a chatty gate.
-		log.Printf("chat: capability map is incomplete, %d apps; some reads will ask", len(got))
-		// Not cached, and the machine given it comes back on the short clock
-		// rather than the full TTL -- an outage's answer must not outlive it.
-		return got, time.Now().Add(appsRetry)
+		log.Printf("chat: %d of %d apps answered; some reads will ask", len(held), len(apps))
 	}
-	return got, a.keep(got)
+	return held, until
 }
 
-// fresh returns the cached map while it is still good, with its deadline. The
-// bool is what says so: a legitimately empty answer is not nothing cached.
-func (a *appCaps) fresh() (map[string]map[string]string, time.Time, bool) {
+// appCapabilities is one app's actions, from the cache or the provider.
+//
+// The bool is what says whether it was read at all, and it has to be: an app
+// with no actions is a perfectly good answer worth caching for the hour, while
+// an app that did not answer is retried on the short clock. Reading a nil map as
+// the second would put every app the provider legitimately has nothing for on a
+// five-minute loop forever.
+func (a *appCaps) appCapabilities(ctx context.Context, app string) (map[string]string, time.Time, bool) {
+	if held, ok := a.fresh(app); ok {
+		return held.caps, held.expires, true
+	}
+	got, err := a.fetch(ctx, app)
+	if err != nil {
+		// Named, with its reason. A count of missing apps cannot tell a provider
+		// outage from one toolkit that outgrew a decode limit -- and the second
+		// is the one that never heals on its own.
+		log.Printf("chat: %s did not answer: %v", app, err)
+		return nil, time.Time{}, false
+	}
+	ourView(got)
+	return got, a.keep(app, got), true
+}
+
+// fresh returns one app's cached actions while they are still good. The bool is
+// what says so: an app with no actions is not an app nothing is cached for.
+func (a *appCaps) fresh(app string) (capsEntry, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.held, a.expires, time.Now().Before(a.expires)
+	held, ok := a.held[app]
+	return held, ok && time.Now().Before(held.expires)
 }
 
-// keep stores a complete map and starts its clock, reporting when it runs out.
-func (a *appCaps) keep(held map[string]map[string]string) time.Time {
+// keep stores one app's actions and starts its clock, reporting when it runs out.
+func (a *appCaps) keep(app string, caps map[string]string) time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.held, a.expires = held, time.Now().Add(appCapsTTL)
-	return a.expires
+	a.evictLocked()
+	expires := time.Now().Add(appCapsTTL)
+	a.held[app] = capsEntry{caps: caps, expires: expires}
+	return expires
 }
 
-// fetchAll reads every featured app. One that did not answer contributes
-// nothing, so its actions fall outside the map and ask.
-func (a *appCaps) fetchAll(ctx context.Context) (map[string]map[string]string, bool) {
-	out, whole := fanOut(ctx, a.fetch, func(string) map[string]string { return nil })
-	held := make(map[string]map[string]string, len(featured))
-	for i, app := range featured {
-		if out[i] != nil {
-			ourView(out[i])
-			held[app] = out[i]
+// evictLocked keeps the table bounded. Caller holds a.mu. Expired entries go
+// first because they are free to lose; past that, which one goes is not worth
+// choosing -- the cap is far above what a fleet reaches, so an eviction costs one
+// re-fetch and nothing else.
+func (a *appCaps) evictLocked() {
+	now := time.Now()
+	for app, held := range a.held {
+		if len(a.held) < appCapsCap {
+			return
+		}
+		if now.After(held.expires) {
+			delete(a.held, app)
 		}
 	}
-	return held, whole
+	for app := range a.held {
+		if len(a.held) < appCapsCap {
+			return
+		}
+		delete(a.held, app)
+	}
+}
+
+// earlier is the sooner of two deadlines. time.Time is not ordered, so min does
+// not take it, and a push is only good until the FIRST thing in it goes stale.
+func earlier(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // ourView applies the handful of annotations we disagree with, before anything

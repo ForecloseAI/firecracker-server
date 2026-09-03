@@ -25,8 +25,11 @@ func TestConnectMintsALinkWithItsDeadline(t *testing.T) {
 	}
 }
 
-// The provider would mint a link for any of its thousand-odd apps. This build
-// has tested six, and an arbitrary slug from a client is not one to pass onward.
+// The provider would mint a link for any of its thousand-odd apps, and the
+// catalogue is now what says which of those this build will put somebody
+// through. A slug that is not in it never reaches the provider -- which matters
+// because the call it would reach CREATES an auth config, project-wide and
+// permanent, for an app nobody chose to offer.
 func TestConnectRefusesAnAppThisBuildDoesNotOffer(t *testing.T) {
 	p := &provider{held: `{"items":[]}`}
 	s, tok := p.serve(t)
