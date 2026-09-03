@@ -59,7 +59,7 @@ func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *age
 }
 
 // pushApps hands this person's machine a ticket to their session, reporting how
-// long the read-only set it pushed is good for.
+// long the answer it pushed is good for.
 func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (time.Time, error) {
 	held, err := s.sessionFor(ctx, user)
 	if err != nil {
@@ -78,8 +78,8 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// claim is latched pushed, so nothing tries again and the machine has no
 	// connected apps until the host restarts. Ordering does not close that
 	// window, which is the claim's to close; it declines to widen it by a
-	// provider round trip, which is this PR's to not open.
-	reads, until := s.reads.slugs(ctx)
+	// provider round trip.
+	actions, until := s.kinds.resolved(ctx, held.Policy)
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
@@ -89,7 +89,7 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		return time.Time{}, err
 	}
 	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		ReadOnly: reads}); err != nil {
+		Actions: actions}); err != nil {
 		return time.Time{}, err
 	}
 	return until, nil
@@ -142,13 +142,13 @@ func appsOf(sess composio.Session) agentapi.Apps {
 type appsClaim struct {
 	pushed bool
 	// expires is when a pushed claim stops counting, which is the deadline of
-	// the read-only set that push handed over.
+	// the answer that push handed over.
 	//
 	// A pushed claim used to latch forever, so the TTL governed only what the
-	// NEXT machine to boot was told: a set fetched during an outage stayed
+	// NEXT machine to boot was told: an answer fetched during an outage stayed
 	// partial, and a tool the provider stopped annotating readOnlyHint stayed
-	// read-only on every live machine until the host restarted. A deadline is
-	// what makes expiry reach machines that already have a copy.
+	// runnable-without-asking on every live machine until the host restarted. A
+	// deadline is what makes expiry reach machines that already have a copy.
 	expires time.Time
 	failed  time.Time
 }

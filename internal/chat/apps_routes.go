@@ -120,13 +120,14 @@ type policyReq struct {
 // connected app can already read, and a switch that only ever said yes would be
 // a promise we could not keep.
 var (
-	settable   = map[string]bool{"ask": true, "auto": true, "never": true}
+	settable = map[string]bool{
+		agentapi.ActionAsk: true, agentapi.ActionAuto: true, agentapi.ActionNever: true}
 	governable = map[string]bool{composio.CapWrite: true, composio.CapDelete: true}
 )
 
 // setAppPolicy records what this person lets one app do without being asked.
 //
-// Stored rather than pushed, unlike the read-only set: this is their answer and
+// Stored rather than derived, unlike the actions pushed from it: this is their answer and
 // nobody else's. Note it is a PREFERENCE and not a boundary against them -- this
 // service reaches Postgres with the caller's own token so row-level security can
 // isolate, which means they can write this row directly. That is sound for a

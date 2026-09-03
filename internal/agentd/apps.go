@@ -177,20 +177,20 @@ type appsServer struct {
 	// else's transcript.
 	listed []*mcpsdk.Tool
 
-	// reads is the actions the provider annotates as only reading, pushed by the
-	// host rather than compiled in. Absent means ask -- see agentapi.Apps.
-	reads map[string]bool
+	// actions is what each connected-app action needs from this person, resolved
+	// on the host and pushed. Absent means ask -- see agentapi.Apps.
+	actions map[string]string
 }
 
 // newAppsServer prepares the manager. It starts nothing, and a blank url is the
 // ordinary state of a machine whose host has no integration provider configured.
 //
-// Takes the whole pushed record rather than the URL alone: the read-only set is
+// Takes the whole pushed record rather than the URL alone: the resolved answer is
 // on the same disk and a machine that came back without it would ask about every
 // read until its next push.
 func newAppsServer(a agentapi.Apps) *appsServer {
 	s := &appsServer{dial: dialApps}
-	s.SetConfig(a.SessionURL, a.ReadOnly)
+	s.SetConfig(a.SessionURL, a.Actions)
 	return s
 }
 
@@ -198,21 +198,18 @@ func newAppsServer(a agentapi.Apps) *appsServer {
 // only writer of either.
 //
 // One transition because installing them apart lets a call observe a refreshed
-// session URL while still classifying against the previous session's set.
+// session URL while still classifying against the previous session's answer.
 //
 // The policy is installed unconditionally and the URL only when it moved. A push
-// carrying a fresher set on the SAME session is the ordinary case -- the one
-// surfaceChanged is pinned to allow -- so gating the set on the URL having
-// changed would drop exactly the update this design exists to deliver. Nor does a
-// repoint clear the set: it describes the provider's catalogue, not this session.
-func (s *appsServer) SetConfig(url string, slugs []string) {
-	held := make(map[string]bool, len(slugs))
-	for _, slug := range slugs {
-		held[slug] = true
-	}
+// carrying a fresher answer on the SAME session is the ordinary case -- the one
+// surfaceChanged is pinned to allow, and now also how a person's setting takes
+// effect -- so gating it on the URL having changed would drop exactly the update
+// this design exists to deliver. Nor does a repoint clear it: it describes the
+// provider's catalogue and this person's settings, not this session.
+func (s *appsServer) SetConfig(url string, actions map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.reads = held
+	s.actions = actions
 	if url != s.url {
 		s.url, s.listed, s.failedAt = url, nil, time.Time{}
 		if s.sess != nil {
@@ -220,16 +217,25 @@ func (s *appsServer) SetConfig(url string, slugs []string) {
 			s.sess = nil
 		}
 	}
-	if len(held) == 0 && url != "" {
-		log.Printf("agentd: session but no read-only actions; every app call will ask")
+	if len(actions) == 0 && url != "" {
+		log.Printf("agentd: session but no resolved actions; every app call will ask")
 	}
 }
 
-// reading reports whether the provider says this action only reads.
-func (s *appsServer) reading(slug string) bool {
+// needs is what this action requires from the person before it runs.
+//
+// Everything unknown resolves to asking: an action absent from the answer, a
+// value we do not recognise, a machine never pushed at all. This is the one
+// lookup that can make a machine LESS capable than intended, so nothing may
+// reach auto by accident and nothing may reach never by accident either.
+func (s *appsServer) needs(slug string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.reads[slug]
+	switch got := s.actions[slug]; got {
+	case agentapi.ActionAuto, agentapi.ActionNever:
+		return got
+	}
+	return agentapi.ActionAsk
 }
 
 // Current is the address this server is pointed at, or "" for none. Read by
@@ -251,7 +257,7 @@ func (s *appsServer) Tools(ctx context.Context, d toolDeps) ([]anthropic.BetaToo
 	return wrapAll(listed, s, appsNoun, s.hook(d), d), nil
 }
 
-// hook asks a person before any action the provider does not call read-only.
+// hook decides every action in a call against what this person allows.
 //
 // Closed over ONE agent's deps, sound because the wrapping is per agent even
 // though the listing is cached -- see the note on listed. Nothing here reads a
@@ -271,8 +277,9 @@ func (s *appsServer) hook(d toolDeps) beforeHook {
 	}
 }
 
-// permit decides one action, asking a person and waiting when the provider does
-// not call it read-only. It runs nothing: the batch goes out afterwards, whole.
+// permit decides one action against what this person allows: run it, ask them
+// and wait, or refuse it outright. It runs nothing: the batch goes out
+// afterwards, whole.
 //
 // So a refusal anywhere aborts ALL of it, reads included -- the call never
 // reaches the provider. That is the safe direction and the only coherent one,
@@ -283,9 +290,16 @@ func (s *appsServer) hook(d toolDeps) beforeHook {
 // grant is scoped to one slug. The key handed to Check is the SLUG and never the
 // meta-tool: grants key on that string, so passing the wrapper would make one tap
 // buy an hour of every action in every connected app.
+// Refusing BEFORE Gate.Check, never through it. Check's first act is to consume
+// a standing batch grant -- "allow the next ten for an hour" -- keyed on the same
+// slug this passes, so routing a refusal through it would let a tap made before
+// the setting was changed run the very thing the setting forbids.
 func (s *appsServer) permit(ctx context.Context, g *Gate, c appCall) error {
-	if s.reading(c.Slug) {
+	switch s.needs(c.Slug) {
+	case agentapi.ActionAuto:
 		return nil
+	case agentapi.ActionNever:
+		return refusedByPolicy(c.Slug)
 	}
 	return g.Check(ctx, c.Slug, previewOf(c), c.Args)
 }
