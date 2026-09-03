@@ -291,6 +291,16 @@ type appsClaim struct {
 	// in flight or answered with the floor after a failed read. Nothing compares
 	// against the second kind.
 	known bool
+	// seen is the latest connected set any route has observed since this claim
+	// was taken, and sawSeen says whether one has been observed at all -- the
+	// empty string is a real answer here, for somebody who holds nothing.
+	//
+	// It exists for the window where a push is IN FLIGHT. A route that reads
+	// somebody's connections then has nothing to compare against yet, and
+	// throwing the reading away loses it for good: the push lands afterwards
+	// and latches the set IT read, which is already out of date.
+	seen    string
+	sawSeen bool
 	// expires is when a pushed claim stops counting, which is the deadline of
 	// the answer that push handed over.
 	//
@@ -345,6 +355,22 @@ func (s *Server) claimApps(machine string) bool {
 func (s *Server) doneApps(machine string, done pushed) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// An answer to a question that has already changed is not recorded as the
+	// current one. Somebody can finish connecting an app while this push is
+	// crossing the internet: a route then reads their connections, finds a claim
+	// with nothing to compare against yet, and leaves what it saw here. Latching
+	// over it would bury the newer reading under the older answer for the rest of
+	// the hour -- and nothing afterwards is guaranteed to look again.
+	//
+	// Only against a real reading of our own. A push that fell back to the floor
+	// already comes due on the short clock, and re-pushing it at once would aim a
+	// retry at a provider that has just failed.
+	if held, ok := s.appsClaims[machine]; ok && done.known && held.sawSeen && held.seen != done.apps {
+		log.Printf("chat: %s was answered about %q while %q was already read; pushing again",
+			machine, done.apps, held.seen)
+		delete(s.appsClaims, machine)
+		return
+	}
 	// Usually an overwrite of this machine's own in-flight claim, but not always:
 	// another machine's claim may have evicted it while this push was crossing
 	// the internet, and re-adding it unchecked is how the table creeps past its
@@ -365,9 +391,20 @@ func (s *Server) doneApps(machine string, done pushed) {
 // who just connected something is standing.
 //
 // The hour-long claim remains the backstop. This only shortens the wait.
+//
+// The reading is recorded even when there is nothing to compare it against yet,
+// which is the in-flight case: dropping it there would let the push that is
+// already crossing the internet land afterwards and latch the older set.
 func (s *Server) noteApps(machine, mark string) {
 	s.mu.Lock()
 	held, ok := s.appsClaims[machine]
+	if ok {
+		// Left on the claim whatever state it is in, so a reading taken while a
+		// push is in flight survives it. doneApps is what acts on that one; the
+		// check below can only speak for a push that has already landed.
+		held.seen, held.sawSeen = mark, true
+		s.appsClaims[machine] = held
+	}
 	stale := ok && held.pushed && held.known && held.apps != mark
 	s.mu.Unlock()
 	if !stale {

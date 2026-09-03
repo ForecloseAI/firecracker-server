@@ -573,3 +573,64 @@ func TestTheFeaturedAppsAreResolvedWhetherOrNotTheyAreConnected(t *testing.T) {
 		t.Errorf("got %v, want gmail counted once", two)
 	}
 }
+
+// THE race between a push and the connection made during it.
+//
+// A push reads somebody's connections, and while it is crossing the internet
+// they finish connecting an app. A route reads the new set, finds a claim still
+// in flight with nothing to compare against, and used to throw the reading away.
+// The push then landed and latched the set IT read -- already out of date --
+// for the rest of the hour, with nothing afterwards guaranteed to look again.
+func TestAConnectionMadeDuringAPushIsNotBuriedByIt(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	if !s.claimApps(machine) {
+		t.Fatal("the claim was not taken")
+	}
+	// The push is in flight and read only gmail. They finish connecting notion,
+	// and the Apps screen refreshing is what sees it.
+	s.noteApps(machine, "gmail,notion")
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	if _, held := s.appsClaims[machine]; held {
+		t.Error("the older answer was latched over a newer reading, so the app " +
+			"they just connected asks about its reads for the rest of the hour")
+	}
+}
+
+// The other half: a reading that AGREES with what was pushed latches normally.
+//
+// Without this the claim would be released on any read during a push, and a
+// client that fetches the Apps screen while one is in flight -- which is exactly
+// what opening the app does -- would push again every time. That is the stampede
+// the claim exists to prevent.
+func TestAReadingThatAgreesWithThePushStillLatches(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.claimApps(machine)
+	s.noteApps(machine, "gmail")
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	held, ok := s.appsClaims[machine]
+	if !ok || !held.pushed {
+		t.Fatal("a push nothing disagreed with was not recorded")
+	}
+	if !held.known || held.apps != "gmail" {
+		t.Errorf("claim is %+v", held)
+	}
+}
+
+// A push that fell back to the floor is not re-pushed at once on the strength of
+// a reading it never made. It already comes due on the short clock, and retrying
+// immediately would aim it at a provider that has just failed.
+func TestAGuessedPushIsLeftOnItsCooldownRatherThanRetriedAtOnce(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.claimApps(machine)
+	s.noteApps(machine, "gmail,notion")
+	s.doneApps(machine, pushed{until: time.Now().Add(appsRetry)})
+
+	if _, held := s.appsClaims[machine]; !held {
+		t.Error("a failed read was retried at once instead of waiting out its clock")
+	}
+}
