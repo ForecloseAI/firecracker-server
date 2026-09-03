@@ -3,6 +3,7 @@ package composio
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -368,5 +369,90 @@ func TestAFullPageOfToolsIsRefusedRatherThanTruncated(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("returned %d slugs alongside the refusal", len(got))
+	}
+}
+
+// THE test for the classifier. Every one of these is a real slug with the real
+// tags the provider returned on 2026-09-03, and each is here because something
+// about it is a trap.
+func TestCapabilityTakesTheMostConsequentialHint(t *testing.T) {
+	for _, c := range []struct {
+		slug, want string
+		tags       []string
+		why        string
+	}{
+		{"GMAIL_SEND_DRAFT", CapDelete, []string{"important", "openWorldHint", "destructiveHint", "updateHint"},
+			"carries destructive AND update; the worse one has to win"},
+		{"GMAIL_SEND_EMAIL", CapWrite, []string{"important", "openWorldHint", "createHint"}, ""},
+		{"GMAIL_CREATE_EMAIL_DRAFT", CapWrite, []string{"important", "openWorldHint", "createHint"},
+			"byte-identical tags to SEND_EMAIL: the provider cannot tell a draft from a send"},
+		{"GMAIL_FETCH_EMAILS", CapRead, []string{"gmail", "readOnlyHint", "idempotentHint"}, ""},
+		{"SLACK_FIND_CHANNELS", CapRead, []string{"readOnlyHint", "idempotentHint", "openWorldHint"},
+			"read AND openWorld; openWorld must not drag a read into a write"},
+		{"GOOGLECALENDAR_CALENDAR_LIST_INSERT", CapWrite, []string{"openWorldHint", "idempotentHint", "createHint"},
+			"LIST is a noun here; only the tags decide"},
+		{"GOOGLECALENDAR_CLEAR_CALENDAR", CapDelete, []string{"destructiveHint", "idempotentHint"}, ""},
+		{"SOME_TOOL_SHIPPED_TOMORROW", CapWrite, []string{"gmail"},
+			"no effect hint at all: a write, so it asks"},
+		{"SOME_TOOL_WITH_NO_TAGS", CapWrite, nil, "nil tags must not panic and must not read as safe"},
+	} {
+		if got := capabilityOf(c.tags); got != c.want {
+			t.Errorf("%s is %q, want %q%s", c.slug, got, c.want, note(c.why))
+		}
+	}
+}
+
+// note renders a fixture's reason, when it has one.
+func note(why string) string {
+	if why == "" {
+		return ""
+	}
+	return " -- " + why
+}
+
+// Unfiltered on purpose: the rows carry their own tags, so there is no filter to
+// be silently ignored. Asking for tags= and trusting the answer is what would
+// call every tool read-only the day the parameter is renamed.
+func TestCapabilitiesAsksForEveryToolAndClassifiesTheRows(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(`{"items":[
+			{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"]},
+			{"slug":"GMAIL_SEND_EMAIL","tags":["openWorldHint","createHint"]},
+			{"slug":"GMAIL_DELETE_MESSAGE","tags":["destructiveHint"]}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "gmail")
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if strings.Contains(gotQuery, "tags=") {
+		t.Errorf("query %q filters by tag; the rows are what decide", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "toolkit_slug=gmail") {
+		t.Errorf("query %q does not name the app", gotQuery)
+	}
+	want := map[string]string{
+		"GMAIL_FETCH_EMAILS": CapRead, "GMAIL_SEND_EMAIL": CapWrite,
+		"GMAIL_DELETE_MESSAGE": CapDelete,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// A full page is refused rather than kept: the tools it did not return would be
+// absent from the map, and absent resolves to asking about everything.
+func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[` + strings.Repeat(
+			`{"slug":"X","tags":["readOnlyHint"]},`, readOnlyPage-1) +
+			`{"slug":"X","tags":["readOnlyHint"]}]}`))
+	}))
+	defer srv.Close()
+	if got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook"); err == nil {
+		t.Fatalf("kept %d off a full page", len(got))
 	}
 }

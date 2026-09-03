@@ -341,6 +341,67 @@ func (c *Client) ReadOnly(ctx context.Context, slug string) ([]string, error) {
 	return got, nil
 }
 
+// The capabilities an action can belong to, most consequential first. These are
+// the vocabulary a person sets a policy against, so they are named for what they
+// do to somebody's account rather than for the provider's tags.
+const (
+	CapDelete = "del"
+	CapWrite  = "write"
+	CapRead   = "read"
+)
+
+// Capabilities is every action one app exposes, and what kind of thing it is.
+//
+// Unfiltered, unlike ReadOnly, and that is the safer shape rather than the lazier
+// one. ReadOnly must ask for tags=readOnlyHint and then re-check every row it
+// gets back, because this API answers a parameter it does not recognise with
+// EVERYTHING -- a caller trusting a dropped filter would call all 910 tools
+// read-only. Reading each row's own tags removes that trap instead of defending
+// against it, and costs one request per app rather than one per tag.
+func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
+	var out toolsResp
+	q := "/tools?" + url.Values{
+		"toolkit_slug": {slug}, "limit": {strconv.Itoa(readOnlyPage)},
+	}.Encode()
+	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Items) >= readOnlyPage {
+		return nil, fmt.Errorf("composio: %s has %d or more tools; this needs paging", slug, readOnlyPage)
+	}
+	held := make(map[string]string, len(out.Items))
+	for _, it := range out.Items {
+		held[it.Slug] = capabilityOf(it.Tags)
+	}
+	return held, nil
+}
+
+// capabilityOf is what one action does, most consequential hint winning.
+//
+// A tool carries several: GMAIL_SEND_DRAFT is destructiveHint AND updateHint, and
+// it is a delete. Nothing here reads the NAME -- the classifier that did was
+// deleted from this project for calling GITHUB_CREATE_A_CHECK_SUITE read-only.
+//
+// openWorldHint is deliberately unused. It reads as "reaches other people" and is
+// not: measured 2026-09-03, 753 of 910 tools carry it INCLUDING 334 of the 398
+// read-only ones. It means the tool talks to a SaaS API, which all of them do.
+// That is also why there is no draft-versus-send distinction here -- nothing the
+// provider sends can carry it, and GMAIL_SEND_EMAIL and GMAIL_CREATE_EMAIL_DRAFT
+// have byte-identical tags.
+func capabilityOf(tags []string) string {
+	switch {
+	case slices.Contains(tags, "destructiveHint"):
+		return CapDelete
+	case slices.Contains(tags, "createHint"), slices.Contains(tags, "updateHint"):
+		return CapWrite
+	case slices.Contains(tags, readOnlyTag):
+		return CapRead
+	}
+	// Unannotated is a write, so it asks. Measured zero on 2026-09-03 -- which is
+	// a fact about that day and not a promise about the next tool they ship.
+	return CapWrite
+}
+
 // Link is a hosted page where a person authorises one app.
 type Link struct {
 	URL string

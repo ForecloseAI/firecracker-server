@@ -62,6 +62,9 @@ type appRow struct {
 	SessionID string `json:"session_id"`
 	MCPURL    string `json:"mcp_url"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+	// Policy is the person's own, and the reason Put writes the whole row rather
+	// than trusting an upsert to leave columns it did not mention alone.
+	Policy map[string]map[string]string `json:"policy,omitempty"`
 }
 
 // Get reads this person's session, or a zero value when they have none.
@@ -70,7 +73,7 @@ type appRow struct {
 // not exist" -- which is what keeps the machine derivation total: someone seen
 // for the first time still resolves to a machine and still gets a session.
 func (p *pgApps) Get(ctx context.Context, userID string) (agentapi.Apps, error) {
-	q := appsTable + "?user_id=eq." + url.QueryEscape(userID) + "&select=session_id,mcp_url&limit=1"
+	q := appsTable + "?user_id=eq." + url.QueryEscape(userID) + "&select=session_id,mcp_url,policy&limit=1"
 	var rows []appRow
 	if err := p.do(ctx, http.MethodGet, q, nil, &rows); err != nil {
 		return agentapi.Apps{}, err
@@ -78,13 +81,20 @@ func (p *pgApps) Get(ctx context.Context, userID string) (agentapi.Apps, error) 
 	if len(rows) == 0 {
 		return agentapi.Apps{}, nil
 	}
-	return agentapi.Apps{SessionURL: rows[0].MCPURL, SessionID: rows[0].SessionID}, nil
+	return agentapi.Apps{SessionURL: rows[0].MCPURL, SessionID: rows[0].SessionID,
+		Policy: rows[0].Policy}, nil
 }
 
 // Put records the session minted for this person, replacing any earlier one.
+//
+// Writes the WHOLE row, policy included, rather than the columns that moved. The
+// upsert this rides on updates the columns the payload names, so omitting policy
+// would leave it to a behaviour worth not depending on -- and being wrong there
+// returns somebody to defaults they had changed, silently, on the next re-mint.
+// Callers pass what they read.
 func (p *pgApps) Put(ctx context.Context, userID string, a agentapi.Apps) error {
 	row := appRow{UserID: userID, SessionID: a.SessionID, MCPURL: a.SessionURL,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		Policy: a.Policy, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
 	return p.do(ctx, http.MethodPost, appsTable, []appRow{row}, nil)
 }
 
