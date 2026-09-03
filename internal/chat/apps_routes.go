@@ -120,7 +120,8 @@ type policyReq struct {
 // connected app can already read, and a switch that only ever said yes would be
 // a promise we could not keep.
 var (
-	settable   = map[string]bool{"ask": true, "auto": true, "never": true}
+	settable = map[string]bool{
+		agentapi.ActionAsk: true, agentapi.ActionAuto: true, agentapi.ActionNever: true}
 	governable = map[string]bool{composio.CapWrite: true, composio.CapDelete: true}
 )
 
