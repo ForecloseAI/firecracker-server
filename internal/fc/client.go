@@ -83,11 +83,6 @@ func (c *Client) do(method, path string, body, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.send(req, out)
-}
-
-// send executes the request and decodes a success response.
-func (c *Client) send(req *http.Request, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

@@ -18,7 +18,7 @@ verifying Supabase access tokens; everything else is stdlib.
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
 | `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd, built-in skills |
 | `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh`, `vm-ssh.sh` |
-| `deploy/` | systemd unit for the control plane |
+| `deploy/` | systemd units, Caddy config, Supabase schema |
 
 ## Setup
 

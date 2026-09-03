@@ -82,12 +82,6 @@ func TestDrivesLayout(t *testing.T) {
 	if root.PathOnHost != "/var/lib/cracked/images/rootfs.ext4" {
 		t.Errorf("root drive should be the shared image, got %s", root.PathOnHost)
 	}
-	assertWorkspaceDrive(t, work)
-}
-
-// assertWorkspaceDrive checks the overlay upper is writable and durable.
-func assertWorkspaceDrive(t *testing.T, work drive) {
-	t.Helper()
 	if work.IsRootDevice || work.IsReadOnly {
 		t.Error("drive 1 (overlay upper) must be writable and not a root device")
 	}
