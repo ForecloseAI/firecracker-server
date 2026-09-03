@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,9 +70,12 @@ func TestNoRowIsNotAnError(t *testing.T) {
 
 // A stored session comes back in the shape the guest is handed.
 func TestGetReadsTheRowBack(t *testing.T) {
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]map[string]string{
-			{"session_id": "sess_9", "mcp_url": "https://backend.composio.dev/mcp/9"}})
+		gotQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode([]map[string]any{{
+			"session_id": "sess_9", "mcp_url": "https://backend.composio.dev/mcp/9",
+			"policy": map[string]map[string]string{"gmail": {"write": "never"}}}})
 	}))
 	defer srv.Close()
 	got, err := newPGApps(srv.URL, "k").Get(withTestToken("t"), "u")
@@ -86,6 +90,15 @@ func TestGetReadsTheRowBack(t *testing.T) {
 	}
 	if got.ReadOnly != nil {
 		t.Errorf("the store invented a read-only set: %v", got.ReadOnly)
+	}
+	// Asserted on the QUERY, not only the answer: a fake that ignores select=
+	// hands back a policy either way, so dropping the column from the list would
+	// pass here and return everyone to defaults against a real PostgREST.
+	if !strings.Contains(gotQuery, "policy") {
+		t.Errorf("select does not ask for the policy: %q", gotQuery)
+	}
+	if got.Policy["gmail"]["write"] != "never" {
+		t.Errorf("the policy did not come back: %v", got.Policy)
 	}
 }
 
@@ -103,5 +116,33 @@ func TestPutUpserts(t *testing.T) {
 	}
 	if want := "resolution=merge-duplicates"; !strings.Contains(prefer, want) {
 		t.Errorf("Prefer is %q, want it to carry %q", prefer, want)
+	}
+}
+
+// The policy travels in the row Put writes. The upsert this rides on updates the
+// columns the payload names, so a Put that omitted it would leave the column to
+// behaviour worth not depending on -- and being wrong there returns somebody to
+// defaults they had changed, on the next session re-mint, silently.
+func TestPutCarriesThePolicy(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	err := newPGApps(srv.URL, "k").Put(withTestToken("t"), "u", agentapi.Apps{
+		SessionURL: "https://backend.composio.dev/mcp/9", SessionID: "sess_9",
+		Policy: map[string]map[string]string{"gmail": {"write": "never"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatalf("body %q: %v", body, err)
+	}
+	got, _ := json.Marshal(rows[0]["policy"])
+	if string(got) != `{"gmail":{"write":"never"}}` {
+		t.Errorf("the row went without its policy: %s", body)
 	}
 }

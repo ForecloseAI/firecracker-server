@@ -124,7 +124,12 @@ func (s *Server) sessionFor(ctx context.Context, user string) (agentapi.Apps, er
 	if err != nil {
 		return agentapi.Apps{}, err
 	}
+	// Carried across the re-mint. A person can set a policy before a machine has
+	// ever been pushed to -- the permissions screen does not wait for a session
+	// -- so the row can hold one with no URL beside it.
+	policy := held.Policy
 	held = appsOf(sess)
+	held.Policy = policy
 	return held, s.apps.Put(ctx, user, held)
 }
 
