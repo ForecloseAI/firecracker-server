@@ -100,7 +100,27 @@ type Apps struct {
 	// too: this is the first thing that can make a machine less capable than
 	// intended, so every way of being wrong about it points at asking.
 	Policy map[string]map[string]string `json:"policy,omitempty"`
+
+	// Actions is the answer the guest acts on: one entry per connected-app
+	// action, resolved on the host from the provider's capability map and this
+	// person's Policy above.
+	//
+	// Resolved rather than shipped in halves so the guest holds no vocabulary of
+	// its own -- it looks up a string and obeys it, which is the same shape as
+	// the read-only set it replaces and the reason the name classifier could be
+	// deleted from that package. Absent means ask.
+	Actions map[string]string `json:"actions,omitempty"`
 }
+
+// What an agent may do with one connected-app action. The vocabulary is shared
+// because the host resolves it and the guest obeys it, and a disagreement about
+// the spelling would be a machine quietly asking about nothing, or about all of
+// it.
+const (
+	ActionAsk   = "ask"
+	ActionAuto  = "auto"
+	ActionNever = "never"
+)
 
 // Decision is a human's answer to a pending interaction. Scope, MaxUses and
 // TTLSeconds turn a single approval into a batch consent.

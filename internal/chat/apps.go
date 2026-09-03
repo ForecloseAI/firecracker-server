@@ -80,6 +80,12 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// window, which is the claim's to close; it declines to widen it by a
 	// provider round trip, which is this PR's to not open.
 	reads, until := s.reads.slugs(ctx)
+	// Beside the read-only set and for the same reason: everything between
+	// Register and SetApps widens the window that commit narrowed, and this is a
+	// second provider round trip on a cold cache. Pushed BESIDE rather than
+	// instead of it -- nothing obeys Actions yet, so this can ship before the
+	// image that reads it.
+	actions, _ := s.kinds.resolved(ctx, held.Policy)
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
@@ -89,7 +95,7 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		return time.Time{}, err
 	}
 	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		ReadOnly: reads}); err != nil {
+		ReadOnly: reads, Actions: actions}); err != nil {
 		return time.Time{}, err
 	}
 	return until, nil
