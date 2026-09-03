@@ -59,13 +59,23 @@ preflight() {
   # rsync does not understand .gitignore. Refuse ignored files too unless they
   # are one of the generated paths excluded by sync_repo below; otherwise a
   # local secret or stale source file could become part of the deploy.
+  #
+  # grep rather than a case, and that is not a style choice. macOS ships bash
+  # 3.2, whose $( ) parser reads the ")" ending a case PATTERN as the end of the
+  # substitution -- so a case inside one is a syntax error at RUN time. `bash -n`
+  # passes, because the body of a substitution is only parsed when it is
+  # evaluated, which is why this shipped and why CI on Linux would not catch it.
+  # This script runs from a laptop, so bash 3.2 is the only shell that matters.
+  #
+  # If a case is ever genuinely needed inside a $( ) here, the escape hatch is to
+  # write the patterns parenthesised -- `(bin/*|x)` rather than `bin/*|x)` --
+  # which balances the parens and parses correctly on 3.2.
+  #
+  # `|| true` because grep exits 1 when it filters everything out, and under
+  # `set -e` that would fail the assignment on the ordinary clean-tree path.
   local ignored
-  ignored="$(git -C "$HERE" ls-files --others --ignored --exclude-standard | while IFS= read -r path; do
-    case "$path" in
-      bin/*|rootfs/files/agentd|*/.DS_Store|.DS_Store) ;;
-      *) printf '%s\n' "$path" ;;
-    esac
-  done)"
+  ignored="$(git -C "$HERE" ls-files --others --ignored --exclude-standard |
+    grep -Ev '^bin/|^rootfs/files/agentd$|^\.claude/|(^|/)\.DS_Store$' || true)"
   [ -z "$ignored" ] || [ "${ALLOW_DIRTY:-0}" = "1" ] || {
     printf 'FATAL: ignored files would be shipped:\n%s\n' "$ignored"
     echo "Set ALLOW_DIRTY=1 to ship them intentionally."; exit 1; }
@@ -118,8 +128,12 @@ sync_repo() {
   # .gitignore, and one landing in rootfs/ both changes the image fingerprint
   # (Finder rewrites it on every folder open, so rebuilds would flap) and gets
   # COPY'd into the guest beside the skills.
+  # .claude/ is this laptop's editor-agent config -- permissions and local
+  # settings. Excluded rather than merely allowed past preflight: --delete means
+  # anything shipped once would then be maintained on the box forever, and local
+  # tooling config has no business on a production host.
   rsync -az --delete --stats --exclude .git --exclude bin/ --exclude rootfs/files/agentd \
-    --exclude '.DS_Store' \
+    --exclude '.DS_Store' --exclude '.claude/' \
     -e "ssh ${SSH_OPTS[*]}" "$HERE"/ "$TARGET:cracked/"
 }
 
