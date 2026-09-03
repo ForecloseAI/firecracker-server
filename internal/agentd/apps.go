@@ -257,7 +257,7 @@ func (s *appsServer) Tools(ctx context.Context, d toolDeps) ([]anthropic.BetaToo
 	return wrapAll(listed, s, appsNoun, s.hook(d), d), nil
 }
 
-// hook asks a person before any action the provider does not call read-only.
+// hook decides every action in a call against what this person allows.
 //
 // Closed over ONE agent's deps, sound because the wrapping is per agent even
 // though the listing is cached -- see the note on listed. Nothing here reads a

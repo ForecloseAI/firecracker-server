@@ -228,7 +228,7 @@ func TestAnApprovedSendReachesTheProvider(t *testing.T) {
 	}
 }
 
-// A read the provider calls read-only runs silently -- the half that makes the
+// An action the person allows runs silently -- the half that makes the
 // other half worth reading, since a gate that asks about everything is ignored.
 func TestAReadTheProviderCallsSafeAsksNobody(t *testing.T) {
 	tool, g := gated(t, "GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS")

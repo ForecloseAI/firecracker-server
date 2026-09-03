@@ -11,7 +11,7 @@ import (
 )
 
 // appCapsTTL is how long the capability map is kept. An hour, matching the
-// catalogue and the read-only set: it is the provider's answer, the same for
+// catalogue: it is the provider's answer, the same for
 // everyone on the fleet, and it moves only when they ship or re-annotate a tool.
 const appCapsTTL = time.Hour
 

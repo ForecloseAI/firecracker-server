@@ -127,7 +127,7 @@ var (
 
 // setAppPolicy records what this person lets one app do without being asked.
 //
-// Stored rather than pushed, unlike the read-only set: this is their answer and
+// Stored rather than derived, unlike the actions pushed from it: this is their answer and
 // nobody else's. Note it is a PREFERENCE and not a boundary against them -- this
 // service reaches Postgres with the caller's own token so row-level security can
 // isolate, which means they can write this row directly. That is sound for a

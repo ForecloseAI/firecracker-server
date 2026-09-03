@@ -11,7 +11,7 @@ import (
 // appsBodyCap bounds the push.
 //
 // It used to carry two short strings and was capped at 8 KiB. It now also
-// carries the read-only set, measured at 13,073 bytes for the featured six on
+// carries the resolved answer, measured at ~50 KB for the featured six on
 // 2026-09-02 -- so the old cap refused every push, and because handlePutApps
 // answers 400 before WriteApps, it took the SESSION down with it rather than
 // just the set. Deterministic, self-repeating on the retry cooldown, and it

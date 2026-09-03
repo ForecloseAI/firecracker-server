@@ -120,11 +120,12 @@ func TestARemintedTicketForTheSameSessionIsNotASurfaceChange(t *testing.T) {
 		{"the surface is taken away",
 			agentapi.Apps{SessionURL: a, SessionID: "s1"},
 			agentapi.Apps{}, true},
-		// The set moves when the provider re-annotates a tool. If that counted as
-		// a new surface it would evict every idle agent on the machine whenever
-		// the host restarted with a fresher set -- the re-ticketing storm with a
-		// new cause. Nothing an agent composed at startup depends on it.
-		{"only the read-only set moved",
+		// The answer moves when the provider re-annotates a tool, and now also
+		// when the person changes a setting. If that counted as a new surface it
+		// would evict every idle agent on the machine whenever the host restarted
+		// with a fresher one -- the re-ticketing storm with a new cause. Nothing
+		// an agent composed at startup depends on it.
+		{"only the resolved answer moved",
 			agentapi.Apps{SessionURL: a, SessionID: "s1", Actions: map[string]string{"GMAIL_FETCH_EMAILS": agentapi.ActionAuto}},
 			agentapi.Apps{SessionURL: a, SessionID: "s1", Actions: map[string]string{"GMAIL_LIST_LABELS": agentapi.ActionAuto}}, false},
 	}

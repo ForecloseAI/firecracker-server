@@ -59,7 +59,7 @@ func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *age
 }
 
 // pushApps hands this person's machine a ticket to their session, reporting how
-// long the read-only set it pushed is good for.
+// long the answer it pushed is good for.
 func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (time.Time, error) {
 	held, err := s.sessionFor(ctx, user)
 	if err != nil {
@@ -142,13 +142,13 @@ func appsOf(sess composio.Session) agentapi.Apps {
 type appsClaim struct {
 	pushed bool
 	// expires is when a pushed claim stops counting, which is the deadline of
-	// the read-only set that push handed over.
+	// the answer that push handed over.
 	//
 	// A pushed claim used to latch forever, so the TTL governed only what the
-	// NEXT machine to boot was told: a set fetched during an outage stayed
+	// NEXT machine to boot was told: an answer fetched during an outage stayed
 	// partial, and a tool the provider stopped annotating readOnlyHint stayed
-	// read-only on every live machine until the host restarted. A deadline is
-	// what makes expiry reach machines that already have a copy.
+	// runnable-without-asking on every live machine until the host restarted. A
+	// deadline is what makes expiry reach machines that already have a copy.
 	expires time.Time
 	failed  time.Time
 }
