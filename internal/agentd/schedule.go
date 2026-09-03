@@ -393,8 +393,14 @@ func isWeekdayWord(s string) bool { return s == "weekday" || s == "weekdays" }
 func isWeekendWord(s string) bool { return s == "weekend" || s == "weekends" }
 
 // parts is an expression being taken apart, kept as two aligned slices so
-// keywords match without regard to case while a timezone name keeps its own --
-// time.LoadLocation is case-sensitive and "asia/kolkata" does not resolve.
+// keywords match without regard to case while a timezone name keeps its own.
+//
+// A zone name is not ours to fold: time.LoadLocation resolves it against the
+// host's tzdata, which on a case-sensitive filesystem refuses "asia/kolkata"
+// outright and on a case-insensitive one resolves it under that name -- a name
+// no tzdata carries, and the one that would then be stored in the expression
+// and handed to glibc as TZ. Passing the token through as written is the only
+// answer that means the same thing on both.
 type parts struct {
 	f    []string // lowercased, for matching
 	orig []string // exactly as written
