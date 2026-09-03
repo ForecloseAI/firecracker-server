@@ -15,6 +15,8 @@ set -euo pipefail
 BASE="${CRACKED_BASE:-/var/lib/cracked}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$BASE/images/rootfs.stamp"
+IMAGE_BUILDING="$BASE/images/rootfs.building"
+PENDING_FLEET="$BASE/images/rootfs.pending-vms"
 DEPLOYED="$BASE/deployed.txt"
 DROPIN=/etc/systemd/system/cracked.service.d/override.conf
 COMMIT="${CRACKED_COMMIT:-unknown}"
@@ -28,6 +30,8 @@ IMAGE_CHANGED=0
 IMAGE_HASH=""
 RESTARTED_CRACKED=0
 EXPLICIT_STAGES=0
+NEED_AUTO_VMS=0
+VMS_RAN=0
 
 # usage prints how to run this.
 usage() {
@@ -111,16 +115,17 @@ recipe_hash() {
 # a run that died between mounting and unmounting -- without this, one failed
 # deploy wedges every deploy after it.
 mount_ro() {
+  local image="${1:-$BASE/images/rootfs.ext4}"
   sudo mkdir -p /mnt/rootfs-ro
   sudo umount /mnt/rootfs-ro 2>/dev/null || true
-  sudo mount -o ro,loop "$BASE/images/rootfs.ext4" /mnt/rootfs-ro
+  sudo mount -o ro,loop "$image" /mnt/rootfs-ro
 }
 
 # recover_key reads the baked API key out of the CURRENT image so a rebuild
 # never needs it handed over. build-rootfs.sh only WARNS when it is missing --
 # it will happily ship an image whose every agent has an empty key.
 recover_key() {
-  mount_ro
+  mount_ro "${1:-$BASE/images/rootfs.ext4}"
   ANTHROPIC_API_KEY="$(sudo sed -n 's/^ANTHROPIC_API_KEY=//p' /mnt/rootfs-ro/etc/cracked-agent.env)"
   sudo umount /mnt/rootfs-ro
   [ -n "$ANTHROPIC_API_KEY" ] || { echo "FATAL: no API key in the current image"; exit 1; }
@@ -149,8 +154,17 @@ check_space() {
 # dies halfway otherwise leaves no image at all.
 build_image() {
   check_space
-  sudo cp "$BASE/images/rootfs.ext4" "$BASE/images/rootfs.ext4.bak"
-  recover_key
+  # The build script removes its output before recreating it. Preserve the
+  # original backup across retries rather than replacing it with a partial
+  # image left by the previous failed attempt.
+  if ! sudo test -e "$IMAGE_BUILDING"; then
+    sudo cp "$BASE/images/rootfs.ext4" "$BASE/images/rootfs.ext4.bak"
+    printf '%s\n' "$COMMIT" | sudo tee "$IMAGE_BUILDING" >/dev/null
+    recover_key
+  else
+    echo "retrying image build; preserving the existing known-good backup"
+    recover_key "$BASE/images/rootfs.ext4.bak"
+  fi
   # As ubuntu, never `sudo -E`: the script self-sudoes, and sudo resets HOME
   # and PATH, losing both the guest pubkey and the Go toolchain.
   SSH_PUBKEY="$(cat "$HOME/.ssh/cracked_guest.pub")" "$HERE/scripts/build-rootfs.sh"
@@ -184,6 +198,7 @@ stage_image() {
   fi
   build_image
   verify_image
+  sudo rm -f "$IMAGE_BUILDING"
   # Do not stamp yet. A VM that is not successfully recreated still uses the
   # old, unlinked image, and the next deploy must retry the whole fleet.
   IMAGE_HASH="$want"
@@ -225,12 +240,17 @@ restart_changed() {
   sudo systemctl daemon-reload
   for b in $CHANGED; do
     if [ "$b" = "cracked" ]; then
-      confirm "restart cracked? it kills the $(pgrep -c firecracker || echo 0) running VMs" || exit 1
+      confirm "restart cracked? it kills the $(pgrep -c firecracker || true) running VMs" || exit 1
+      ensure_pending_fleet
     fi
     sudo systemctl restart "$b"
     [ "$b" = "cracked" ] && RESTARTED_CRACKED=1
     echo "restarted $b"
   done
+  if [ "$RESTARTED_CRACKED" = "1" ] && ! stage_selected vms; then
+    echo "cracked restarted; automatically adding the vms stage"
+    NEED_AUTO_VMS=1
+  fi
 }
 
 # stage_binaries is the host half: build, install what changed, restart that.
@@ -258,6 +278,22 @@ vm_ids() {
   echo "WARN: no record of what was running; guessing from the workspaces" >&2
   ids="$(sudo ls "$BASE/workspaces" 2>/dev/null | sed 's/\.ext4$//')"
   echo "$ids"
+}
+
+# ensure_pending_fleet persists the pre-deploy fleet before anything can stop
+# or delete it. A retry loads this snapshot instead of trusting the restarted
+# control plane's now-incomplete in-memory registry.
+ensure_pending_fleet() {
+  sudo test -e "$PENDING_FLEET" && return
+  local ids; ids="$(vm_ids)"
+  printf '%s\n' "$ids" | sudo tee "$PENDING_FLEET" >/dev/null
+}
+
+stage_selected() {
+  case " $STAGES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # recreate rebuilds one machine on the current image. DELETE *without* ?purge
@@ -290,24 +326,33 @@ stamp_image() {
 # it is recreated, so this is not optional after an image build.
 stage_vms() {
   say "machines"
+  VMS_RAN=1
   # Recreating costs every machine its uptime, so it needs a reason: a new image
   # to pick up, a cracked restart that already killed them, or an explicit
   # --only vms. Without this, a no-op deploy run with -y would cycle the fleet
   # for nothing.
-  if [ "$IMAGE_CHANGED$RESTARTED_CRACKED$EXPLICIT_STAGES" = "000" ]; then
+  if [ "$IMAGE_CHANGED$RESTARTED_CRACKED$EXPLICIT_STAGES" = "000" ] && \
+      ! sudo test -e "$PENDING_FLEET"; then
     echo "nothing changed for the guests; machines keep running"
     return
   fi
-  local ids; ids="$(vm_ids)"
-  [ -n "$ids" ] || { echo "no machines to recreate"; stamp_image; return; }
+  ensure_pending_fleet
+  local ids; ids="$(sudo cat "$PENDING_FLEET")"
+  [ -n "$ids" ] || {
+    echo "no machines to recreate"
+    stamp_image
+    sudo rm -f "$PENDING_FLEET"
+    return
+  }
   echo "machines: $(echo "$ids" | tr '\n' ' ')"
   # Only ask when there is something to lose. If cracked was just restarted
   # they are already down, and declining would leave them down.
-  if [ "$(pgrep -c firecracker || echo 0)" != "0" ]; then
-    confirm "recreate these? each is briefly down; workspaces are kept" || return
+  if [ "$(pgrep -c firecracker || true)" != "0" ]; then
+    confirm "recreate these? each is briefly down; workspaces are kept" || exit 1
   fi
   for id in $ids; do recreate "$id"; done
   stamp_image
+  sudo rm -f "$PENDING_FLEET"
 }
 
 # stage_verify proves what is running and records it, so the next deploy does
@@ -350,7 +395,11 @@ main() {
   # only, so restarting cracked erases it -- asking after the restart is asking
   # a process that has already forgotten.
   local fleet ids
-  if fleet="$(api GET /vms 2>/dev/null)" && \
+  if sudo test -e "$PENDING_FLEET"; then
+    LIVE_IDS="$(sudo cat "$PENDING_FLEET")"
+    LIVE_IDS_KNOWN=1
+    echo "resuming pending fleet snapshot"
+  elif fleet="$(api GET /vms 2>/dev/null)" && \
       ids="$(printf '%s' "$fleet" | jq -r '.vms[].id' 2>/dev/null)"; then
     LIVE_IDS="$ids"
     LIVE_IDS_KNOWN=1
@@ -358,7 +407,15 @@ main() {
     echo "WARN: could not snapshot the running fleet; workspace fallback may be used" >&2
   fi
   echo "running now: $(echo "$LIVE_IDS" | tr '\n' ' ')"
-  for s in $STAGES; do "stage_$s"; done
+  for s in $STAGES; do
+    if [ "$s" = "verify" ] && [ "$NEED_AUTO_VMS" = "1" ] && [ "$VMS_RAN" = "0" ]; then
+      stage_vms
+    fi
+    "stage_$s"
+  done
+  if [ "$NEED_AUTO_VMS" = "1" ] && [ "$VMS_RAN" = "0" ]; then
+    stage_vms
+  fi
   say "done"
 }
 

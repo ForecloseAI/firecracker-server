@@ -22,7 +22,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # Short on purpose. A ControlPath under any longer prefix blows the 104-byte
 # sockaddr limit, and ssh reports that as a connection failure without ever
 # mentioning the length.
-SOCK=/tmp/cr-cm.sock
+# %C hashes the SSH destination (including user, host, and port). Without it a
+# live multiplexing master can silently send a deploy intended for a different
+# CRACKED_SSH_TARGET to the previous host.
+SOCK=/tmp/cr-%C.sock
 SSH_OPTS=(-i "$KEY" -o ControlMaster=auto -o ControlPath="$SOCK" -o ControlPersist=30m)
 [ -n "${CRACKED_SSH_TARGET:-}" ] || SSH_OPTS+=(-p "$PORT")
 
