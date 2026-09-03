@@ -15,6 +15,17 @@ import (
 // everyone on the fleet, and it moves only when they ship or re-annotate a tool.
 const appCapsTTL = time.Hour
 
+// appsRetry is how long a machine keeps an INCOMPLETE answer before it is pushed
+// again.
+//
+// Far shorter than the TTL, because an incomplete answer is one an outage made:
+// what is missing from it asks a person, and healing that should not wait an
+// hour. Far longer than appsRetryAfter, because it is not free -- an incomplete
+// answer is never cached, so every machine coming due re-fans-out across six
+// apps, and a 30-second cadence would aim that at a provider already having a
+// bad day.
+const appsRetry = 5 * time.Minute
+
 // appCaps is what kind of thing each of the featured apps' actions is, as the
 // PROVIDER annotates it. No catalogue of our own -- 910 tools we would otherwise
 // keep in step with somebody else's release.
@@ -45,14 +56,8 @@ func newAppCaps(c *composio.Client) *appCaps {
 // another push.
 func (a *appCaps) resolved(ctx context.Context,
 	policy map[string]map[string]string) (map[string]string, time.Time) {
-	if a == nil {
-		// The ordinary shape of a deployment with no integration provider, and of
-		// a test that does not care. Nothing resolves to nothing, and nothing
-		// means ask -- so being wrong here is noisy rather than permissive.
-		return nil, time.Time{}
-	}
 	held, until := a.capabilities(ctx)
-	out := make(map[string]string, 1024)
+	out := make(map[string]string)
 	for app, slugs := range held {
 		for slug, capability := range slugs {
 			out[slug] = actionFor(capability, policy[app][capability])
@@ -100,7 +105,7 @@ func (a *appCaps) capabilities(ctx context.Context) (map[string]map[string]strin
 		log.Printf("chat: capability map is incomplete, %d apps; some reads will ask", len(got))
 		// Not cached, and the machine given it comes back on the short clock
 		// rather than the full TTL -- an outage's answer must not outlive it.
-		return got, time.Now().Add(appReadsRetry)
+		return got, time.Now().Add(appsRetry)
 	}
 	return got, a.keep(got)
 }
@@ -128,7 +133,8 @@ func (a *appCaps) fetchAll(ctx context.Context) (map[string]map[string]string, b
 	held := make(map[string]map[string]string, len(featured))
 	for i, app := range featured {
 		if out[i] != nil {
-			held[app] = ourView(out[i])
+			ourView(out[i])
+			held[app] = out[i]
 		}
 	}
 	return held, whole
@@ -137,7 +143,7 @@ func (a *appCaps) fetchAll(ctx context.Context) (map[string]map[string]string, b
 // ourView applies the handful of annotations we disagree with, before anything
 // is cached -- so what a machine is handed is already the answer and no later
 // consumer can forget to.
-func ourView(got map[string]string) map[string]string {
+func ourView(got map[string]string) {
 	for slug := range deniedReads {
 		if _, ok := got[slug]; !ok {
 			continue
@@ -147,5 +153,13 @@ func ourView(got map[string]string) map[string]string {
 		log.Printf("chat: %s is annotated read-only and we do not accept it", slug)
 		got[slug] = composio.CapWrite
 	}
-	return got
 }
+
+// deniedReads are actions the provider calls read-only and we do not.
+//
+// GMAIL_CREATE_PROMPT_POST is tagged readOnlyHint, carries not even
+// openWorldHint, and posts text to an unrelated third party -- MCP's "annotations
+// are untrusted hints" with a name on it. Host-side so a disagreement is fixed by
+// deploying rather than rebuilding a rootfs. Growing past a handful would mean
+// the annotations have drifted, which is worth saying rather than curating around.
+var deniedReads = map[string]bool{"GMAIL_CREATE_PROMPT_POST": true}

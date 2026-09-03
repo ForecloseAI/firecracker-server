@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -208,7 +209,8 @@ func TestTheReadOnlySetIsResolvedBeforeTheTicketExists(t *testing.T) {
 		gw.mu.Unlock()
 		return []string{slug + "_GET"}, nil
 	}}
-	s := &Server{gw: gw, reads: reads, appsClaims: map[string]appsClaim{},
+	kinds, _ := stubCaps(func(string) (map[string]string, error) { return nil, nil })
+	s := &Server{gw: gw, reads: reads, kinds: kinds, appsClaims: map[string]appsClaim{},
 		apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 
@@ -287,7 +289,7 @@ func TestAnIncompleteSetComesBackSooner(t *testing.T) {
 	})
 
 	_, until := a.slugs(context.Background())
-	if wait := time.Until(until); wait > appReadsRetry+time.Second {
+	if wait := time.Until(until); wait > appsRetry+time.Second {
 		t.Errorf("an incomplete set is good for %v, so an outage's set is kept "+
 			"as long as a healthy one", wait)
 	}
@@ -300,9 +302,11 @@ func TestAnIncompleteSetComesBackSooner(t *testing.T) {
 }
 
 // pushingServer is a host wired to a stub guest, ready to run a real push.
-func pushingServer(t *testing.T) (*Server, *agent.Client) {
+func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 	t.Helper()
+	var body []byte
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(guest.Close)
@@ -313,11 +317,12 @@ func pushingServer(t *testing.T) (*Server, *agent.Client) {
 	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
 		return []string{slug + "_GET"}, nil
 	}}
+	kinds, _ := stubCaps(func(string) (map[string]string, error) { return nil, nil })
 	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"), reads: reads,
-		appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
+		kinds: kinds, appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 	guestPort, _ := strconv.Atoi(port)
-	return s, agent.New(host, guestPort)
+	return s, agent.New(host, guestPort), &body
 }
 
 // A push that landed has to say so on the SET's clock, not the one the claim was
@@ -330,7 +335,7 @@ func pushingServer(t *testing.T) (*Server, *agent.Client) {
 // unit test that only ever calls claimApps and doneApps by hand: this drives the
 // real mintApps and reads back what it recorded.
 func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
-	s, cl := pushingServer(t)
+	s, cl, _ := pushingServer(t)
 	if !s.claimApps("m1") {
 		t.Fatal("the first caller did not get the claim")
 	}
@@ -351,7 +356,7 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 // The failure path still wins over the deadline: a push that did not land leaves
 // a cooldown, never a claim dated an hour out that nothing ever retries.
 func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
-	s, _ := pushingServer(t)
+	s, _, _ := pushingServer(t)
 	// No guest to answer, so SetApps fails after the ticket is minted.
 	if !s.claimApps("m1") {
 		t.Fatal("the first caller did not get the claim")

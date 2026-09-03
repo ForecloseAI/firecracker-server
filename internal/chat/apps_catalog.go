@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,6 +106,11 @@ func fanOut[E any](ctx context.Context, fetch func(context.Context, string) (E, 
 			defer wg.Done()
 			got, err := fetch(ctx, slug)
 			if err != nil {
+				// Named, with its reason. The callers only say how MANY apps are
+				// missing, which cannot tell a provider outage from one toolkit
+				// that outgrew a decode limit -- and the second is the one that
+				// never heals on its own.
+				log.Printf("chat: %s did not answer: %v", slug, err)
 				missed.Store(true)
 				got = miss(slug)
 			}

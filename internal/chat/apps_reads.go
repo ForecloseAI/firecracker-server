@@ -15,16 +15,6 @@ import (
 // when the provider ships or re-annotates a tool.
 const appReadsTTL = time.Hour
 
-// appReadsRetry is how long a machine keeps an INCOMPLETE set before it is
-// pushed again.
-//
-// Far shorter than the TTL, because an incomplete set is one an outage made:
-// its missing tools ask a person, and healing that should not wait an hour. Far
-// longer than appsRetryAfter, because it is not free -- an incomplete answer is
-// never cached, so every machine coming due re-fans-out across six apps, and a
-// 30-second cadence would aim that at a provider already having a bad day.
-const appReadsRetry = 5 * time.Minute
-
 // appReads is which of the featured apps' actions only read: the PROVIDER's
 // annotations, less the handful we reject (see deniedReads). No catalogue of our
 // own -- 910 tools we would have to keep in step with somebody else's release.
@@ -71,7 +61,7 @@ func (a *appReads) slugs(ctx context.Context) ([]string, time.Time) {
 		log.Printf("chat: read-only set is incomplete, %d actions; some reads will ask", len(got))
 		// Not cached, and the machine given it comes back on the short clock
 		// rather than the full TTL -- an outage's set must not outlive the outage.
-		return got, time.Now().Add(appReadsRetry)
+		return got, time.Now().Add(appsRetry)
 	}
 	return got, a.keep(got)
 }
@@ -101,15 +91,6 @@ func (a *appReads) fetchAll(ctx context.Context) ([]string, bool) {
 	// already the answer and no later consumer can forget to.
 	return slices.DeleteFunc(slices.Concat(out...), denied), whole
 }
-
-// deniedReads are actions the provider calls read-only and we do not.
-//
-// GMAIL_CREATE_PROMPT_POST is tagged readOnlyHint, carries not even
-// openWorldHint, and posts text to an unrelated third party -- MCP's "annotations
-// are untrusted hints" with a name on it. Host-side so a disagreement is fixed by
-// deploying rather than rebuilding a rootfs. Growing past a handful would mean
-// the annotations have drifted, which is worth saying rather than curating around.
-var deniedReads = map[string]bool{"GMAIL_CREATE_PROMPT_POST": true}
 
 // denied reports an action we will not pass on as read-only, saying so when it
 // fires. Silence here would leave nobody able to tell whether the provider still

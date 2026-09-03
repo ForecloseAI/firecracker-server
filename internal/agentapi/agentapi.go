@@ -107,8 +107,9 @@ type Apps struct {
 	//
 	// Resolved rather than shipped in halves so the guest holds no vocabulary of
 	// its own -- it looks up a string and obeys it, which is the same shape as
-	// the read-only set it replaces and the reason the name classifier could be
-	// deleted from that package. Absent means ask.
+	// the read-only set it will replace, and the reason the name classifier could
+	// be deleted from that package. Both ship today: nothing obeys Actions until
+	// the whole fleet runs an image that does. Absent means ask.
 	Actions map[string]string `json:"actions,omitempty"`
 }
 

@@ -3,6 +3,7 @@ package composio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -454,5 +455,43 @@ func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
 	defer srv.Close()
 	if got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook"); err == nil {
 		t.Fatalf("kept %d off a full page", len(got))
+	}
+}
+
+// THE test for the decode ceiling, and the reason the guard above is not enough
+// on its own: its rows are 36 bytes, where a real unfiltered one carries a
+// description and an input schema and runs past two kilobytes.
+//
+// A page just under the row guard is therefore about 1.1 MiB of body. Decoded
+// under a 1 MiB ceiling that is not a short read but a total one -- io.LimitReader
+// hands the decoder an early EOF, Decode returns "unexpected EOF" and NOTHING is
+// kept, so the toolkit that outgrew the call reports an outage rather than the
+// named paging error written for it. Never cached, so it re-fans-out forever.
+func TestARealSizedPageIsDecodedRatherThanTruncated(t *testing.T) {
+	row := `{"slug":"OUTLOOK_%d","tags":["readOnlyHint"],"description":"` +
+		strings.Repeat("x", 2<<10) + `"},`
+	var body strings.Builder
+	body.WriteString(`{"items":[`)
+	for i := range readOnlyPage - 2 {
+		body.WriteString(fmt.Sprintf(row, i))
+	}
+	body.WriteString(`{"slug":"OUTLOOK_LAST","tags":["destructiveHint"]}]}`)
+	if body.Len() < 1<<20 {
+		t.Fatalf("fixture is %d bytes, under the ceiling it exists to exceed", body.Len())
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body.String()))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook")
+	if err != nil {
+		t.Fatalf("a page under the row guard did not decode: %v", err)
+	}
+	if len(got) != readOnlyPage-1 {
+		t.Errorf("kept %d of %d rows", len(got), readOnlyPage-1)
+	}
+	if got["OUTLOOK_LAST"] != CapDelete {
+		t.Errorf("the last row of a big page was lost or misread: %q", got["OUTLOOK_LAST"])
 	}
 }

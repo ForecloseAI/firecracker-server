@@ -85,7 +85,16 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// second provider round trip on a cold cache. Pushed BESIDE rather than
 	// instead of it -- nothing obeys Actions yet, so this can ship before the
 	// image that reads it.
-	actions, _ := s.kinds.resolved(ctx, held.Policy)
+	actions, capsUntil := s.kinds.resolved(ctx, held.Policy)
+	// The EARLIER of the two clocks. Each cache decides on its own whether its
+	// answer was whole, so a partial capability map on the five-minute clock can
+	// arrive beside a complete read-only set on the hour. Taking the set's would
+	// leave a machine holding an Actions map whose gaps all ask, for an hour,
+	// with nothing bringing it back early -- invisible today, and exactly when
+	// the provider is having a bad minute once the guest obeys it.
+	if capsUntil.Before(until) {
+		until = capsUntil
+	}
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.

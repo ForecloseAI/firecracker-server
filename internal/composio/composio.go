@@ -170,8 +170,29 @@ func (c *Client) do(req *http.Request, out any) error {
 	if out == nil {
 		return nil // a 204 has no body to read, and decoding one is an EOF
 	}
-	return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(out)
+	// Bounded well ABOVE what any caller's own row guard allows, so that guard is
+	// the one that fires. At ~2.3 KB per unfiltered tool row, a 1 MiB ceiling died
+	// at roughly 450 rows -- under Capabilities' readOnlyPage of 500, so the
+	// toolkit that outgrew the call would fail as "unexpected EOF" having decoded
+	// NOTHING, rather than as the named "this needs paging" error written for
+	// exactly that case. Silent, total, and never cached, so it re-fans-out on the
+	// short clock forever.
+	//
+	// Costs no memory to raise: this streams into structs that keep a handful of
+	// fields, so what is retained is tens of KB whatever the body is.
+	return json.NewDecoder(io.LimitReader(res.Body, bodyCap)).Decode(out)
 }
+
+// bodyCap bounds a response we will decode: a guard against a provider having a
+// very bad day, not a size any real answer approaches.
+//
+// The largest today is one toolkit's unfiltered tool list, and the NEAR MISS is
+// the whole reason this is not 1 MiB: outlook, the biggest of the six at 305
+// tools, reconstructs to roughly a megabyte -- close enough that it cannot be
+// said from here which side of that line it falls on, and it is the fastest
+// growing of the six. A ceiling a real answer can reach is one that will be
+// reached.
+const bodyCap = 8 << 20
 
 // Connection is one app account a person has connected.
 type Connection struct {
