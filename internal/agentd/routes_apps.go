@@ -68,9 +68,9 @@ func (s *Server) handlePutApps(w http.ResponseWriter, r *http.Request) {
 // so a surface that APPEARS or DISAPPEARS needs them rebuilt; a session that
 // merely moved does not.
 func (s *Server) applyApps(had, now agentapi.Apps) {
-	s.sup.Apps().SetURL(now.SessionURL)
-	// Unconditional, and outside the eviction branch: see SetReadOnly.
-	s.sup.Apps().SetReadOnly(now.ReadOnly)
+	// Install both under one lock: exposing a refreshed URL before its policy
+	// could let a concurrent call use the old classification on the new session.
+	s.sup.Apps().SetConfig(now.SessionURL, now.ReadOnly)
 	if surfaceChanged(had, now) {
 		s.sup.EvictIdle()
 	}

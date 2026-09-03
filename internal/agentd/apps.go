@@ -216,6 +216,29 @@ func (s *appsServer) SetReadOnly(slugs []string) {
 	}
 }
 
+// SetConfig installs a pushed URL and policy as one state transition. In
+// particular, no call can observe a refreshed session URL while still using
+// the preceding session's read-only classification.
+func (s *appsServer) SetConfig(url string, slugs []string) {
+	held := make(map[string]bool, len(slugs))
+	for _, slug := range slugs {
+		held[slug] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads = held
+	if url != s.url {
+		s.url, s.listed, s.failedAt = url, nil, time.Time{}
+		if s.sess != nil {
+			s.sess.Close()
+			s.sess = nil
+		}
+	}
+	if len(held) == 0 && url != "" {
+		log.Printf("agentd: session but no read-only actions; every app call will ask")
+	}
+}
+
 // reading reports whether the provider says this action only reads.
 func (s *appsServer) reading(slug string) bool {
 	s.mu.Lock()

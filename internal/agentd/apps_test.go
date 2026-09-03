@@ -467,3 +467,16 @@ func TestALongArgumentIsClippedOnARuneBoundary(t *testing.T) {
 		t.Error("the cut landed inside a character")
 	}
 }
+
+// A long body must not consume the bounded card before the person can see the
+// destination. json.Marshal's alphabetical map ordering used to do exactly
+// that because body sorts before recipient_email.
+func TestALongArgumentDoesNotHideTheRecipient(t *testing.T) {
+	got := previewOf(appCall{Slug: "GMAIL_SEND_EMAIL", Args: map[string]any{
+		"body":            strings.Repeat("x", previewCap),
+		"recipient_email": "dave@example.com",
+	}})
+	if !strings.Contains(got, "dave@example.com") {
+		t.Errorf("the bounded preview hid its recipient: %q", got)
+	}
+}

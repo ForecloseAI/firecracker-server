@@ -3,6 +3,8 @@ package agentd
 import (
 	"encoding/json"
 	"errors"
+	"sort"
+	"strings"
 )
 
 // previewCap bounds what one card carries, in runes.
@@ -109,8 +111,52 @@ func previewOf(c appCall) string {
 	}
 	// Cannot fail: Args came out of json.Unmarshal, so it holds only what json
 	// can put back.
-	body, _ := json.Marshal(c.Args)
-	return clip(string(body), previewCap)
+	return clip(marshalPreview(c.Args), previewCap)
+}
+
+// marshalPreview keeps destination-like arguments at the front of the bounded
+// preview. encoding/json sorts map keys, which used to let a long body hide the
+// recipient or channel that a person most needs when deciding whether to act.
+func marshalPreview(args map[string]any) string {
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		pi, pj := previewPriority(keys[i]), previewPriority(keys[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return keys[i] < keys[j]
+	})
+
+	var out strings.Builder
+	out.WriteByte('{')
+	for i, key := range keys {
+		if i != 0 {
+			out.WriteByte(',')
+		}
+		name, _ := json.Marshal(key)
+		value, _ := json.Marshal(args[key])
+		out.Write(name)
+		out.WriteByte(':')
+		out.Write(value)
+	}
+	out.WriteByte('}')
+	return out.String()
+}
+
+func previewPriority(key string) int {
+	key = strings.ToLower(key)
+	for _, part := range []string{"recipient", "channel", "destination", "address"} {
+		if key == part || strings.Contains(key, part) {
+			return 0
+		}
+	}
+	if key == "to" || strings.HasSuffix(key, "_to") {
+		return 0
+	}
+	return 1
 }
 
 // clip shortens to n runes, saying so rather than trailing off. Ranging a string
