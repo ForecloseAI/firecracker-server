@@ -186,19 +186,32 @@ func (a *appCatalog) keep(held *catalogue) {
 
 // toolkits is the featured apps' copy, in the order featured names them.
 //
-// It never fails: an app the catalogue could not be read for still appears,
-// named after its own slug, because a person who cannot see Slack cannot connect
-// it either -- and the Apps screen going blank during a provider outage is a
-// worse answer than six rows with plain names on them.
+// It never fails: when the catalogue could not be read AT ALL the featured apps
+// still appear, named after their own slugs, because a person who cannot see
+// Slack cannot connect it either -- and a blank Apps screen during a provider
+// outage is the worse of the two answers. That fallback is safe only because the
+// connect route falls back to the same list.
+//
+// A readable catalogue that simply does not CARRY a featured app is the opposite
+// case, and it drops the row. The app is missing because it was filtered out --
+// withdrawn, or no longer something the provider holds credentials for -- and
+// connectApp consults this same catalogue and would refuse it. Naming it after
+// its slug and showing it anyway is a Connect button that can never work, on the
+// screen most people only ever see.
 func (a *appCatalog) toolkits(ctx context.Context) []composio.Toolkit {
 	held := a.current(ctx)
 	out := make([]composio.Toolkit, 0, len(featured))
 	for _, slug := range featured {
-		kit, ok := held.get(slug)
-		if !ok {
-			kit = composio.Toolkit{Slug: slug, Name: labelFor(slug)}
+		switch kit, ok := held.get(slug); {
+		case ok:
+			out = append(out, kit)
+		case held == nil:
+			out = append(out, composio.Toolkit{Slug: slug, Name: labelFor(slug)})
+		default:
+			// Worth saying: a featured app the catalogue has stopped carrying is
+			// something to go and look at, not something to quietly drop forever.
+			log.Printf("chat: %s is featured and the catalogue does not offer it", slug)
 		}
-		out = append(out, kit)
 	}
 	return out
 }

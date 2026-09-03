@@ -414,17 +414,82 @@ func TestAPageAboutAnotherAppIsRefusedRatherThanFiltered(t *testing.T) {
 	}
 }
 
-// A full page is refused rather than kept: the tools it did not return would be
-// absent from the map, and absent resolves to asking about everything.
-func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
+// An app bigger than one page is walked to its end.
+//
+// This used to be REFUSED, on the reasoning that a short answer is worse than
+// none. That was true while the six apps on offer topped out at 305 tools and is
+// false now that anybody can connect anything: what refusing actually produces
+// is a permanent error, so the app is absent from every pushed answer and its
+// actions ask forever -- including the ones somebody switched off, which then
+// raise a card they can say yes to.
+func TestAnAppBiggerThanOnePageIsWalkedToItsEnd(t *testing.T) {
+	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"items":[` + strings.Repeat(
-			`{"slug":"X","tags":["readOnlyHint"],"toolkit":{"slug":"outlook"}},`, toolPage-1) +
-			`{"slug":"X","tags":["readOnlyHint"],"toolkit":{"slug":"outlook"}}]}`))
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("cursor") == "" {
+			w.Write([]byte(`{"items":[` + strings.Repeat(
+				`{"slug":"BIG_READ","tags":["readOnlyHint"],"toolkit":{"slug":"big"}},`, toolPage-1) +
+				`{"slug":"BIG_READ","tags":["readOnlyHint"],"toolkit":{"slug":"big"}}],
+				"next_cursor":"p2","total_items":501}`))
+			return
+		}
+		w.Write([]byte(`{"items":[{"slug":"BIG_DROP","tags":["destructiveHint"],
+			"toolkit":{"slug":"big"}}],"total_items":501}`))
 	}))
 	defer srv.Close()
-	if got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook"); err == nil {
-		t.Fatalf("kept %d off a full page", len(got))
+
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "big")
+	if err != nil {
+		t.Fatalf("a page-and-a-bit app was refused: %v", err)
+	}
+	// The second page is the one that matters: it carries the delete, and an app
+	// whose walk stopped at the page boundary would classify none of it.
+	if got["BIG_DROP"] != CapDelete || got["BIG_READ"] != CapRead {
+		t.Errorf("got %v, want both pages", got)
+	}
+	if len(queries) != 2 || !strings.Contains(queries[1], "cursor=p2") {
+		t.Errorf("queries were %q", queries)
+	}
+}
+
+// A cursor that never empties is a provider bug, and the pages that did arrive
+// are not an answer: the caller caches whatever it is given, so a truncated map
+// would run unasked-looking for an hour with actions missing from it.
+func TestACapabilityWalkThatNeverEndsIsRefused(t *testing.T) {
+	var pages atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		w.Write([]byte(`{"items":[{"slug":"X","tags":["readOnlyHint"],
+			"toolkit":{"slug":"big"}}],"next_cursor":"always"}`))
+	}))
+	defer srv.Close()
+	if got, err := New("k", srv.URL).Capabilities(context.Background(), "big"); err == nil {
+		t.Fatalf("kept %d rows off a walk that never ended", len(got))
+	}
+	if n := pages.Load(); n != toolPages {
+		t.Errorf("asked %d times, want the walk to stop at %d", n, toolPages)
+	}
+}
+
+// A walk that ends shorter than the provider's own count is KEPT, not refused.
+//
+// What a short answer costs is some of this app's actions asking when they need
+// not. What refusing costs is the app's entire answer -- and the count is a
+// number we cannot check, which may simply include the deprecated rows this
+// deliberately drops. Refusing on it would be a permanent outage bought with an
+// assumption.
+func TestAWalkShorterThanTheProvidersOwnCountIsStillAnAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"],
+			"toolkit":{"slug":"gmail"}}],"total_items":900}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "gmail")
+	if err != nil {
+		t.Fatalf("a short walk was refused: %v", err)
+	}
+	if got["GMAIL_FETCH_EMAILS"] != CapRead {
+		t.Errorf("got %v", got)
 	}
 }
 

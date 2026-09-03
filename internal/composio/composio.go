@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -170,13 +171,11 @@ func (c *Client) do(req *http.Request, out any) error {
 	if out == nil {
 		return nil // a 204 has no body to read, and decoding one is an EOF
 	}
-	// Bounded well ABOVE what any caller's own row guard allows, so that guard is
-	// the one that fires. At ~2.3 KB per unfiltered tool row, a 1 MiB ceiling died
-	// at roughly 450 rows -- under Capabilities' toolPage of 500, so the
-	// toolkit that outgrew the call would fail as "unexpected EOF" having decoded
-	// NOTHING, rather than as the named "this needs paging" error written for
-	// exactly that case. Silent, total, and never cached, so it re-fans-out on the
-	// short clock forever.
+	// Bounded well ABOVE a full page, so this is never what stops a real answer.
+	// At ~2.3 KB per unfiltered tool row, a 1 MiB ceiling died at roughly 450 --
+	// under the 500 a page asks for, so a toolkit that reached it failed as
+	// "unexpected EOF" having decoded NOTHING. Silent, total, and never cached,
+	// so it repeats on the short clock forever.
 	//
 	// Costs no memory to raise: this streams into structs that keep a handful of
 	// fields, so what is retained is tens of KB whatever the body is.
@@ -186,12 +185,13 @@ func (c *Client) do(req *http.Request, out any) error {
 // bodyCap bounds a response we will decode: a guard against a provider having a
 // very bad day, not a size any real answer approaches.
 //
-// The largest today is one toolkit's unfiltered tool list, and the NEAR MISS is
-// the whole reason this is not 1 MiB: outlook, the biggest of the six at 305
-// tools, reconstructs to roughly a megabyte -- close enough that it cannot be
-// said from here which side of that line it falls on, and it is the fastest
-// growing of the six. A ceiling a real answer can reach is one that will be
-// reached.
+// The largest is one page of unfiltered tool rows, and the NEAR MISS is the
+// whole reason this is not 1 MiB: outlook, the biggest of the six this project
+// drove by hand, reconstructs its 305 tools to roughly a megabyte on its own.
+// Every page is now bounded at toolPage rows rather than however many an app
+// happens to have -- about 1.2 MB at that measured rate -- so the headroom here
+// is a factor of six against a page that can no longer grow. A ceiling a real
+// answer can reach is one that will be reached.
 const bodyCap = 8 << 20
 
 // Connection is one app account a person has connected.
@@ -449,34 +449,54 @@ func (c *Client) Categories(ctx context.Context) ([]Category, error) {
 // nothing downstream parses a tool name.
 const readOnlyTag = "readOnlyHint"
 
-// toolPage is asked for in one page. Outlook is the largest of the featured six
-// at 305 tools, so this is well over the biggest real answer -- deliberately,
-// because Capabilities refuses a full page rather than paging.
+// toolPage is asked for in one page. Outlook, the largest of the six this
+// project drove by hand, has 305 tools -- but the catalogue is open now and
+// nothing says the next app somebody connects is that size.
 const toolPage = 500
 
-// toolsResp is one page of GET /tools. Tags are what every row is classified
-// from, and the rest is the little needed to know the row belongs here at all --
-// which is what makes an unfiltered page cheap to hold however large the body
-// was.
+// toolPages bounds the walk, for the reason toolkitPages does: a cursor that
+// never empties is a provider bug that would otherwise spend a request a second
+// forever.
+//
+// Ten thousand tools for one app, which is far past anything real. It has to be,
+// because stopping short here is not merely a short list: an app whose walk is
+// abandoned contributes NOTHING, and an action the person switched off then goes
+// missing from the pushed answer, where absence means ask -- so a standing
+// refusal quietly becomes a card they can say yes to.
+const toolPages = 20
+
+// toolsResp is one page of GET /tools.
 type toolsResp struct {
-	Items []struct {
-		Slug string   `json:"slug"`
-		Tags []string `json:"tags"`
-		// Toolkit is read so an ignored filter is DETECTED rather than defended
-		// against. This API answers a parameter it does not recognise with
-		// everything it has, and the day toolkit_slug is renamed the answer to
-		// "what can gmail do" becomes the whole catalogue -- classified, cached
-		// and pushed. Reading each row's own parent is what turns that from a
-		// silent wrong answer into a named one.
-		Toolkit struct {
-			Slug string `json:"slug"`
-		} `json:"toolkit"`
-		// Deprecated tools are asked about rather than run unasked. The provider
-		// includes them by default here, unlike in the toolkit catalogue, and a
-		// withdrawn action that still classifies read-only is one nobody is
-		// choosing to keep working.
-		Deprecated bool `json:"is_deprecated"`
-	} `json:"items"`
+	Items      []toolRow `json:"items"`
+	NextCursor string    `json:"next_cursor"`
+	// Total is the provider's own count. Read to NOTICE a short answer rather
+	// than to refuse one: a walk that ends early costs some actions a card they
+	// did not need, while trusting a number we cannot verify would cost an app
+	// its whole answer the day that number turns out to include rows we drop.
+	Total int `json:"total_items"`
+}
+
+// toolRow is one action as the catalogue lists it. Tags are what it is
+// classified from, and the rest is the little needed to know the row belongs
+// here at all -- which is what makes an unfiltered page cheap to hold however
+// large the body was.
+type toolRow struct {
+	Slug string   `json:"slug"`
+	Tags []string `json:"tags"`
+	// Toolkit is read so an ignored filter is DETECTED rather than defended
+	// against. This API answers a parameter it does not recognise with
+	// everything it has, and the day toolkit_slug is renamed the answer to
+	// "what can gmail do" becomes the whole catalogue -- classified, cached
+	// and pushed. Reading each row's own parent is what turns that from a
+	// silent wrong answer into a named one.
+	Toolkit struct {
+		Slug string `json:"slug"`
+	} `json:"toolkit"`
+	// Deprecated tools are asked about rather than run unasked. The provider
+	// includes them by default here, unlike in the toolkit catalogue, and a
+	// withdrawn action that still classifies read-only is one nobody is
+	// choosing to keep working.
+	Deprecated bool `json:"is_deprecated"`
 }
 
 // The capabilities an action can belong to, most consequential first. These are
@@ -493,24 +513,55 @@ const (
 // UNFILTERED on purpose, and that is the safer shape rather than the lazier one.
 // This API answers a parameter it does not recognise with EVERYTHING -- user_id
 // vs user_ids and toolkit vs toolkit_slug have both already been met here -- so
-// asking for tags=readOnlyHint and trusting the answer would call all 910 tools
+// asking for tags=readOnlyHint and trusting the answer would call every tool
 // read-only the day that filter is renamed. Reading each row's own tags removes
-// the trap instead of defending against it, and costs one request per app rather
+// the trap instead of defending against it, and costs one walk per app rather
 // than one per tag. The predecessor that did filter had to re-check every row it
 // got back for exactly this reason.
+//
+// Walked rather than read in one page, which the open catalogue made necessary.
+// A single page refused anything at or over its own size, on the reasoning that
+// a short answer is worse than none -- true while the six apps on offer topped
+// out at 305 tools, and false now that anybody can connect anything. What it
+// actually produces for a larger app is a permanent error: nothing cached, the
+// app absent from every pushed answer, and its actions asking forever -- the
+// ones somebody switched off included, which then raise a card they can say yes
+// to. Paging costs a round trip per five hundred actions and removes the cliff.
 func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
-	var out toolsResp
-	q := "/tools?" + url.Values{
-		"toolkit_slug": {slug}, "limit": {strconv.Itoa(toolPage)},
-	}.Encode()
-	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
-		return nil, err
+	held := map[string]string{}
+	cursor, seen, total := "", 0, 0
+	for range toolPages {
+		q := url.Values{"toolkit_slug": {slug}, "limit": {strconv.Itoa(toolPage)}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var out toolsResp
+		if err := c.send(ctx, http.MethodGet, "/tools?"+q.Encode(), nil, &out); err != nil {
+			return nil, err
+		}
+		seen, total = seen+len(out.Items), out.Total
+		if err := collect(held, out.Items, slug); err != nil {
+			return nil, err
+		}
+		if out.NextCursor == "" {
+			if total > seen {
+				// Said out loud rather than refused. What it costs is some of
+				// this app's actions asking when they need not; refusing would
+				// cost the app its entire answer, and this number is one we
+				// cannot check -- it may simply count rows we deliberately drop.
+				log.Printf("composio: %s reports %d tools and the walk found %d",
+					slug, total, seen)
+			}
+			return held, nil
+		}
+		cursor = out.NextCursor
 	}
-	if len(out.Items) >= toolPage {
-		return nil, fmt.Errorf("composio: %s has %d or more tools; this needs paging", slug, toolPage)
-	}
-	held := make(map[string]string, len(out.Items))
-	for _, it := range out.Items {
+	return nil, fmt.Errorf("composio: %s did not finish within %d pages of tools", slug, toolPages)
+}
+
+// collect classifies one page of rows into the map being built.
+func collect(held map[string]string, rows []toolRow, slug string) error {
+	for _, it := range rows {
 		if it.Toolkit.Slug != "" && it.Toolkit.Slug != slug {
 			// A row that NAMES another app, never one that names nothing. The
 			// trap being caught is a filter coming back ignored, and the rows
@@ -525,7 +576,7 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 			// app that was asked for. Filtering down to the rows that match
 			// would cache them as a complete answer for an app whose real tools
 			// never arrived.
-			return nil, fmt.Errorf("composio: asked %s for its tools and got %s; "+
+			return fmt.Errorf("composio: asked %s for its tools and got %s; "+
 				"the toolkit filter is being ignored", slug, it.Toolkit.Slug)
 		}
 		if it.Deprecated {
@@ -533,7 +584,7 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 		}
 		held[it.Slug] = capabilityOf(it.Tags)
 	}
-	return held, nil
+	return nil
 }
 
 // capabilityOf is what one action does, most consequential hint winning.

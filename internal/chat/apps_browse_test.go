@@ -253,3 +253,48 @@ func TestMintingConnectLinksIsBoundedPerPerson(t *testing.T) {
 		t.Error("a rate limit was reported as an app we do not carry")
 	}
 }
+
+// A featured app the catalogue has stopped carrying is dropped from the Apps
+// screen rather than named after its slug and shown anyway.
+//
+// The slug-named placeholder exists for the case where the catalogue could not
+// be read AT ALL, and it is safe there only because connectApp falls back to the
+// same list. A readable catalogue that has filtered the app out is the opposite:
+// connectApp consults it and refuses, so showing the row puts a Connect button
+// that can never work on the screen most people only ever see.
+func TestAFeaturedAppTheCatalogueNoLongerCarriesLeavesTheScreen(t *testing.T) {
+	withdrawn := featured[0]
+	held := kits(featured[1:]...)
+	held = append(held, composio.Toolkit{
+		Slug: withdrawn, Name: labelFor(withdrawn), ManagedAuth: true, Deprecated: true})
+	s, tok := browsing(t, held)
+
+	w := call(t, s, tok, "GET", "/v1/apps", "")
+	var got []App
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body %s: %v", w.Body, err)
+	}
+	for _, app := range got {
+		if app.Slug == withdrawn {
+			t.Errorf("%s is on the screen, and connecting it answers %d",
+				withdrawn, call(t, s, tok, "POST", "/v1/apps/"+withdrawn+"/connect", "").Code)
+		}
+	}
+	if len(got) != len(featured)-1 {
+		t.Errorf("got %d rows, want the rest of the featured apps", len(got))
+	}
+	// The other half of the same rule: when the catalogue is unreadable the
+	// placeholder is right, because connecting falls back to the same list.
+	s.catalog = &appCatalog{
+		fetch: func(context.Context) ([]composio.Toolkit, error) {
+			return nil, errors.New("provider had a bad minute")
+		},
+		groupings: func(context.Context) ([]composio.Category, error) { return nil, nil },
+	}
+	w = call(t, s, tok, "GET", "/v1/apps", "")
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if len(got) != len(featured) {
+		t.Errorf("an outage left %d rows, want all %d named after their slugs",
+			len(got), len(featured))
+	}
+}

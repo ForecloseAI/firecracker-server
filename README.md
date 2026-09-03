@@ -551,6 +551,12 @@ set asks about everything: noisy, never permissive. One entry is ours —
 `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text to a third party,
 and MCP's own rule is that annotations are untrusted hints.
 
+The walk over one app's tools is paged. It used to refuse anything at or over a
+single page, on the reasoning that a short answer is worse than none — true
+while the six apps on offer topped out at 305 tools, and false now that anybody
+can connect anything: refusing leaves the app absent from every pushed answer,
+so its actions ask forever, the ones somebody switched off included.
+
 Resolved over the apps a person has **connected**, in any status, plus the
 featured few as a floor. An action in an app nobody has connected cannot run
 whatever we say about it, and a thousand apps' worth would not fit; the floor is
