@@ -641,3 +641,22 @@ func TestCategoriesComeBackAsTheProviderNamesThem(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 }
+
+// A row that names NOTHING is not the trap. The one being caught is a filter
+// coming back ignored, and the rows that arrive then carry their real parents --
+// so an absent or renamed field is a schema change, and reading it as an ignored
+// filter would refuse every page forever: nothing cached, and every machine
+// holding that app re-pushing on the short clock for good.
+func TestARowThatNamesNoToolkitIsNotTakenForAnIgnoredFilter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"]}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "gmail")
+	if err != nil {
+		t.Fatalf("a page with no parent named on its rows was refused: %v", err)
+	}
+	if got["GMAIL_FETCH_EMAILS"] != CapRead {
+		t.Errorf("got %v", got)
+	}
+}

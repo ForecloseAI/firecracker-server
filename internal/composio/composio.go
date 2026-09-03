@@ -511,12 +511,20 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 	}
 	held := make(map[string]string, len(out.Items))
 	for _, it := range out.Items {
-		if it.Toolkit.Slug != slug {
-			// The whole answer, not this row: a filter that came back ignored
-			// means nothing in this page can be trusted to be about the app that
-			// was asked for. Refused rather than filtered down to the rows that
-			// happen to match, because the matching ones would then be cached as
-			// a complete answer for an app whose real tools never arrived.
+		if it.Toolkit.Slug != "" && it.Toolkit.Slug != slug {
+			// A row that NAMES another app, never one that names nothing. The
+			// trap being caught is a filter coming back ignored, and the rows
+			// that arrive then carry their real parents -- so an absent or
+			// renamed field is a schema change and not the failure this is
+			// looking for. Reading it as one would refuse every page forever:
+			// nothing cached, every machine holding that app re-pushing on the
+			// five-minute clock and rotating its ticket each time, fleet-wide.
+			//
+			// The whole answer, not just this row: a filter that came back
+			// ignored means nothing in the page can be trusted to be about the
+			// app that was asked for. Filtering down to the rows that match
+			// would cache them as a complete answer for an app whose real tools
+			// never arrived.
 			return nil, fmt.Errorf("composio: asked %s for its tools and got %s; "+
 				"the toolkit filter is being ignored", slug, it.Toolkit.Slug)
 		}

@@ -41,7 +41,9 @@ const appsRetry = 5 * time.Minute
 //
 // Sized to be unreachable rather than snug, deliberately: what it costs when it
 // bites is a person's last few apps asking about reads, and that is a cost they
-// cannot see the reason for.
+// cannot see the reason for. Refusals are emitted ahead of reads so that if it
+// does bite, what it gives up is a card nobody needed rather than a switch
+// somebody deliberately turned off.
 const appsActionCap = 2000
 
 // appCapsCap bounds the per-app cache, for the reason appsClaimCap does: the
@@ -100,24 +102,43 @@ func (a *appCaps) resolved(ctx context.Context, apps []string,
 	policy map[string]map[string]string) (map[string]string, time.Time) {
 	held, until := a.capabilities(ctx, apps)
 	out := make(map[string]string)
+	// Refusals first, and that ordering is the whole point of two passes.
+	//
+	// Dropping an entry costs it its meaning, because the guest reads absence as
+	// ask -- so what the cap gives up matters. Giving up a read costs a card
+	// nobody needed to see. Giving up a REFUSAL costs a person the answer they
+	// went into a settings screen to give: an action they switched off would ask
+	// instead, and a card is something somebody can say yes to. One pass over a
+	// map would decide which by iteration order, differently on every push.
+	for _, want := range []string{agentapi.ActionNever, agentapi.ActionAuto} {
+		if a.fill(out, apps, held, policy, want) {
+			return out, until
+		}
+	}
+	return out, until
+}
+
+// fill adds every action resolving to one answer, reporting whether the ceiling
+// stopped it short.
+func (a *appCaps) fill(out map[string]string, apps []string,
+	held map[string]map[string]string, policy map[string]map[string]string, want string) bool {
 	for _, app := range apps {
 		for slug, capability := range held[app] {
-			action := actionFor(capability, policy[app][capability])
-			if action == agentapi.ActionAsk {
+			if actionFor(capability, policy[app][capability]) != want {
 				continue
 			}
 			if len(out) == appsActionCap {
 				// Said out loud, because nobody can see the reason from the
-				// outside: the apps past this point ask about their reads, which
-				// reads as a gate having a bad day rather than a ceiling.
+				// outside: what is left over asks, which reads as a gate having a
+				// bad day rather than a ceiling being reached.
 				log.Printf("chat: %d actions is the most one machine is pushed; "+
 					"%s and anything after it will ask", appsActionCap, app)
-				return out, until
+				return true
 			}
-			out[slug] = action
+			out[slug] = want
 		}
 	}
-	return out, until
+	return false
 }
 
 // actionFor is what one action needs, given what it is and what the person said.

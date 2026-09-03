@@ -396,7 +396,7 @@ func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 func TestAnAppConnectedAfterThePushBringsTheMachineBackEarly(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail"})
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
 
 	s.noteApps(machine, "gmail")
 	if _, held := s.appsClaims[machine]; !held {
@@ -408,10 +408,27 @@ func TestAnAppConnectedAfterThePushBringsTheMachineBackEarly(t *testing.T) {
 	}
 }
 
-// A guessed-at answer is not remembered as the set it was about. A push that
-// could not read somebody's connections resolves the featured apps instead, and
-// letting that stand as the mark would make the first route to see the real list
-// take it for a change and drop a live ticket over nothing.
+// THE case the empty mark used to swallow, and the one opening the catalogue is
+// for: somebody with nothing connected who connects their FIRST app.
+//
+// Their mark is the empty string, which is also what a push that could not read
+// anybody's connections falls back to -- so while those two were the same value,
+// this person's claim read as a guess and nothing ever brought it back. Every
+// read in the app they had just connected raised a card for the full hour.
+func TestTheFirstAppSomebodyEverConnectsBringsTheMachineBackEarly(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "", known: true})
+	s.noteApps(machine, "notion")
+	if _, held := s.appsClaims[machine]; held {
+		t.Error("the first app they ever connected left the machine on its old answer")
+	}
+}
+
+// A guessed-at answer is not compared against anything. A push that could not
+// read somebody's connections resolves the floor instead, and letting that stand
+// as a real mark would make the first route to see the true list take it for a
+// change and re-push over nothing.
 func TestAGuessedAnswerIsNotRememberedAsTheSet(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
@@ -419,6 +436,58 @@ func TestAGuessedAnswerIsNotRememberedAsTheSet(t *testing.T) {
 	s.noteApps(machine, "gmail,notion")
 	if _, held := s.appsClaims[machine]; !held {
 		t.Error("a guess was compared against the real list and lost the claim")
+	}
+}
+
+// A claim taken but not yet answered has no mark, and nothing may compare
+// against one. Otherwise the first screen to open during a mint would decide the
+// in-flight push was stale and release the claim it exists to hold -- which is
+// how one person's sign-in mints a session per request.
+func TestAnInFlightClaimIsNotJudgedStale(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	if !s.claimApps(machine) {
+		t.Fatal("the claim was not taken")
+	}
+	s.noteApps(machine, "gmail")
+	if !s.appsClaims[machine].pushed {
+		t.Error("an in-flight claim was released, so the next request mints again")
+	}
+}
+
+// Bringing a machine up for another push must not take its ticket with it.
+//
+// Nothing about who the machine is or which session is theirs has changed --
+// only which apps the answer covers. Dropping the route leaves the guest dialling
+// something the broker refuses, in the middle of the retry the person connected
+// an app for. Register rotates it on the next push.
+func TestAStaleAnswerDoesNotCostTheMachineItsSession(t *testing.T) {
+	machine := machineFor(testUserID)
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	if _, err := gw.Register(machine, "127.0.0.1", "127.0.0.1",
+		"https://backend.composio.dev/mcp/sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{gw: gw, appsClaims: map[string]appsClaim{}}
+	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	s.noteApps(machine, "gmail,notion")
+	gw.mu.Lock()
+	held := len(gw.routes)
+	gw.mu.Unlock()
+	if held != 1 {
+		t.Error("the ticket went with the claim, so a running agent dials a route " +
+			"the broker now refuses until something pushes")
+	}
+	// Erasing a machine is the other thing entirely, and there the route MUST go:
+	// slots are recycled, and one left behind is how one person's agent ends up
+	// acting as another.
+	s.forgetApps(machine)
+	gw.mu.Lock()
+	held = len(gw.routes)
+	gw.mu.Unlock()
+	if held != 0 {
+		t.Error("an erased machine kept its route")
 	}
 }
 
@@ -450,6 +519,11 @@ func TestTheFanOutIsBoundedByWhatOnePushMayAsk(t *testing.T) {
 	}
 	if got := appsIn(held); len(got) != appsResolveCap {
 		t.Errorf("resolving %d apps, want at most %d", len(got), appsResolveCap)
+	}
+	// What actually leaves at once is that plus the floor, which is the number
+	// worth bounding -- the fan-out is simultaneous.
+	if got := withFeatured(appsIn(held)); len(got) != appsResolveCap+len(featured) {
+		t.Errorf("%d requests go out at once, want %d", len(got), appsResolveCap+len(featured))
 	}
 }
 

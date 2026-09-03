@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -270,5 +271,52 @@ func TestAPartialCapabilityMapShortensThePushDeadline(t *testing.T) {
 	if wait := time.Until(done.until); wait > appsRetry+time.Second {
 		t.Errorf("a machine holding a partial capability map is due again in %v, "+
 			"so every action missing from it asks for the whole hour", wait)
+	}
+}
+
+// THE test for what the ceiling gives up when it is reached.
+//
+// Dropping an entry costs it its meaning, because the guest reads absence as
+// ask. Giving up a read costs a card nobody needed to see; giving up a REFUSAL
+// costs a person the answer they went into a settings screen to give -- the
+// action they switched off would ask instead, and a card is something somebody
+// can say yes to. A single pass over a map would decide which by iteration
+// order, differently on every push.
+func TestARefusalSurvivesTheCeilingAndAReadGivesWay(t *testing.T) {
+	// One app of reads big enough to fill the push on its own, and a second whose
+	// every action this person has switched off. The refusals are resolved last,
+	// so a single pass would never reach them.
+	a, _ := stubCaps(func(app string) (map[string]string, error) {
+		out := map[string]string{}
+		if app == "reads" {
+			for i := range appsActionCap * 2 {
+				out["READS_"+strconv.Itoa(i)] = composio.CapRead
+			}
+			return out, nil
+		}
+		for i := range 10 {
+			out["OFF_"+strconv.Itoa(i)] = composio.CapDelete
+		}
+		return out, nil
+	})
+	got, _ := a.resolved(context.Background(), []string{"reads", "off"},
+		map[string]map[string]string{"off": {composio.CapDelete: agentapi.ActionNever}})
+
+	if len(got) > appsActionCap {
+		t.Fatalf("pushed %d actions, over the %d the guest will accept -- and it "+
+			"refuses the whole body, taking the session with it", len(got), appsActionCap)
+	}
+	for i := range 10 {
+		if slug := "OFF_" + strconv.Itoa(i); got[slug] != agentapi.ActionNever {
+			t.Fatalf("%s is %q, so an action this person switched off asks instead "+
+				"-- and a card is something they can say yes to", slug, got[slug])
+		}
+	}
+	// The reads fill what is left rather than being dropped wholesale. WHICH of
+	// them get in is map iteration order and not worth asserting -- what matters
+	// is that the ceiling is spent rather than the pass abandoned.
+	if len(got) != appsActionCap {
+		t.Errorf("pushed %d of %d, so the reads gave way further than they had to",
+			len(got), appsActionCap)
 	}
 }

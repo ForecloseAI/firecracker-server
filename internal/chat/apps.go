@@ -70,6 +70,14 @@ func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *age
 type pushed struct {
 	until time.Time
 	apps  string
+	// known says whether apps is a reading of this person's connections at all,
+	// as opposed to the floor a failed read falls back to.
+	//
+	// A separate field and not the empty string, which is what this was and was
+	// wrong: somebody with NOTHING connected marks as "" too, so their claim read
+	// as a guess and the first app they ever connected never brought the machine
+	// back early. That is precisely the person opening the catalogue is for.
+	known bool
 }
 
 // pushApps hands this person's machine a ticket to their session, reporting how
@@ -113,14 +121,17 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		Actions: actions}); err != nil {
 		return pushed{}, err
 	}
-	return pushed{until: until, apps: mark}, nil
+	return pushed{until: until, apps: mark, known: whole}, nil
 }
 
-// appsResolveCap bounds how many apps one push asks the provider about.
+// appsResolveCap bounds how many of a person's OWN apps one push asks the
+// provider about. The floor goes on top, so the fan-out is this plus the
+// featured few -- worth saying, because the number that matters is the one that
+// leaves at once.
 //
 // Separate from appsActionCap, which bounds the BYTES a machine is handed: this
 // one bounds the fan-out that produces them. An app's actions are a round trip
-// each, they go out at once, and they all have to land inside appsMintTimeout
+// each, they go out together, and they all have to land inside appsMintTimeout
 // alongside minting the session -- so somebody who has connected two hundred
 // apps must not aim two hundred simultaneous requests at the provider every time
 // one of their machines boots.
@@ -274,9 +285,12 @@ type appsClaim struct {
 	pushed bool
 	// apps is the mark of the connected set the pushed answer was about, so a
 	// route that sees a different one knows this machine is holding an answer to
-	// a question that has changed. Empty on an in-flight or guessed-at claim,
-	// which nothing compares against.
+	// a question that has changed. Only meaningful when known is set.
 	apps string
+	// known distinguishes a claim whose mark is a real reading from one taken
+	// in flight or answered with the floor after a failed read. Nothing compares
+	// against the second kind.
+	known bool
 	// expires is when a pushed claim stops counting, which is the deadline of
 	// the answer that push handed over.
 	//
@@ -336,7 +350,8 @@ func (s *Server) doneApps(machine string, done pushed) {
 	// the internet, and re-adding it unchecked is how the table creeps past its
 	// cap one long push at a time.
 	s.evictClaimsLocked()
-	s.appsClaims[machine] = appsClaim{pushed: true, expires: done.until, apps: done.apps}
+	s.appsClaims[machine] = appsClaim{pushed: true, expires: done.until,
+		apps: done.apps, known: done.known}
 }
 
 // noteApps drops a machine's claim when the apps behind it have changed, so the
@@ -353,14 +368,19 @@ func (s *Server) doneApps(machine string, done pushed) {
 func (s *Server) noteApps(machine, mark string) {
 	s.mu.Lock()
 	held, ok := s.appsClaims[machine]
-	stale := ok && held.pushed && held.apps != "" && held.apps != mark
+	stale := ok && held.pushed && held.known && held.apps != mark
 	s.mu.Unlock()
 	if !stale {
 		return
 	}
 	log.Printf("chat: %s was answered about %q and now holds %q; pushing again",
 		machine, held.apps, mark)
-	s.forgetApps(machine)
+	// dueApps and NOT forgetApps: the ticket stays. Nothing about who this
+	// machine is or which session is theirs has changed -- only which apps the
+	// answer covers -- and dropping the route would leave the guest dialling a
+	// ticket the broker now refuses, in the middle of the very retry the person
+	// just connected an app for. Register rotates it on the next push.
+	s.dueApps(machine)
 }
 
 // evictClaimsLocked keeps the table bounded. Caller holds s.mu. Which entry goes
@@ -387,13 +407,27 @@ func (s *Server) failApps(machine string) {
 	}
 }
 
-// forgetApps drops that record, so the next request pushes again. Called when a
-// machine is created or erased, both of which leave it holding nothing -- and so
-// it clears the cooldown as well, which is the difference from failApps.
-func (s *Server) forgetApps(machine string) {
+// dueApps brings a machine up for another push, leaving what it is holding
+// alone.
+//
+// The claim and the ticket are separate things and only some callers want both
+// gone. A machine whose ANSWER has gone stale still has the right session and
+// the right owner, so its route is still correct -- and dropping it there is not
+// a smaller version of forgetApps but a worse one: the guest goes on dialling a
+// ticket the broker has started refusing until something re-pushes, which is a
+// live agent losing its app tools mid-call.
+func (s *Server) dueApps(machine string) {
 	s.mu.Lock()
 	delete(s.appsClaims, machine)
 	s.mu.Unlock()
+}
+
+// forgetApps drops that record AND the ticket, so the next request pushes again
+// and nothing can reach the old route in the meantime. Called when a machine is
+// created or erased, both of which leave it holding nothing -- and so it clears
+// the cooldown as well, which is the difference from failApps.
+func (s *Server) forgetApps(machine string) {
+	s.dueApps(machine)
 	// The ticket goes with it. A route left behind after a machine is recreated
 	// -- or after its slot is handed to somebody else's machine -- is exactly how
 	// one person's agent would end up acting as another.

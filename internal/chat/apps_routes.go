@@ -204,8 +204,13 @@ func (s *Server) savePolicy(ctx context.Context, user string, held agentapi.Apps
 	}
 	// Otherwise the machine keeps the policy it was pushed until its claim runs
 	// out, which is up to an hour -- a person would change a setting and watch it
-	// do nothing. forgetApps drops the claim so the next request re-pushes.
-	s.forgetApps(machineFor(user))
+	// do nothing. dueApps drops the claim so the next request re-pushes.
+	//
+	// The claim only, which is what this line always meant to say: the ticket is
+	// about which session belongs to this machine, and a person changing a
+	// permission has not changed that. Dropping it as well used to leave every
+	// running agent dialling a route the broker refuses until something pushed.
+	s.dueApps(machineFor(user))
 	return nil
 }
 
@@ -326,10 +331,13 @@ func (s *Server) disconnectApp(w http.ResponseWriter, r *http.Request, user stri
 	// The machine is holding an answer about an app this person no longer has.
 	// Harmless in itself -- the calls fail at the provider either way -- but the
 	// claim's mark now describes a set that is gone, and noteApps compares
-	// against the list as it was read at the top of this handler. Dropping it
-	// here is what stops the next read seeing "unchanged" and leaving a stale
-	// answer standing for the rest of the hour.
-	s.forgetApps(machineFor(user))
+	// against the list as it was read at the top of this handler. Bringing it up
+	// for a push here is what stops the next read seeing "unchanged" and leaving
+	// a stale answer standing for the rest of the hour.
+	//
+	// The ticket stays: their session is still theirs, and this route is reached
+	// from a settings screen while agents are running.
+	s.dueApps(machineFor(user))
 	w.WriteHeader(http.StatusNoContent)
 }
 
