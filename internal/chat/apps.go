@@ -35,7 +35,11 @@ const appsRetryAfter = 30 * time.Second
 // machine whose agents have no app tools this boot, which the next request
 // retries.
 func (s *Server) ensureApps(ctx context.Context, user string, view vmView, cl *agent.Client) {
-	if s.composio == nil || s.apps == nil || s.gw == nil || !s.claimApps(view.ID) {
+	if s.composio == nil || s.apps == nil || s.gw == nil {
+		return
+	}
+	gen, ok := s.claimApps(view.ID)
+	if !ok {
 		return
 	}
 	// Detached, and the context carried for its VALUES rather than its
@@ -44,20 +48,20 @@ func (s *Server) ensureApps(ctx context.Context, user string, view vmView, cl *a
 	// synchronously it is the provider deciding how long the app looks hung. The
 	// losers of the claim above already return with no session and nothing breaks,
 	// which is what makes waiting for the winner buy nothing.
-	go s.mintApps(context.WithoutCancel(ctx), user, view, cl)
+	go s.mintApps(context.WithoutCancel(ctx), user, view, cl, gen)
 }
 
 // mintApps hands the machine its session, releasing the claim if it cannot.
-func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *agent.Client) {
+func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *agent.Client, gen uint64) {
 	ctx, cancel := context.WithTimeout(ctx, appsMintTimeout)
 	defer cancel()
 	done, err := s.pushApps(ctx, user, view, cl)
 	if err != nil {
 		log.Printf("chat: connected apps unavailable for %s: %v", view.ID, err)
-		s.failApps(view.ID)
+		s.failApps(view.ID, gen)
 		return
 	}
-	s.doneApps(view.ID, done)
+	s.doneApps(view.ID, gen, done)
 }
 
 // pushed is what a push that landed leaves behind: when the answer it handed
@@ -291,9 +295,23 @@ type appsClaim struct {
 	// in flight or answered with the floor after a failed read. Nothing compares
 	// against the second kind.
 	known bool
+	// gen names the push this claim belongs to, so an answer can be matched to
+	// the question it was asked.
+	//
+	// A push crosses the internet and the guest push honours no context at all,
+	// so one can land after anything: after the claim was dropped because a
+	// person changed a setting it read the old value of, after it was evicted,
+	// or after a second push took over. All three are the same mistake -- an
+	// answer to a question that is no longer being asked -- and a claim that
+	// merely EXISTS cannot tell them apart, because deleting one and taking a
+	// fresh one leave the table looking identical.
+	gen uint64
 	// seen is the latest connected set any route has observed since this claim
 	// was taken, and sawSeen says whether one has been observed at all -- the
 	// empty string is a real answer here, for somebody who holds nothing.
+	//
+	// This is the narrower half of gen above: it catches a reading that changed
+	// while the claim STOOD, where gen catches a claim that stopped standing.
 	//
 	// It exists for the window where a push is IN FLIGHT. A route that reads
 	// somebody's connections then has nothing to compare against yet, and
@@ -331,19 +349,21 @@ const appsClaimCap = 256
 // on success, failApps with a cooldown on failure -- so a goroutine that dies
 // without doing either frees the machine after appsMintTimeout rather than
 // stranding it, which is the same bound the push itself runs under.
-func (s *Server) claimApps(machine string) bool {
+func (s *Server) claimApps(machine string) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	held := s.appsClaims[machine]
 	if held.pushed && time.Now().Before(held.expires) {
-		return false
+		return 0, false
 	}
 	if !held.pushed && time.Since(held.failed) < appsRetryAfter {
-		return false
+		return 0, false
 	}
 	s.evictClaimsLocked()
-	s.appsClaims[machine] = appsClaim{pushed: true, expires: time.Now().Add(appsMintTimeout)}
-	return true
+	s.appsGen++
+	s.appsClaims[machine] = appsClaim{
+		pushed: true, expires: time.Now().Add(appsMintTimeout), gen: s.appsGen}
+	return s.appsGen, true
 }
 
 // doneApps records a push that landed, due again when its set goes stale.
@@ -352,9 +372,24 @@ func (s *Server) claimApps(machine string) bool {
 // ticket and drops the old. That rotation is why this is not on a timer: it
 // happens on the next request to reach the machine, so a machine nobody is using
 // is not re-ticketed on a schedule for a set nobody is reading.
-func (s *Server) doneApps(machine string, done pushed) {
+func (s *Server) doneApps(machine string, gen uint64, done pushed) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	held, ok := s.appsClaims[machine]
+	if !ok || held.gen != gen {
+		// The claim this push was answering is gone or superseded, so what it
+		// carries is an answer to a question nobody is asking any more: the
+		// policy it read has since been changed, or the entry was evicted, or a
+		// second push has taken over. Recording it would bury the newer state
+		// under it -- and for a policy change nothing would ever notice, because
+		// what a person allows an app to do is not part of the mark the reads
+		// below compare. Left unclaimed instead, so the next request pushes.
+		//
+		// The machine is not stranded: this push completed, so it holds a live
+		// ticket and a working answer. What it does not hold is the newest one.
+		log.Printf("chat: %s was answered for a push nobody is waiting on; pushing again", machine)
+		return
+	}
 	// An answer to a question that has already changed is not recorded as the
 	// current one. Somebody can finish connecting an app while this push is
 	// crossing the internet: a route then reads their connections, finds a claim
@@ -365,19 +400,14 @@ func (s *Server) doneApps(machine string, done pushed) {
 	// Only against a real reading of our own. A push that fell back to the floor
 	// already comes due on the short clock, and re-pushing it at once would aim a
 	// retry at a provider that has just failed.
-	if held, ok := s.appsClaims[machine]; ok && done.known && held.sawSeen && held.seen != done.apps {
+	if done.known && held.sawSeen && held.seen != done.apps {
 		log.Printf("chat: %s was answered about %q while %q was already read; pushing again",
 			machine, done.apps, held.seen)
 		delete(s.appsClaims, machine)
 		return
 	}
-	// Usually an overwrite of this machine's own in-flight claim, but not always:
-	// another machine's claim may have evicted it while this push was crossing
-	// the internet, and re-adding it unchecked is how the table creeps past its
-	// cap one long push at a time.
-	s.evictClaimsLocked()
 	s.appsClaims[machine] = appsClaim{pushed: true, expires: done.until,
-		apps: done.apps, known: done.known}
+		apps: done.apps, known: done.known, gen: gen}
 }
 
 // noteApps drops a machine's claim when the apps behind it have changed, so the
@@ -435,11 +465,18 @@ func (s *Server) evictClaimsLocked() {
 // failApps releases the claim behind a cooldown, so an outage costs one attempt
 // per machine rather than one per request. The route goes too: a half-registered
 // ticket is one the guest was never told about.
-func (s *Server) failApps(machine string) {
+func (s *Server) failApps(machine string, gen uint64) {
 	s.mu.Lock()
-	s.appsClaims[machine] = appsClaim{failed: time.Now()}
+	held, ok := s.appsClaims[machine]
+	mine := ok && held.gen == gen
+	if mine {
+		s.appsClaims[machine] = appsClaim{failed: time.Now(), gen: gen}
+	}
 	s.mu.Unlock()
-	if s.gw != nil {
+	// Both halves only for this push's own claim. A slow failure landing after
+	// somebody else took over would otherwise put a live machine on a cooldown
+	// and drop the ticket the newer push had just registered for it.
+	if mine && s.gw != nil {
 		s.gw.Forget(machine)
 	}
 }

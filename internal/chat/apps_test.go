@@ -55,32 +55,43 @@ func TestOnlyComposioCanReceiveTheProjectKey(t *testing.T) {
 // sessions for one person, on the highest-traffic path there is.
 func TestOnlyOneCallerMintsPerMachine(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	var claimed atomic.Int64
+	var won atomic.Int64
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if s.claimApps("m1") {
-				claimed.Add(1)
+			if _, ok := s.claimApps("m1"); ok {
+				won.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
-	if got := claimed.Load(); got != 1 {
+	if got := won.Load(); got != 1 {
 		t.Errorf("%d callers each minted a session", got)
 	}
+}
+
+// claimed takes a machine's claim the way ensureApps does and hands back the
+// generation the push that follows has to answer for. A push and its claim are a
+// pair now: an answer that cannot name the question it was asked is one doneApps
+// declines to record.
+func claimed(t *testing.T, s *Server, machine string) uint64 {
+	t.Helper()
+	gen, ok := s.claimApps(machine)
+	if !ok {
+		t.Fatalf("the claim on %s was not taken", machine)
+	}
+	return gen
 }
 
 // A failed push releases the claim, so the next request tries again rather than
 // leaving the machine without app tools for the life of the process.
 func TestAFailedPushIsRetried(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	claimed(t, s, "m1")
 	s.forgetApps("m1")
-	if !s.claimApps("m1") {
+	if _, ok := s.claimApps("m1"); !ok {
 		t.Error("a released claim was not available again")
 	}
 }
@@ -90,17 +101,14 @@ func TestAFailedPushIsRetried(t *testing.T) {
 // request, and the app opens by fetching every agent's thread at once.
 func TestAFailedPushWaitsBeforeTryingAgain(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
-	s.failApps("m1")
-	if s.claimApps("m1") {
+	s.failApps("m1", claimed(t, s, "m1"))
+	if _, ok := s.claimApps("m1"); ok {
 		t.Error("a failure was retried immediately")
 	}
 	// A machine that is created or erased holds nothing at all, so it is not made
 	// to sit out a cooldown earned by the machine that used to have that id.
 	s.forgetApps("m1")
-	if !s.claimApps("m1") {
+	if _, ok := s.claimApps("m1"); !ok {
 		t.Error("a recreated machine was kept waiting")
 	}
 }
@@ -258,20 +266,20 @@ func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 // to reach machines that already hold a copy, not just the host cache.
 func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	gen := claimed(t, s, "m1")
 
 	// A set that is still good keeps the machine out: re-pushing rotates its
 	// ticket, so doing it per request would 404 anything in flight for nothing.
-	s.doneApps("m1", pushed{until: time.Now().Add(appCapsTTL)})
-	if s.claimApps("m1") {
+	s.doneApps("m1", gen, pushed{until: time.Now().Add(appCapsTTL)})
+	if _, ok := s.claimApps("m1"); ok {
 		t.Error("a machine holding a fresh set was pushed again anyway")
 	}
 
-	// Once the set it was handed is stale, it is due another push.
-	s.doneApps("m1", pushed{until: time.Now().Add(-time.Second)})
-	if !s.claimApps("m1") {
+	// Once the set it was handed is stale, it is due another push. Recorded
+	// against the same claim: the machine is still holding what that push gave
+	// it, and it is the DEADLINE on that answer being past which brings it back.
+	s.doneApps("m1", gen, pushed{until: time.Now().Add(-time.Second)})
+	if _, ok := s.claimApps("m1"); !ok {
 		t.Error("a machine holding a stale set was never pushed again, so a tool " +
 			"the provider stopped calling read-only stays read-only there until restart")
 	}
@@ -282,10 +290,8 @@ func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 // dozen requests that arrive at first sign-in all pass and mint a dozen sessions.
 func TestAnInFlightPushStillBlocksTheNextCaller(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
-	if s.claimApps("m1") {
+	claimed(t, s, "m1")
+	if _, ok := s.claimApps("m1"); ok {
 		t.Error("a push still in flight did not hold the claim")
 	}
 	// It is not held forever either: a goroutine that dies without reporting
@@ -348,10 +354,8 @@ func connectedTo(t *testing.T, apps ...string) *composio.Client {
 // real mintApps and reads back what it recorded.
 func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
 	s, cl, _ := pushingServer(t)
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
-	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl)
+	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl,
+		claimed(t, s, "m1"))
 
 	s.mu.Lock()
 	held := s.appsClaims["m1"]
@@ -370,11 +374,8 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 	s, _, _ := pushingServer(t)
 	// No guest to answer, so SetApps fails after the ticket is minted.
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
 	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"},
-		agent.New("127.0.0.1", 1))
+		agent.New("127.0.0.1", 1), claimed(t, s, "m1"))
 
 	s.mu.Lock()
 	held := s.appsClaims["m1"]
@@ -383,7 +384,7 @@ func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 		t.Error("a push that failed was recorded as done, so the machine waits an " +
 			"hour before anything tries again")
 	}
-	if s.claimApps("m1") {
+	if _, ok := s.claimApps("m1"); ok {
 		t.Error("a failure was retried immediately rather than on the cooldown")
 	}
 }
@@ -396,7 +397,8 @@ func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 func TestAnAppConnectedAfterThePushBringsTheMachineBackEarly(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+	s.doneApps(machine, claimed(t, s, machine),
+		pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
 
 	s.noteApps(machine, "gmail")
 	if _, held := s.appsClaims[machine]; !held {
@@ -418,7 +420,8 @@ func TestAnAppConnectedAfterThePushBringsTheMachineBackEarly(t *testing.T) {
 func TestTheFirstAppSomebodyEverConnectsBringsTheMachineBackEarly(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "", known: true})
+	s.doneApps(machine, claimed(t, s, machine),
+		pushed{until: time.Now().Add(appCapsTTL), apps: "", known: true})
 	s.noteApps(machine, "notion")
 	if _, held := s.appsClaims[machine]; held {
 		t.Error("the first app they ever connected left the machine on its old answer")
@@ -432,7 +435,7 @@ func TestTheFirstAppSomebodyEverConnectsBringsTheMachineBackEarly(t *testing.T) 
 func TestAGuessedAnswerIsNotRememberedAsTheSet(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL)})
+	s.doneApps(machine, claimed(t, s, machine), pushed{until: time.Now().Add(appCapsTTL)})
 	s.noteApps(machine, "gmail,notion")
 	if _, held := s.appsClaims[machine]; !held {
 		t.Error("a guess was compared against the real list and lost the claim")
@@ -446,9 +449,7 @@ func TestAGuessedAnswerIsNotRememberedAsTheSet(t *testing.T) {
 func TestAnInFlightClaimIsNotJudgedStale(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps(machine) {
-		t.Fatal("the claim was not taken")
-	}
+	claimed(t, s, machine)
 	s.noteApps(machine, "gmail")
 	if !s.appsClaims[machine].pushed {
 		t.Error("an in-flight claim was released, so the next request mints again")
@@ -469,7 +470,8 @@ func TestAStaleAnswerDoesNotCostTheMachineItsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{gw: gw, appsClaims: map[string]appsClaim{}}
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+	s.doneApps(machine, claimed(t, s, machine),
+		pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
 
 	s.noteApps(machine, "gmail,notion")
 	gw.mu.Lock()
@@ -584,13 +586,11 @@ func TestTheFeaturedAppsAreResolvedWhetherOrNotTheyAreConnected(t *testing.T) {
 func TestAConnectionMadeDuringAPushIsNotBuriedByIt(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps(machine) {
-		t.Fatal("the claim was not taken")
-	}
+	gen := claimed(t, s, machine)
 	// The push is in flight and read only gmail. They finish connecting notion,
 	// and the Apps screen refreshing is what sees it.
 	s.noteApps(machine, "gmail,notion")
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+	s.doneApps(machine, gen, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
 
 	if _, held := s.appsClaims[machine]; held {
 		t.Error("the older answer was latched over a newer reading, so the app " +
@@ -607,9 +607,9 @@ func TestAConnectionMadeDuringAPushIsNotBuriedByIt(t *testing.T) {
 func TestAReadingThatAgreesWithThePushStillLatches(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.claimApps(machine)
+	gen := claimed(t, s, machine)
 	s.noteApps(machine, "gmail")
-	s.doneApps(machine, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+	s.doneApps(machine, gen, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
 
 	held, ok := s.appsClaims[machine]
 	if !ok || !held.pushed {
@@ -626,11 +626,78 @@ func TestAReadingThatAgreesWithThePushStillLatches(t *testing.T) {
 func TestAGuessedPushIsLeftOnItsCooldownRatherThanRetriedAtOnce(t *testing.T) {
 	machine := machineFor(testUserID)
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	s.claimApps(machine)
+	gen := claimed(t, s, machine)
 	s.noteApps(machine, "gmail,notion")
-	s.doneApps(machine, pushed{until: time.Now().Add(appsRetry)})
+	s.doneApps(machine, gen, pushed{until: time.Now().Add(appsRetry)})
 
 	if _, held := s.appsClaims[machine]; !held {
 		t.Error("a failed read was retried at once instead of waiting out its clock")
+	}
+}
+
+// THE gap the connected-set guard did not cover, and the reason a push carries
+// the generation of the claim it answers.
+//
+// Change a permission while a push is crossing the internet and dueApps deletes
+// the in-flight claim -- correctly, since that push read the old value. The push
+// then lands to find no claim at all, so the reading guard has nothing to compare
+// and it latches the OLD policy for the rest of the hour. Nothing notices
+// afterwards either: what a person allows an app to do is not part of the mark
+// the connection reads compare, so this one cannot heal the way a connection
+// change does. They toggle a switch and watch it do nothing.
+func TestAPermissionChangedDuringAPushIsNotLatchedOver(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	gen := claimed(t, s, machine)
+
+	// The settings screen, while that push is still in flight.
+	s.dueApps(machine)
+	s.doneApps(machine, gen, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	if _, held := s.appsClaims[machine]; held {
+		t.Error("the push that read the old permission was recorded as current, so " +
+			"the switch they just changed does nothing for the rest of the hour")
+	}
+}
+
+// A push that outlives its own claim must not disturb the one that replaced it.
+//
+// The guest push honours no context, so a slow push can land after its claim has
+// expired and a second has taken over. Recording it would overwrite the newer
+// answer; failing it would put a live machine on a cooldown and drop the ticket
+// the newer push had just registered.
+func TestAPushThatOutlivedItsClaimDoesNotDisturbTheNextOne(t *testing.T) {
+	machine := machineFor(testUserID)
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	if _, err := gw.Register(machine, "127.0.0.1", "127.0.0.1",
+		"https://backend.composio.dev/mcp/sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{gw: gw, appsClaims: map[string]appsClaim{}}
+
+	slow := claimed(t, s, machine)
+	// Its claim runs out and a second push takes over and lands.
+	s.mu.Lock()
+	held := s.appsClaims[machine]
+	held.expires = time.Now().Add(-time.Second)
+	s.appsClaims[machine] = held
+	s.mu.Unlock()
+	fresh := claimed(t, s, machine)
+	s.doneApps(machine, fresh, pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	// Only now does the slow one finish, both ways it can.
+	s.doneApps(machine, slow, pushed{until: time.Now().Add(appCapsTTL), apps: "stale", known: true})
+	if got := s.appsClaims[machine]; got.apps != "gmail" || got.gen != fresh {
+		t.Errorf("claim is %+v, so a late push overwrote the answer that replaced it", got)
+	}
+	s.failApps(machine, slow)
+	if got := s.appsClaims[machine]; !got.pushed || got.gen != fresh {
+		t.Errorf("claim is %+v, so a late failure put a live machine on a cooldown", got)
+	}
+	gw.mu.Lock()
+	routes := len(gw.routes)
+	gw.mu.Unlock()
+	if routes != 1 {
+		t.Error("a late failure dropped the ticket the newer push had just registered")
 	}
 }

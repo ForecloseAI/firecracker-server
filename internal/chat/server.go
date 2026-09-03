@@ -42,6 +42,10 @@ type Server struct {
 	// call sites, and a delete forgotten in one of them is a machine that never
 	// gets its apps back.
 	appsClaims map[string]appsClaim
+	// appsGen names each push, so an answer that lands late can be told from the
+	// question that is being asked now. Monotonic and fleet-wide: it only ever
+	// has to be unique, and a counter that never repeats is the cheapest way.
+	appsGen uint64
 	// connects is when each person last minted connect links, which is what
 	// bounds the one route here that can leave permanent state at the provider.
 	connects map[string][]time.Time

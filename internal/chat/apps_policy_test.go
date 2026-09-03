@@ -257,7 +257,7 @@ func TestSettingAPolicyMakesTheMachineDueAnotherPush(t *testing.T) {
 
 	call(t, s, tok, "PUT", "/v1/apps/gmail/policy", `{"capability":"write","policy":"never"}`)
 
-	if !s.claimApps(machine) {
+	if _, ok := s.claimApps(machine); !ok {
 		t.Error("the machine is still holding a claim, so it keeps the old policy for an hour")
 	}
 }

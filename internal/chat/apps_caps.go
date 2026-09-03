@@ -131,8 +131,15 @@ func (a *appCaps) fill(out map[string]string, apps []string,
 				// Said out loud, because nobody can see the reason from the
 				// outside: what is left over asks, which reads as a gate having a
 				// bad day rather than a ceiling being reached.
+				//
+				// Which pass ran out matters, and naming only the app it stopped
+				// at would understate the first one: the refusals are emitted
+				// before any read, so a ceiling reached during THAT pass means
+				// every app's reads are gone, not just this app's and the ones
+				// after it.
 				log.Printf("chat: %d actions is the most one machine is pushed; "+
-					"%s and anything after it will ask", appsActionCap, app)
+					"the %s pass stopped at %s and nothing after it was sent",
+					appsActionCap, want, app)
 				return true
 			}
 			out[slug] = want
