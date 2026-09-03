@@ -172,7 +172,7 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 	// Bounded well ABOVE what any caller's own row guard allows, so that guard is
 	// the one that fires. At ~2.3 KB per unfiltered tool row, a 1 MiB ceiling died
-	// at roughly 450 rows -- under Capabilities' readOnlyPage of 500, so the
+	// at roughly 450 rows -- under Capabilities' toolPage of 500, so the
 	// toolkit that outgrew the call would fail as "unexpected EOF" having decoded
 	// NOTHING, rather than as the named "this needs paging" error written for
 	// exactly that case. Silent, total, and never cached, so it re-fans-out on the
@@ -312,54 +312,19 @@ func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
 // nothing downstream parses a tool name.
 const readOnlyTag = "readOnlyHint"
 
-// readOnlyPage is asked for in one page. Outlook is the largest of the featured
-// six at 117 read-only tools, so this is four times the biggest real answer --
-// deliberately, because ReadOnly refuses a full page rather than paging.
-const readOnlyPage = 500
+// toolPage is asked for in one page. Outlook is the largest of the featured six
+// at 305 tools, so this is well over the biggest real answer -- deliberately,
+// because Capabilities refuses a full page rather than paging.
+const toolPage = 500
 
-// toolsResp is one page of GET /tools. Tags come back so the filter can be
-// checked rather than trusted -- see ReadOnly.
+// toolsResp is one page of GET /tools. Tags are what every row is classified
+// from, and the only other field kept -- which is what makes an unfiltered page
+// cheap to hold however large the body was.
 type toolsResp struct {
 	Items []struct {
 		Slug string   `json:"slug"`
 		Tags []string `json:"tags"`
 	} `json:"items"`
-}
-
-// ReadOnly is every tool in one app that the provider annotates as only reading.
-//
-// The tag is asked for as a filter AND checked on every row that comes back,
-// which is not belt-and-braces so much as the whole safety of this call. This
-// API ignores a query parameter it does not recognise rather than rejecting it
-// -- user_id vs user_ids, toolkit vs toolkit_slug, both already met here -- so a
-// renamed filter would answer with every tool in the toolkit, writes included,
-// and a caller trusting the answer would let all of them run unasked. Checking
-// the rows turns that from a catastrophe into a no-op. The test pins the query
-// string as well, so the filter going stale is loud rather than silent.
-func (c *Client) ReadOnly(ctx context.Context, slug string) ([]string, error) {
-	var out toolsResp
-	q := "/tools?" + url.Values{
-		"toolkit_slug": {slug}, "tags": {readOnlyTag}, "limit": {strconv.Itoa(readOnlyPage)},
-	}.Encode()
-	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
-		return nil, err
-	}
-	if len(out.Items) >= readOnlyPage {
-		// Refused rather than paged. A full page means there may be more, and a
-		// silently truncated set is one whose missing tools look like writes --
-		// the caller would cache it for an hour and ask about ordinary reads. The
-		// featured six top out at 117, so this firing means the catalogue grew
-		// past what this call was designed for and wants paging, not a bigger
-		// number.
-		return nil, fmt.Errorf("composio: %s has %d or more read-only tools; this needs paging", slug, readOnlyPage)
-	}
-	got := make([]string, 0, len(out.Items))
-	for _, it := range out.Items {
-		if slices.Contains(it.Tags, readOnlyTag) {
-			got = append(got, it.Slug)
-		}
-	}
-	return got, nil
 }
 
 // The capabilities an action can belong to, most consequential first. These are
@@ -373,22 +338,24 @@ const (
 
 // Capabilities is every action one app exposes, and what kind of thing it is.
 //
-// Unfiltered, unlike ReadOnly, and that is the safer shape rather than the lazier
-// one. ReadOnly must ask for tags=readOnlyHint and then re-check every row it
-// gets back, because this API answers a parameter it does not recognise with
-// EVERYTHING -- a caller trusting a dropped filter would call all 910 tools
-// read-only. Reading each row's own tags removes that trap instead of defending
-// against it, and costs one request per app rather than one per tag.
+// UNFILTERED on purpose, and that is the safer shape rather than the lazier one.
+// This API answers a parameter it does not recognise with EVERYTHING -- user_id
+// vs user_ids and toolkit vs toolkit_slug have both already been met here -- so
+// asking for tags=readOnlyHint and trusting the answer would call all 910 tools
+// read-only the day that filter is renamed. Reading each row's own tags removes
+// the trap instead of defending against it, and costs one request per app rather
+// than one per tag. The predecessor that did filter had to re-check every row it
+// got back for exactly this reason.
 func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
 	var out toolsResp
 	q := "/tools?" + url.Values{
-		"toolkit_slug": {slug}, "limit": {strconv.Itoa(readOnlyPage)},
+		"toolkit_slug": {slug}, "limit": {strconv.Itoa(toolPage)},
 	}.Encode()
 	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
 		return nil, err
 	}
-	if len(out.Items) >= readOnlyPage {
-		return nil, fmt.Errorf("composio: %s has %d or more tools; this needs paging", slug, readOnlyPage)
+	if len(out.Items) >= toolPage {
+		return nil, fmt.Errorf("composio: %s has %d or more tools; this needs paging", slug, toolPage)
 	}
 	held := make(map[string]string, len(out.Items))
 	for _, it := range out.Items {

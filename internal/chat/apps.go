@@ -78,23 +78,8 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 	// claim is latched pushed, so nothing tries again and the machine has no
 	// connected apps until the host restarts. Ordering does not close that
 	// window, which is the claim's to close; it declines to widen it by a
-	// provider round trip, which is this PR's to not open.
-	reads, until := s.reads.slugs(ctx)
-	// Beside the read-only set and for the same reason: everything between
-	// Register and SetApps widens the window that commit narrowed, and this is a
-	// second provider round trip on a cold cache. Pushed BESIDE rather than
-	// instead of it -- nothing obeys Actions yet, so this can ship before the
-	// image that reads it.
-	actions, capsUntil := s.kinds.resolved(ctx, held.Policy)
-	// The EARLIER of the two clocks. Each cache decides on its own whether its
-	// answer was whole, so a partial capability map on the five-minute clock can
-	// arrive beside a complete read-only set on the hour. Taking the set's would
-	// leave a machine holding an Actions map whose gaps all ask, for an hour,
-	// with nothing bringing it back early -- invisible today, and exactly when
-	// the provider is having a bad minute once the guest obeys it.
-	if capsUntil.Before(until) {
-		until = capsUntil
-	}
+	// provider round trip.
+	actions, until := s.kinds.resolved(ctx, held.Policy)
 	// The guest is handed a ticket to the broker, never the session itself. The
 	// provider's endpoint needs the PROJECT api key, which is authority over
 	// every user's connected accounts, so it stays on this side of the tap.
@@ -104,7 +89,7 @@ func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *age
 		return time.Time{}, err
 	}
 	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		ReadOnly: reads, Actions: actions}); err != nil {
+		Actions: actions}); err != nil {
 		return time.Time{}, err
 	}
 	return until, nil

@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
-	"slices"
 	"testing"
 
 	"cracked/internal/agentapi"
@@ -125,8 +125,8 @@ func TestARemintedTicketForTheSameSessionIsNotASurfaceChange(t *testing.T) {
 		// the host restarted with a fresher set -- the re-ticketing storm with a
 		// new cause. Nothing an agent composed at startup depends on it.
 		{"only the read-only set moved",
-			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}},
-			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_LIST_LABELS"}}, false},
+			agentapi.Apps{SessionURL: a, SessionID: "s1", Actions: map[string]string{"GMAIL_FETCH_EMAILS": agentapi.ActionAuto}},
+			agentapi.Apps{SessionURL: a, SessionID: "s1", Actions: map[string]string{"GMAIL_LIST_LABELS": agentapi.ActionAuto}}, false},
 	}
 	for _, c := range cases {
 		if got := surfaceChanged(c.had, c.now); got != c.want {
@@ -150,14 +150,15 @@ func TestARemintedTicketStillRepointsTheServer(t *testing.T) {
 
 // The read-only set has to survive the disk, because it is what the gate reads
 // and a machine that restarts must not come back asking about every read.
-func TestTheReadOnlySetSurvivesARestart(t *testing.T) {
+func TestTheResolvedActionsSurviveARestart(t *testing.T) {
 	dir := t.TempDir()
 	want := agentapi.Apps{SessionURL: "http://172.16.0.1:8092/apps/aaaa", SessionID: "s1",
-		ReadOnly: []string{"GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS"}}
+		Actions: map[string]string{"GMAIL_FETCH_EMAILS": agentapi.ActionAuto,
+			"SLACK_FIND_CHANNELS": agentapi.ActionAuto}}
 	if err := WriteApps(dir, want); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadApps(dir); !slices.Equal(got.ReadOnly, want.ReadOnly) {
+	if got := ReadApps(dir); !maps.Equal(got.Actions, want.Actions) {
 		t.Errorf("read back %+v", got)
 	}
 }
@@ -167,22 +168,28 @@ func TestTheReadOnlySetSurvivesARestart(t *testing.T) {
 // every push 400 -- and handlePutApps answers before WriteApps, so it took the
 // SESSION down with it rather than just the set. A machine ended up with no
 // connected apps at all, on the healthy path, self-repeating on the cooldown.
-func TestARealSizedReadOnlySetFitsThePush(t *testing.T) {
+func TestARealSizedAnswerFitsThePush(t *testing.T) {
 	s, _ := newTestServer(t)
 	// Built from the longest real slug in the catalogue so the fixture cannot
 	// flatter itself, and floor-checked below so it cannot shrink under the cap
 	// it exists to test.
-	set := make([]string, 400)
-	for i := range set {
-		set[i] = fmt.Sprintf("MICROSOFT_TEAMS_LIST_COMMUNICATIONS_CALLS_OPERATIONS_%03d", i)
+	//
+	// Sized to the RESOLVED answer, which is every action the six apps expose --
+	// 910 of them, not the ~400 the read-only set carried. Growing the payload is
+	// what this whole PR does, so the fixture grows with it or it stops guarding
+	// the thing it was written for.
+	set := make(map[string]string, 910)
+	for i := range 910 {
+		set[fmt.Sprintf("MICROSOFT_TEAMS_LIST_COMMUNICATIONS_CALLS_OPERATIONS_%03d", i)] =
+			agentapi.ActionAsk
 	}
-	body, err := json.Marshal(agentapi.Apps{SessionID: "sess_abc", ReadOnly: set,
+	body, err := json.Marshal(agentapi.Apps{SessionID: "sess_abc", Actions: set,
 		SessionURL: "http://172.16.0.1:8092/apps/0123456789abcdef0123456789abcdef"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(body) < 8<<10 {
-		t.Fatalf("fixture is %d bytes, too small to have caught the old cap", len(body))
+	if len(body) < 32<<10 {
+		t.Fatalf("fixture is %d bytes, too small to stand in for a real answer", len(body))
 	}
 	if rec := do(t, s, http.MethodPut, "/apps", string(body)); rec.Code != http.StatusNoContent {
 		t.Fatalf("a real-sized push answered %d: %s", rec.Code, rec.Body)
@@ -191,50 +198,51 @@ func TestARealSizedReadOnlySetFitsThePush(t *testing.T) {
 	if err := json.Unmarshal(do(t, s, http.MethodGet, "/apps", "").Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(got.ReadOnly, set) || got.SessionID != "sess_abc" {
-		t.Errorf("read back %d slugs, session %q", len(got.ReadOnly), got.SessionID)
+	if !maps.Equal(got.Actions, set) || got.SessionID != "sess_abc" {
+		t.Errorf("read back %d actions, session %q", len(got.Actions), got.SessionID)
 	}
 }
 
 // A push installs the set into the RUNNING server, not merely onto the disk.
 // Landing it on disk alone is the shape this PR exists to fix: the file was
 // right and the process asked about every read regardless.
-func TestAPushInstallsTheReadOnlySet(t *testing.T) {
+func TestAPushInstallsTheResolvedActions(t *testing.T) {
 	s, _ := newTestServer(t)
 	if rec := do(t, s, http.MethodPut, "/apps",
 		`{"session_url":"https://backend.composio.dev/mcp/s","session_id":"s1",
-		  "read_only":["GMAIL_FETCH_EMAILS"]}`); rec.Code != http.StatusNoContent {
+		  "actions":{"GMAIL_FETCH_EMAILS":"auto"}}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("put status %d: %s", rec.Code, rec.Body)
 	}
-	if !s.sup.Apps().reading("GMAIL_FETCH_EMAILS") {
-		t.Error("the set reached the disk and not the server")
+	if s.sup.Apps().needs("GMAIL_FETCH_EMAILS") != agentapi.ActionAuto {
+		t.Error("the answer reached the disk and not the server")
 	}
-	if s.sup.Apps().reading("GMAIL_SEND_EMAIL") {
-		t.Error("an action nobody pushed reads as safe")
+	if got := s.sup.Apps().needs("GMAIL_SEND_EMAIL"); got != agentapi.ActionAsk {
+		t.Errorf("an action nobody pushed needs %q, not asking", got)
 	}
 }
 
-// THE trap, and SetReadOnly's whole reason for being separate: a fresher set on
-// an unchanged session is the ordinary push, and SetURL returns early on it.
+// THE trap: a fresher answer on an unchanged session is the ordinary push -- and
+// now also how a person's setting takes effect -- so anything that gated it on
+// the URL having moved would drop exactly the update this exists to deliver.
 func TestASetMovesEvenWhenTheSessionDoesNot(t *testing.T) {
 	s, _ := newTestServer(t)
 	const same = `"session_url":"https://backend.composio.dev/mcp/s","session_id":"s1"`
-	do(t, s, http.MethodPut, "/apps", `{`+same+`,"read_only":["GMAIL_FETCH_EMAILS"]}`)
-	do(t, s, http.MethodPut, "/apps", `{`+same+`,"read_only":["SLACK_FIND_CHANNELS"]}`)
-	if !s.sup.Apps().reading("SLACK_FIND_CHANNELS") {
-		t.Error("a fresher set on an unchanged session was dropped")
+	do(t, s, http.MethodPut, "/apps", `{`+same+`,"actions":{"GMAIL_FETCH_EMAILS":"auto"}}`)
+	do(t, s, http.MethodPut, "/apps", `{`+same+`,"actions":{"SLACK_FIND_CHANNELS":"auto"}}`)
+	if s.sup.Apps().needs("SLACK_FIND_CHANNELS") != agentapi.ActionAuto {
+		t.Error("a fresher answer on an unchanged session was dropped")
 	}
-	if s.sup.Apps().reading("GMAIL_FETCH_EMAILS") {
+	if s.sup.Apps().needs("GMAIL_FETCH_EMAILS") == agentapi.ActionAuto {
 		t.Error("the replaced set is still in force")
 	}
 }
 
-// A machine that restarts must come back knowing what only reads, or it asks
-// about every read until its next push.
-func TestARestartComesBackWithItsSet(t *testing.T) {
+// A machine that restarts must come back knowing what it may do without asking,
+// or it asks about every read until its next push.
+func TestARestartComesBackWithItsAnswer(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteApps(dir, agentapi.Apps{SessionURL: "http://172.16.0.1:8092/apps/a",
-		SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}}); err != nil {
+		SessionID: "s1", Actions: map[string]string{"GMAIL_FETCH_EMAILS": agentapi.ActionAuto}}); err != nil {
 		t.Fatal(err)
 	}
 	// Through NewSupervisor, not newAppsServer: the bug this guards is the boot
@@ -245,8 +253,8 @@ func TestARestartComesBackWithItsSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sup.Apps().reading("GMAIL_FETCH_EMAILS") {
-		t.Error("a restarted machine forgot what only reads")
+	if sup.Apps().needs("GMAIL_FETCH_EMAILS") != agentapi.ActionAuto {
+		t.Error("a restarted machine forgot what it may do without asking")
 	}
 	if sup.Apps().Current() != "http://172.16.0.1:8092/apps/a" {
 		t.Errorf("it also forgot its session: %q", sup.Apps().Current())

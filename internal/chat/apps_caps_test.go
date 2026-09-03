@@ -125,11 +125,19 @@ func TestAnAppThatDidNotAnswerContributesNoCapabilities(t *testing.T) {
 
 	down = false
 	calls.Store(0)
-	if got, _ = a.resolved(context.Background(), nil); calls.Load() == 0 {
+	got, until = a.resolved(context.Background(), nil)
+	if calls.Load() == 0 {
 		t.Fatal("a partial map was cached, so slack keeps asking for an hour")
 	}
 	if got["slack_GET"] != agentapi.ActionAuto {
 		t.Error("the retry did not pick up the app that had recovered")
+	}
+	// The other half of the same clock: a WHOLE answer is kept for the hour. Only
+	// pinning the short one would pass with both clocks set to five minutes, which
+	// re-fans-out across six apps twelve times an hour forever.
+	if d := time.Until(until); d < appCapsTTL-time.Second {
+		t.Errorf("a complete answer is good for only %v, so every machine "+
+			"re-fetches far more often than the provider ships", d)
 	}
 }
 

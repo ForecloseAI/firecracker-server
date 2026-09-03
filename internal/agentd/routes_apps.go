@@ -70,7 +70,7 @@ func (s *Server) handlePutApps(w http.ResponseWriter, r *http.Request) {
 func (s *Server) applyApps(had, now agentapi.Apps) {
 	// Install both under one lock: exposing a refreshed URL before its policy
 	// could let a concurrent call use the old classification on the new session.
-	s.sup.Apps().SetConfig(now.SessionURL, now.ReadOnly)
+	s.sup.Apps().SetConfig(now.SessionURL, now.Actions)
 	if surfaceChanged(had, now) {
 		s.sup.EvictIdle()
 	}

@@ -82,14 +82,11 @@ func TestGetReadsTheRowBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Field by field: Apps carries two pushed-only fields the store never
+	// Field by field: Apps carries a pushed-only Actions map the store never
 	// persists, so the struct is not comparable and == would not mean what it
 	// looks like it means.
 	if got.SessionURL != "https://backend.composio.dev/mcp/9" || got.SessionID != "sess_9" {
 		t.Errorf("got %+v", got)
-	}
-	if got.ReadOnly != nil {
-		t.Errorf("the store invented a read-only set: %v", got.ReadOnly)
 	}
 	if got.Actions != nil {
 		t.Errorf("the store invented resolved actions: %v", got.Actions)

@@ -134,17 +134,30 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 	}
 }
 
-// gated stands a session up whose provider calls only `reads` safe.
-func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
+// gated stands a session up where the named actions run without asking, which is
+// what the host resolves a read to. Everything else is absent, and so asks.
+func gated(t *testing.T, auto ...string) (anthropic.BetaTool, *Gate) {
+	t.Helper()
+	held := make(map[string]string, len(auto))
+	for _, slug := range auto {
+		held[slug] = agentapi.ActionAuto
+	}
+	tool, g, _ := gatedBy(t, held)
+	return tool, g
+}
+
+// gatedBy is the same with the whole resolved answer spelled out, for the values
+// a read never takes.
+func gatedBy(t *testing.T, actions map[string]string) (anthropic.BetaTool, *Gate, *appsServer) {
 	t.Helper()
 	a := fakeApps(t, namedTool("COMPOSIO_MULTI_EXECUTE_TOOL", "sent"))
-	a.SetConfig(a.Current(), reads)
+	a.SetConfig(a.Current(), actions)
 	g := NewGate(mustLog(t), NewInteractions(), t.TempDir())
 	tools, err := a.Tools(context.Background(), toolDeps{gate: g})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tools[0], g
+	return tools[0], g, a
 }
 
 // answered runs one batch, settling every card with d, and reports what the
@@ -249,14 +262,14 @@ func TestAMixedBatchAsksOnlyAboutTheSend(t *testing.T) {
 	}
 }
 
-// With no set at all -- a push that never landed, a provider having a bad day --
-// every action asks.
-func TestWithNoReadOnlySetEvenAReadAsks(t *testing.T) {
+// With no answer at all -- a push that never landed, a provider having a bad day
+// -- every action asks.
+func TestWithNoAnswerAtAllEvenAReadAsks(t *testing.T) {
 	tool, g := gated(t)
 	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
 		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}}]}`)
 	if len(shown) != 1 {
-		t.Errorf("%d cards for a read with no set; absent must mean ask", len(shown))
+		t.Errorf("%d cards for a read with no answer; absent must mean ask", len(shown))
 	}
 }
 
@@ -478,5 +491,82 @@ func TestALongArgumentDoesNotHideTheRecipient(t *testing.T) {
 	}})
 	if !strings.Contains(got, "dave@example.com") {
 		t.Errorf("the bounded preview hid its recipient: %q", got)
+	}
+}
+
+// THE test for this PR. An action the person switched off is refused outright:
+// nothing runs, and NO card is raised -- a person who has already answered this
+// in their settings must not be asked again every time an agent tries.
+func TestAnActionSwitchedOffIsRefusedWithoutAsking(t *testing.T) {
+	tool, g, _ := gatedBy(t, map[string]string{"GMAIL_SEND_EMAIL": agentapi.ActionNever})
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if strings.Contains(got, "sent") {
+		t.Fatalf("an action switched off reached the provider: %q", got)
+	}
+	if len(shown) != 0 {
+		t.Errorf("%d cards for an action nobody needed to be asked about", len(shown))
+	}
+	// The refusal names the action, because it aborts a batch of up to fifty and
+	// the model has to know which entry to drop rather than retrying all of it.
+	if !strings.Contains(got, "GMAIL_SEND_EMAIL") {
+		t.Errorf("the refusal does not name the action: %q", got)
+	}
+	// And it must NOT say a person declined. Nobody saw anything, so a model
+	// relaying that tells them they refused something never put in front of them.
+	if strings.Contains(strings.ToLower(got), "declined") {
+		t.Errorf("the refusal claims a person declined what they were never shown: %q", got)
+	}
+}
+
+// THE trap, and the reason permit branches BEFORE Gate.Check rather than through
+// it. Check's first act is to consume a standing batch grant -- "allow the next
+// ten for an hour" -- keyed on this same slug. Routed through Check, a tap made
+// before the person switched the action off would run the very thing they just
+// forbade, silently, for the rest of the hour.
+func TestAStandingGrantDoesNotOverrideAnActionSwitchedOff(t *testing.T) {
+	const send = `{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{}}]}`
+	tool, g, a := gatedBy(t, nil) // absent, so the first call asks
+	// The person taps "allow the next few", which leaves a standing grant.
+	if out, shown := answered(t, tool, g,
+		Decision{Decision: "allow", Scope: "batch", MaxUses: 10}, send); !strings.Contains(out, "sent") ||
+		len(shown) != 1 {
+		t.Fatalf("the grant was never established: %q, %d cards", out, len(shown))
+	}
+	// Then they switch the action off. The grant above is still live and keyed on
+	// this very slug.
+	a.SetConfig(a.Current(), map[string]string{"GMAIL_SEND_EMAIL": agentapi.ActionNever})
+	before := len(cards(t, g)) // the setup's own card is already in the log
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"}, send)
+	if strings.Contains(got, "sent") {
+		t.Fatal("a standing grant ran an action the person had switched off")
+	}
+	if len(shown) != before {
+		t.Errorf("%d new card(s), so the refusal went through the gate rather than "+
+			"ahead of it", len(shown)-before)
+	}
+}
+
+// An action the person allowed runs with nobody interrupted, and one they said
+// nothing about still asks. Both directions in one place, because a change that
+// collapses them would otherwise pass half the suite.
+func TestWhatThePersonAllowedRunsAndWhatTheyDidNotAsks(t *testing.T) {
+	tool, g, _ := gatedBy(t, map[string]string{
+		"GMAIL_SEND_EMAIL":   agentapi.ActionAuto,
+		"GMAIL_DELETE_DRAFT": "something we do not recognise",
+	})
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{}}]}`)
+	if !strings.Contains(got, "sent") {
+		t.Fatalf("an action the person allowed did not run: %q", got)
+	}
+	if len(shown) != 0 {
+		t.Errorf("%d cards for a send the person had already allowed", len(shown))
+	}
+	// An answer we do not recognise is not permission. This is the direction a
+	// mistake has to fall: noisy, never permissive.
+	if _, shown = answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_DELETE_DRAFT","arguments":{}}]}`); len(shown) != 1 {
+		t.Errorf("%d cards for an unrecognised answer; it must ask", len(shown))
 	}
 }
