@@ -84,12 +84,12 @@ func TestToolsAreWrappedPerAgentNotCached(t *testing.T) {
 
 // Pointing the machine at a new session drops what was held for the old one, so
 // a re-push after a host restart cannot leave agents dialling a dead endpoint.
-func TestSetURLDropsTheOldSession(t *testing.T) {
+func TestARepointDropsTheOldSession(t *testing.T) {
 	a := fakeApps(t, namedTool("COMPOSIO_SEARCH_TOOLS", "found"))
 	if _, err := a.Tools(context.Background(), toolDeps{}); err != nil {
 		t.Fatal(err)
 	}
-	a.SetURL("https://backend.composio.dev/mcp/other")
+	a.SetConfig("https://backend.composio.dev/mcp/other", nil)
 	if a.listed != nil || a.sess != nil {
 		t.Error("the old session survived a repoint")
 	}
@@ -100,12 +100,12 @@ func TestSetURLDropsTheOldSession(t *testing.T) {
 
 // Re-pushing the same session must not throw away a live connection and the
 // tools/list it already paid for. The host pushes on every boot.
-func TestSetURLToTheSameSessionKeepsIt(t *testing.T) {
+func TestAPushToTheSameSessionKeepsIt(t *testing.T) {
 	a := fakeApps(t, namedTool("COMPOSIO_SEARCH_TOOLS", "found"))
 	if _, err := a.Tools(context.Background(), toolDeps{}); err != nil {
 		t.Fatal(err)
 	}
-	a.SetURL(a.Current())
+	a.SetConfig(a.Current(), nil)
 	if a.listed == nil || a.sess == nil {
 		t.Error("an unchanged push dropped the session")
 	}
@@ -118,7 +118,7 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 	const oldURL = "https://backend.composio.dev/mcp/old"
 	const newURL = "https://backend.composio.dev/mcp/new"
 	a := newAppsServer(agentapi.Apps{SessionURL: oldURL})
-	a.SetURL(newURL)
+	a.SetConfig(newURL, nil)
 
 	if a.store(oldURL, []*mcpsdk.Tool{namedTool("STALE", "stale")}) {
 		t.Fatal("a listing from the old session was accepted")
@@ -138,7 +138,7 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
 	t.Helper()
 	a := fakeApps(t, namedTool("COMPOSIO_MULTI_EXECUTE_TOOL", "sent"))
-	a.SetReadOnly(reads)
+	a.SetConfig(a.Current(), reads)
 	g := NewGate(mustLog(t), NewInteractions(), t.TempDir())
 	tools, err := a.Tools(context.Background(), toolDeps{gate: g})
 	if err != nil {
@@ -381,7 +381,7 @@ func TestADialInFlightBlocksNobody(t *testing.T) {
 	<-dialing // a dial is now in flight and will not finish until we say so
 
 	done := make(chan string, 3)
-	go func() { a.SetURL("https://backend.composio.dev/mcp/other"); done <- "SetURL" }()
+	go func() { a.SetConfig("https://backend.composio.dev/mcp/other", nil); done <- "SetConfig" }()
 	go func() { a.redact(errNoSession); done <- "redact" }()
 	go func() { a.Current(); done <- "Current" }()
 	for range 3 {

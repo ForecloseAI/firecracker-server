@@ -189,36 +189,22 @@ type appsServer struct {
 // on the same disk and a machine that came back without it would ask about every
 // read until its next push.
 func newAppsServer(a agentapi.Apps) *appsServer {
-	s := &appsServer{url: a.SessionURL, dial: dialApps}
-	s.SetReadOnly(a.ReadOnly)
+	s := &appsServer{dial: dialApps}
+	s.SetConfig(a.SessionURL, a.ReadOnly)
 	return s
 }
 
-// SetReadOnly installs the actions a person need not be asked about.
+// SetConfig installs a pushed URL and policy as one state transition, and is the
+// only writer of either.
 //
-// Separate from SetURL, which returns early when the session has not moved --
-// and a re-push carrying a fresher set on the SAME session is the ordinary case,
-// the one surfaceChanged is pinned to allow. Folded together, the update this
-// design exists to deliver is the one that would be dropped. SetURL does not
-// clear it either: the set is the provider's catalogue, not this session.
-func (s *appsServer) SetReadOnly(slugs []string) {
-	held := make(map[string]bool, len(slugs))
-	for _, slug := range slugs {
-		held[slug] = true
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.reads = held
-	if len(held) == 0 && s.url != "" {
-		// Once here rather than per call. Such a machine asks about every read,
-		// which looks like a cautious gate rather than a push that never landed.
-		log.Printf("agentd: session but no read-only actions; every app call will ask")
-	}
-}
-
-// SetConfig installs a pushed URL and policy as one state transition. In
-// particular, no call can observe a refreshed session URL while still using
-// the preceding session's read-only classification.
+// One transition because installing them apart lets a call observe a refreshed
+// session URL while still classifying against the previous session's set.
+//
+// The policy is installed unconditionally and the URL only when it moved. A push
+// carrying a fresher set on the SAME session is the ordinary case -- the one
+// surfaceChanged is pinned to allow -- so gating the set on the URL having
+// changed would drop exactly the update this design exists to deliver. Nor does a
+// repoint clear the set: it describes the provider's catalogue, not this session.
 func (s *appsServer) SetConfig(url string, slugs []string) {
 	held := make(map[string]bool, len(slugs))
 	for _, slug := range slugs {
@@ -244,24 +230,6 @@ func (s *appsServer) reading(slug string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.reads[slug]
-}
-
-// SetURL points the server at a session, dropping anything held for the old one.
-//
-// Called when the host pushes, which happens on every machine boot. Comparing
-// first matters: a re-push of the same session must not throw away a live
-// connection and the tools/list it already paid for.
-func (s *appsServer) SetURL(url string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if url == s.url {
-		return
-	}
-	s.url, s.listed, s.failedAt = url, nil, time.Time{}
-	if s.sess != nil {
-		s.sess.Close()
-		s.sess = nil
-	}
 }
 
 // Current is the address this server is pointed at, or "" for none. Read by
