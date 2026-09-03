@@ -86,6 +86,20 @@ type Apps struct {
 	// carried it would go stale in a place nobody looks. That is also why this
 	// struct is no longer comparable -- compare the fields you mean.
 	ReadOnly []string `json:"read_only,omitempty"`
+
+	// Policy is what the person allows their agents to do without being asked,
+	// per app and per capability: {"gmail":{"write":"ask","del":"never"}}.
+	//
+	// The mirror of ReadOnly in every respect. That set is the provider's, the
+	// same for everybody, and pushed rather than stored; this is one person's
+	// answer, theirs alone, and stored rather than derived -- so unlike ReadOnly
+	// it DOES belong in AppsStore, and a row that lost it would silently return
+	// somebody to defaults they had deliberately changed.
+	//
+	// Absent means ask. An unknown capability or an unrecognised value means ask
+	// too: this is the first thing that can make a machine less capable than
+	// intended, so every way of being wrong about it points at asking.
+	Policy map[string]map[string]string `json:"policy,omitempty"`
 }
 
 // Decision is a human's answer to a pending interaction. Scope, MaxUses and

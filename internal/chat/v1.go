@@ -45,6 +45,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/apps/connections", s.apiGuard(s.listAppConnections))
 	mux.HandleFunc("POST /v1/apps/{slug}/connect", s.apiGuard(s.connectApp))
 	mux.HandleFunc("DELETE /v1/apps/connections/{id}", s.apiGuard(s.disconnectApp))
+	mux.HandleFunc("PUT /v1/apps/{slug}/policy", s.apiGuard(s.setAppPolicy))
 	// Deliberately NOT behind apiGuard: the browser coming back from a provider
 	// carries no token. Safe unauthenticated because the page holds no state and
 	// takes no action -- it only bounces back into the app.

@@ -56,6 +56,9 @@ func (p *provider) route(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/connected_accounts/link":
 		p.link(w, r)
+	case r.URL.Path == "/tool_router/session":
+		w.Write([]byte(`{"session_id":"trs_1","mcp":{"type":"streamable_http",
+			"url":"https://backend.composio.dev/mcp/trs_1"}}`))
 	case r.URL.Path == "/auth_configs":
 		// Answers for whatever toolkit was asked for, so the featured check is
 		// the ONLY thing standing between a slug and a minted link. A stub that
