@@ -284,20 +284,22 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, a *Agent, since 
 		sent = emit(w, e, sent)
 	}
 	rc.Flush()
-	pump(r, w, rc, ch, sent)
+	pump(r, w, rc, ch, func(e Event) { sent = emit(w, e, sent) })
 }
 
-// pump forwards live events until the client goes away.
-func pump(r *http.Request, w http.ResponseWriter, rc *http.ResponseController,
-	ch <-chan Event, sent int) {
+// pump forwards live frames until the client goes away, beating on the idle
+// ticker so a proxy in between does not time the stream out. Shared by the
+// event stream and the pending-hand stream, which differ only in their frame.
+func pump[T any](r *http.Request, w http.ResponseWriter, rc *http.ResponseController,
+	ch <-chan T, send func(T)) {
 	tick := time.NewTicker(beat)
 	defer tick.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case e := <-ch:
-			sent = emit(w, e, sent)
+		case v := <-ch:
+			send(v)
 			rc.Flush()
 		case <-tick.C:
 			fmt.Fprint(w, ": beat\n\n")

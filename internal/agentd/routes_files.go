@@ -94,10 +94,7 @@ func trimmedName(name string) string {
 	if name == "" {
 		return "file"
 	}
-	if len(name) > 120 {
-		return name[:120]
-	}
-	return name
+	return name[:min(len(name), 120)]
 }
 
 // handleAttachment serves a file an agent sent the person: the mirror of

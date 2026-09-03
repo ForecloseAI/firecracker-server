@@ -11,7 +11,10 @@ import (
 // escapes the workspace has to fail in this one function or it fails nowhere.
 func TestResolveConfinesToRoot(t *testing.T) {
 	root := t.TempDir()
-	escapes := []string{"../outside", "a/../../outside", "/etc/passwd", "sub/../../.."}
+	escapes := []string{"../outside", "a/../../outside", "/etc/passwd", "sub/../../..",
+		// A prefix check alone would let a sibling directory through: /work-other
+		// starts with /work. The separator in the comparison is what stops it.
+		root + "-other/secret"}
 	for _, p := range escapes {
 		if got, err := resolve(roots{workspace: root}, p); err == nil {
 			t.Errorf("resolve(%q) = %q, want an out-of-workspace error", p, got)
@@ -36,15 +39,6 @@ func TestResolveAllowsInsideRoot(t *testing.T) {
 		if got != want {
 			t.Errorf("resolve(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// A prefix check alone would let a sibling directory through: /work-other
-// starts with /work. The separator in the comparison is what stops it.
-func TestResolveRejectsSiblingWithSharedPrefix(t *testing.T) {
-	root := t.TempDir()
-	if _, err := resolve(roots{workspace: root}, root+"-other/secret"); err == nil {
-		t.Error("a sibling directory sharing the root's prefix was allowed in")
 	}
 }
 

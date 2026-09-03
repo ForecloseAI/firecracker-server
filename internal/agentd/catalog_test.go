@@ -8,14 +8,14 @@ import (
 	"testing"
 )
 
-// The five shipped profiles are the product, so their absence or malformation
+// The shipped profiles are the product, so their absence or malformation
 // should fail here rather than at an agent's first turn.
 func TestBuiltinProfilesAllParse(t *testing.T) {
 	c, err := LoadCatalog("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"boss", "coder", "marketer", "analyst", "accountant"} {
+	for _, key := range []string{"boss", "coder", "marketer", "analyst", "accountant", "researcher"} {
 		p, ok := c.Get(key)
 		if !ok {
 			t.Errorf("no built-in profile %q", key)

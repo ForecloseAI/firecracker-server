@@ -177,18 +177,13 @@ func lastID(all []Event) int {
 	return all[len(all)-1].ID
 }
 
-// Since returns every event after id, for Last-Event-ID replay in Phase 3.
+// Since returns every event after id, for Last-Event-ID replay.
 func (l *Log) Since(id int) ([]Event, error) {
 	all, err := l.ReadAll()
 	if err != nil {
 		return nil, err
 	}
-	for i, e := range all {
-		if e.ID > id {
-			return all[i:], nil
-		}
-	}
-	return nil, nil
+	return after(all, id), nil
 }
 
 // LastID is the id of the most recent event, or 0 when the log is empty.

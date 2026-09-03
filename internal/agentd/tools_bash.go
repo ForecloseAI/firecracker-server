@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -103,13 +104,13 @@ const browserRedirect = "Chrome here is driven with the browser tools " +
 	"driving this machine's browser, ask them first."
 
 // reachesBrowser reports a command that drives Chrome behind the tools' back.
-func reachesBrowser(cmd string) bool {
-	for _, re := range browserRoutes {
-		if re.MatchString(cmd) {
-			return true
-		}
-	}
-	return false
+func reachesBrowser(cmd string) bool { return matchesAny(cmd, browserRoutes) }
+
+// matchesAny reports whether any of the patterns fires on the command.
+func matchesAny(cmd string, patterns []*regexp.Regexp) bool {
+	return slices.ContainsFunc(patterns, func(re *regexp.Regexp) bool {
+		return re.MatchString(cmd)
+	})
 }
 
 // bashInput is the Bash tool's argument.
@@ -134,23 +135,14 @@ var harmlessDevices = map[string]bool{
 
 // isDestructive reports whether a command needs a human decision first.
 func isDestructive(cmd string) bool {
-	for _, re := range destructive {
-		if re.MatchString(cmd) {
-			return true
-		}
-	}
-	return writesToADevice(cmd)
+	return matchesAny(cmd, destructive) || writesToADevice(cmd)
 }
 
 // writesToADevice reports a redirect into anything under /dev/ that is not one
 // of the harmless pseudo-devices.
 func writesToADevice(cmd string) bool {
-	for _, m := range devWrite.FindAllStringSubmatch(cmd, -1) {
-		if !harmlessDevices[m[1]] {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(devWrite.FindAllStringSubmatch(cmd, -1),
+		func(m []string) bool { return !harmlessDevices[m[1]] })
 }
 
 // bashTool builds the Bash tool, gated on destructive commands.

@@ -175,12 +175,7 @@ func callSummary(ctx context.Context, a *Agent, msgs []anthropic.BetaMessagePara
 	}
 	// Booked before the text is checked: the call was billed whether or not it
 	// came back usable.
-	a.bookUsage(msg.Model, Usage{
-		InputTokens:              msg.Usage.InputTokens,
-		OutputTokens:             msg.Usage.OutputTokens,
-		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
-		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
-	})
+	a.bookUsage(msg.Model, usageOf(msg.Usage))
 	var out strings.Builder
 	for _, block := range msg.Content {
 		if b, ok := block.AsAny().(anthropic.BetaTextBlock); ok {

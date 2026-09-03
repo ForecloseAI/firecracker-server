@@ -27,45 +27,41 @@ type askInput struct {
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
 func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
-	files, err := fileTools(r, d.reload)
-	if err != nil {
-		return nil, err
-	}
-	rest, err := buildTools(
-		func() (anthropic.BetaTool, error) { return bashTool(r.workspace, d.gate) },
-		func() (anthropic.BetaTool, error) { return askTool(d.gate) },
-		func() (anthropic.BetaTool, error) { return rememberPersonTool(d) },
-		func() (anthropic.BetaTool, error) { return createSkillTool(r, d) },
-	)
-	if err != nil {
-		return nil, err
-	}
-	team, err := teamTools(d)
-	if err != nil {
-		return nil, err
-	}
-	browser, err := browserTools(d)
-	if err != nil {
-		return nil, err
-	}
-	sched, err := scheduleTools(d)
-	if err != nil {
-		return nil, err
-	}
-	apps, err := appsTools(d)
-	if err != nil {
-		return nil, err
-	}
 	// One outbox shared by both send tools, so their numbers cannot collide. It
 	// resumes from disk, which is what lets a client group by sequence across a
 	// restart.
-	send, err := sendTools(r, d, newOutbox(r.own))
-	if err != nil {
-		return nil, err
+	out := newOutbox(r.own)
+	var all []anthropic.BetaTool
+	for _, build := range []func() ([]anthropic.BetaTool, error){
+		func() ([]anthropic.BetaTool, error) { return fileTools(r, d.reload) },
+		func() ([]anthropic.BetaTool, error) {
+			return buildTools(
+				func() (anthropic.BetaTool, error) { return bashTool(r.workspace, d.gate) },
+				func() (anthropic.BetaTool, error) { return askTool(d.gate) },
+				func() (anthropic.BetaTool, error) { return rememberPersonTool(d) },
+				func() (anthropic.BetaTool, error) { return createSkillTool(r, d) },
+			)
+		},
+		func() ([]anthropic.BetaTool, error) { return teamTools(d) },
+		func() ([]anthropic.BetaTool, error) { return browserTools(d) },
+		func() ([]anthropic.BetaTool, error) { return scheduleTools(d) },
+		func() ([]anthropic.BetaTool, error) { return sendTools(r, d, out) },
+		func() ([]anthropic.BetaTool, error) { return appsTools(d) },
+	} {
+		set, err := build()
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, set...)
 	}
-	all := slices.Concat(files, rest, team, browser, sched, send, apps)
 	return keepAllowed(all, permitted(allow, d.browser)), nil
 }
+
+// ownBrowserTools are OUR browser-gated tools. They are kept out of
+// browserAllowed because that map also filters the MCP server's own tools/list,
+// where a name the server never advertises would look like a tool that went
+// missing. They ride the same single switch.
+var ownBrowserTools = []string{"send_screenshot"}
 
 // alwaysAllowed are the tools every profile gets whether or not it names them.
 // Anything about the person belongs to all of them equally, and requiring six
@@ -79,14 +75,9 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 // remember to ask for the ability to learn.
 // send_file is here for the same reason again: every agent produces documents,
 // and one that cannot hand its work over has done the work for nobody.
-// send_screenshot is deliberately NOT here -- it rides the browser switch below,
-// because only an agent driving the screen has one worth photographing.
-// ownBrowserTools are OUR browser-gated tools. They are kept out of
-// browserAllowed because that map also filters the MCP server's own tools/list,
-// where a name the server never advertises would look like a tool that went
-// missing. They ride the same single switch.
-var ownBrowserTools = []string{"send_screenshot"}
-
+// send_screenshot is deliberately NOT here -- it rides the browser switch in
+// permitted, because only an agent driving the screen has one worth
+// photographing.
 var alwaysAllowed = []string{
 	"remember_about_person", "schedule_task", "list_schedules", "cancel_schedule",
 	"create_skill", "send_file",
@@ -166,13 +157,9 @@ func keepAllowed(tools []anthropic.BetaTool, allow []string) []anthropic.BetaToo
 	for _, name := range allow {
 		wanted[name] = true
 	}
-	out := make([]anthropic.BetaTool, 0, len(tools))
-	for _, tool := range tools {
-		if wanted[tool.Name()] {
-			out = append(out, tool)
-		}
-	}
-	return out
+	return slices.DeleteFunc(tools, func(tool anthropic.BetaTool) bool {
+		return !wanted[tool.Name()]
+	})
 }
 
 // askTool is the model's only channel to the person.

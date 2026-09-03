@@ -27,7 +27,7 @@ func skillTools(t *testing.T, builtin, agentDir string) ([]anthropic.BetaTool, *
 // property to hold is that whatever it writes, the loader reads back. A skill
 // the loader rejects is invisible with no error anywhere.
 func TestCreateSkillRoundTripsThroughTheLoader(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	agentDir := t.TempDir()
 	tools, reload := skillTools(t, builtin, agentDir)
 
@@ -60,7 +60,7 @@ func TestCreateSkillRoundTripsThroughTheLoader(t *testing.T) {
 // A refusal has to say what was wrong. The model's next move is to try again,
 // and it can only fix what it was told.
 func TestCreateSkillRefusalsExplainThemselves(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	writeSkill(t, builtin, "pdf", "description: the shipped one")
 	agentDir := t.TempDir()
 	tools, reload := skillTools(t, builtin, agentDir)
@@ -108,7 +108,7 @@ func TestCreateSkillIsAlwaysAllowed(t *testing.T) {
 // generic "outside the workspace" message would contradict the read the model
 // just did and read as a bug rather than a rule.
 func TestBuiltinSkillsAreReadableButNotWritable(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	writeSkill(t, builtin, "pdf", "description: the shipped one")
 	path := filepath.Join(builtin, "pdf", "SKILL.md")
 	tools, _ := skillTools(t, builtin, t.TempDir())
@@ -162,7 +162,6 @@ func TestSkillWrittenDuringATurnRecyclesTheAgent(t *testing.T) {
 // unrelated eviction -- so the request is kept and tried again at the next
 // boundary.
 func TestARefusedRecycleKeepsTheReloadRequest(t *testing.T) {
-	withBuiltinSkills(t)
 	sup := supervisorWith(t, 8)
 	a, stopped := liveWithoutGoroutine(t, sup, "helper")
 	a.reload.set()
@@ -185,7 +184,7 @@ func TestARefusedRecycleKeepsTheReloadRequest(t *testing.T) {
 // the model "Saved", recycling the agent for nothing, and coming back with the
 // skill invisible.
 func TestCreateSkillRefusesADescriptionTheLoaderWouldDrop(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	agentDir := t.TempDir()
 	tools, reload := skillTools(t, builtin, agentDir)
 
@@ -208,7 +207,7 @@ func TestCreateSkillRefusesADescriptionTheLoaderWouldDrop(t *testing.T) {
 // One skill must not be able to push the others out of the prompt. The index
 // shares a 16 kB budget, so an unbounded description evicts the built-ins.
 func TestALongDescriptionCannotCrowdOutOtherSkills(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	writeSkill(t, builtin, "pdf", "description: Read a PDF. Use when one arrives.")
 	agentDir := t.TempDir()
 	tools, _ := skillTools(t, builtin, agentDir)
@@ -230,7 +229,7 @@ func TestALongDescriptionCannotCrowdOutOtherSkills(t *testing.T) {
 // refine a skill. Without flagging a reload it is told the write succeeded
 // while the skill stays out of the index until an unrelated eviction.
 func TestWritingASkillDirectlyStillAsksForAReload(t *testing.T) {
-	builtin := withBuiltinSkills(t)
+	builtin := t.TempDir()
 	agentDir := t.TempDir()
 	tools, reload := skillTools(t, builtin, agentDir)
 

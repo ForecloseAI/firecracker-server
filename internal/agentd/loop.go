@@ -71,20 +71,18 @@ const maxIterations = 100
 // Agent is one conversation: its own system prompt, tool set, history and log.
 //
 // NOT safe for concurrent use. The SDK's runner requires that all its methods
-// be called from a single goroutine, so every agent gets exactly one -- which
-// is also how agents will run in parallel from Phase 6 on.
+// be called from a single goroutine, so every agent gets exactly one.
 type Agent struct {
-	id      string
-	dir     string
-	client  anthropic.Client
-	model   string
-	system  string
-	profile Profile
-	tools   []anthropic.BetaTool
-	log     *Log
-	gate    *Gate
-	team    *Supervisor
-	inbox   chan inbound
+	id     string
+	dir    string
+	client anthropic.Client
+	model  string
+	system string
+	tools  []anthropic.BetaTool
+	log    *Log
+	gate   *Gate
+	team   *Supervisor
+	inbox  chan inbound
 
 	// Guards everything the HTTP surface reads while the agent goroutine
 	// writes it. The SDK runner itself stays confined to that one goroutine,
@@ -182,7 +180,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		return nil, err
 	}
 	a := &Agent{
-		id: id, dir: dir, client: anthropic.NewClient(), profile: p,
+		id: id, dir: dir, client: anthropic.NewClient(),
 		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,
@@ -232,13 +230,6 @@ func (a *Agent) Gate() *Gate { return a.gate }
 
 // ID is the agent's slug.
 func (a *Agent) ID() string { return a.id }
-
-// Type is the profile key the agent was created from.
-func (a *Agent) Type() string { return a.profile.Key }
-
-// SystemPrompt is the composed prompt, exposed so a caller can inspect what an
-// agent was actually given without reconstructing it.
-func (a *Agent) SystemPrompt() string { return a.system }
 
 // State reports whether the agent is idle or working.
 func (a *Agent) State() string {
@@ -374,9 +365,7 @@ func (a *Agent) DeliverWork(from, text string) error {
 	return a.deliver(inbound{text: text, from: from, replyTo: from})
 }
 
-// deliver queues a message from another agent and records it in this agent's
-// log as well as the sender's. Each per-agent log is the only transcript of
-// that agent, so it has to be self-contained.
+// deliver is the shared half of Deliver and DeliverWork.
 func (a *Agent) deliver(in inbound) error {
 	if err := a.enqueue(in); err != nil {
 		return err
@@ -620,12 +609,11 @@ func (a *Agent) noteStop(runner *anthropic.BetaToolRunner, repaired bool) {
 
 // drain pumps the runner one turn at a time, recording each message.
 //
-// Iterating with NextMessage rather than RunToCompletion is deliberate: this
-// loop body is where the approval gate and the browser lease will hook in. It
-// is also why the rollback rule exists -- NextMessage appends the assistant
-// message immediately but appends the matching tool_result only at the START of
-// the next call, so mid-loop the history ends with an orphan tool_use that
-// would make the next request malformed.
+// Iterating with NextMessage rather than RunToCompletion is why the rollback
+// rule exists -- NextMessage appends the assistant message immediately but
+// appends the matching tool_result only at the START of the next call, so
+// mid-loop the history ends with an orphan tool_use that would make the next
+// request malformed.
 func (a *Agent) drain(ctx context.Context, runner *anthropic.BetaToolRunner, seen int) error {
 	for {
 		msg, err := runner.NextMessage(ctx)
@@ -696,19 +684,23 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 			a.log.Append(Event{Type: "tool_use", Tool: b.Name, Input: encode(b.Input)})
 		}
 	}
-	cleared, uses := appliedEdits(msg)
-	used := Usage{
-		InputTokens:              msg.Usage.InputTokens,
-		OutputTokens:             msg.Usage.OutputTokens,
-		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
-		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
-		ClearedInputTokens:       cleared,
-		ClearedToolUses:          uses,
-	}
+	used := usageOf(msg.Usage)
+	used.ClearedInputTokens, used.ClearedToolUses = appliedEdits(msg)
 	a.mu.Lock()
 	a.lastInput = msg.Usage.InputTokens
 	a.mu.Unlock()
 	a.bookUsage(msg.Model, used)
+}
+
+// usageOf copies one response's token counts onto the wire type. Shared with
+// the compaction call, which books the same four fields.
+func usageOf(u anthropic.BetaUsage) Usage {
+	return Usage{
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+	}
 }
 
 // bookUsage puts one response's tokens in both places that account for spend.

@@ -155,23 +155,11 @@ func TestStartTaskMakesADatedFolderAndRecordsIt(t *testing.T) {
 	if _, err := os.Stat(task.Dir); err != nil {
 		t.Errorf("the folder was not created: %v", err)
 	}
-	if got := sup.CurrentTask(BossID); got == nil || got.Title != "Parse the CSV export" {
-		t.Errorf("roster task = %+v, want the title recorded", got)
-	}
-}
-
-// Delegation carries the boss's current folder by default, so the pieces of one
-// job land together instead of each agent opening its own.
-func TestDelegationInheritsTheCurrentTaskFolder(t *testing.T) {
-	sup := supervisorWith(t, 8)
-	sup.Create("coder", "Ada")
-	sup.Get(BossID)
-	task, err := sup.StartTask(BossID, "Ship the importer", "importer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := sup.CurrentTask(BossID); got == nil || got.Dir != task.Dir {
-		t.Fatalf("current task = %+v, want %q", got, task.Dir)
+	// Both halves of what the roster records: delegate reads Dir back off it to
+	// keep the pieces of one job together instead of each agent opening its own.
+	if got := sup.CurrentTask(BossID); got == nil || got.Title != "Parse the CSV export" ||
+		got.Dir != task.Dir {
+		t.Errorf("roster task = %+v, want the title and folder recorded", got)
 	}
 }
 

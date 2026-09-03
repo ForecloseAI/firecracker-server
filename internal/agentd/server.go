@@ -2,6 +2,7 @@ package agentd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -87,16 +88,7 @@ func (s *Server) nextMessageID(key string) (string, bool) {
 }
 
 // pad renders a message sequence as at least three digits.
-func pad(n int) string {
-	s := ""
-	for v := n; v > 0; v /= 10 {
-		s = string(rune('0'+v%10)) + s
-	}
-	for len(s) < 3 {
-		s = "0" + s
-	}
-	return s
-}
+func pad(n int) string { return fmt.Sprintf("%03d", n) }
 
 // memReport is what /debug/memstats returns: the Go heap side of the picture,
 // plus the per-agent conversation size, which is the term that grows without
