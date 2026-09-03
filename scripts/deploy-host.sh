@@ -16,6 +16,7 @@ BASE="${CRACKED_BASE:-/var/lib/cracked}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$BASE/images/rootfs.stamp"
 IMAGE_BUILDING="$BASE/images/rootfs.building"
+IMAGE_NEXT="$BASE/images/rootfs.next.ext4"
 PENDING_FLEET="$BASE/images/rootfs.pending-vms"
 DEPLOYED="$BASE/deployed.txt"
 DROPIN=/etc/systemd/system/cracked.service.d/override.conf
@@ -167,16 +168,19 @@ build_image() {
   fi
   # As ubuntu, never `sudo -E`: the script self-sudoes, and sudo resets HOME
   # and PATH, losing both the guest pubkey and the Go toolchain.
-  SSH_PUBKEY="$(cat "$HOME/.ssh/cracked_guest.pub")" "$HERE/scripts/build-rootfs.sh"
+  sudo rm -f "$IMAGE_NEXT"
+  ROOTFS_OUT="$IMAGE_NEXT" SSH_PUBKEY="$(cat "$HOME/.ssh/cracked_guest.pub")" \
+    "$HERE/scripts/build-rootfs.sh"
 }
 
 # verify_image proves the new image carries the binary we just built. Better
 # than grepping for a hand-picked string: a discriminator derived from an old
 # diff silently passes against a stale image, and a hash cannot.
 verify_image() {
+  local image="${1:-$BASE/images/rootfs.ext4}"
   local want have keylen
   want="$(sha256sum "$HERE/rootfs/files/agentd" | cut -d' ' -f1)"
-  mount_ro
+  mount_ro "$image"
   have="$(sudo sha256sum /mnt/rootfs-ro/usr/local/bin/agentd | cut -d' ' -f1)"
   keylen="$(sudo sed -n 's/^ANTHROPIC_API_KEY=//p' /mnt/rootfs-ro/etc/cracked-agent.env | wc -c)"
   sudo umount /mnt/rootfs-ro
@@ -197,7 +201,10 @@ stage_image() {
     return
   fi
   build_image
-  verify_image
+  verify_image "$IMAGE_NEXT"
+  # Publish only a complete, verified filesystem. VM creation continues to use
+  # the old inode throughout the build and sees the replacement atomically.
+  sudo mv -f "$IMAGE_NEXT" "$BASE/images/rootfs.ext4"
   sudo rm -f "$IMAGE_BUILDING"
   # Do not stamp yet. A VM that is not successfully recreated still uses the
   # old, unlinked image, and the next deploy must retry the whole fleet.
@@ -280,13 +287,18 @@ vm_ids() {
   echo "$ids"
 }
 
-# ensure_pending_fleet persists the pre-deploy fleet before anything can stop
-# or delete it. A retry loads this snapshot instead of trusting the restarted
-# control plane's now-incomplete in-memory registry.
+# ensure_pending_fleet snapshots immediately before disruption. Each line is
+# id<TAB>state, allowing retries to restore both membership and paused state.
 ensure_pending_fleet() {
   sudo test -e "$PENDING_FLEET" && return
-  local ids; ids="$(vm_ids)"
-  printf '%s\n' "$ids" | sudo tee "$PENDING_FLEET" >/dev/null
+  local fleet rows
+  if fleet="$(api GET /vms 2>/dev/null)" &&
+      rows="$(printf '%s' "$fleet" | jq -r '.vms[] | [.id, .state] | @tsv' 2>/dev/null)"; then
+    printf '%s\n' "$rows" | sudo tee "$PENDING_FLEET" >/dev/null
+  else
+    # API failure is the only case where retained workspaces are a safer guess.
+    vm_ids | awk '{print $1 "\trunning"}' | sudo tee "$PENDING_FLEET" >/dev/null
+  fi
 }
 
 stage_selected() {
@@ -300,7 +312,7 @@ stage_selected() {
 # keeps workspaces/<id>.ext4 and the re-POST reuses it, so agent memory, event
 # log and open tasks all come back. workspace_new:false is the proof.
 recreate() {
-  local id="$1" had=0 out
+  local id="$1" old_state="${2:-running}" had=0 out
   sudo test -e "$BASE/workspaces/$id.ext4" && had=1
   api DELETE "/vms/$id" >/dev/null 2>&1 || true
   out="$(api POST /vms -d "{\"id\":\"$id\"}")"
@@ -311,6 +323,10 @@ recreate() {
   if [ "$had" = "1" ] && [ "$(echo "$out" | jq -r '.workspace_new')" != "false" ]; then
     echo "FATAL: $id came back on a NEW workspace; its data did not survive"
     exit 1
+  fi
+  if [ "$old_state" = "paused" ]; then
+    api POST "/vms/$id/pause" >/dev/null
+    echo "$id: restored paused state"
   fi
 }
 
@@ -337,20 +353,22 @@ stage_vms() {
     return
   fi
   ensure_pending_fleet
-  local ids; ids="$(sudo cat "$PENDING_FLEET")"
-  [ -n "$ids" ] || {
+  local fleet; fleet="$(sudo cat "$PENDING_FLEET")"
+  [ -n "$fleet" ] || {
     echo "no machines to recreate"
     stamp_image
     sudo rm -f "$PENDING_FLEET"
     return
   }
-  echo "machines: $(echo "$ids" | tr '\n' ' ')"
+  echo "machines: $(printf '%s\n' "$fleet" | cut -f1 | tr '\n' ' ')"
   # Only ask when there is something to lose. If cracked was just restarted
   # they are already down, and declining would leave them down.
   if [ "$(pgrep -c firecracker || true)" != "0" ]; then
     confirm "recreate these? each is briefly down; workspaces are kept" || exit 1
   fi
-  for id in $ids; do recreate "$id"; done
+  while IFS=$'\t' read -r id state; do
+    [ -n "$id" ] && recreate "$id" "${state:-running}"
+  done <<<"$fleet"
   stamp_image
   sudo rm -f "$PENDING_FLEET"
 }
@@ -391,20 +409,12 @@ main() {
   command -v jq >/dev/null || { echo "FATAL: jq is not installed"; exit 1; }
   TOK="$(token)"
   [ -n "$TOK" ] || echo "WARN: no CRACKED_TOKEN in $DROPIN; the vms stage will fail"
-  # Recorded now, while the control plane still knows. The registry is in memory
-  # only, so restarting cracked erases it -- asking after the restart is asking
-  # a process that has already forgotten.
-  local fleet ids
+  # A pending snapshot belongs to an interrupted destructive stage. Fresh runs
+  # snapshot later, immediately before restarting cracked or recreating VMs.
   if sudo test -e "$PENDING_FLEET"; then
-    LIVE_IDS="$(sudo cat "$PENDING_FLEET")"
+    LIVE_IDS="$(sudo cut -f1 "$PENDING_FLEET")"
     LIVE_IDS_KNOWN=1
     echo "resuming pending fleet snapshot"
-  elif fleet="$(api GET /vms 2>/dev/null)" && \
-      ids="$(printf '%s' "$fleet" | jq -r '.vms[].id' 2>/dev/null)"; then
-    LIVE_IDS="$ids"
-    LIVE_IDS_KNOWN=1
-  else
-    echo "WARN: could not snapshot the running fleet; workspace fallback may be used" >&2
   fi
   echo "running now: $(echo "$LIVE_IDS" | tr '\n' ' ')"
   for s in $STAGES; do

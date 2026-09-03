@@ -25,7 +25,9 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # %C hashes the SSH destination (including user, host, and port). Without it a
 # live multiplexing master can silently send a deploy intended for a different
 # CRACKED_SSH_TARGET to the previous host.
-SOCK=/tmp/cr-%C.sock
+INSTANCE_HASH="$(printf '%s' "$INSTANCE" | shasum -a 256 | cut -c1-12)"
+SOCK="/tmp/cr-${INSTANCE_HASH}-%C.sock"
+TUNNEL_MARKER="/tmp/cr-tunnel-${PORT}.instance"
 SSH_OPTS=(-i "$KEY" -o ControlMaster=auto -o ControlPath="$SOCK" -o ControlPersist=30m)
 [ -n "${CRACKED_SSH_TARGET:-}" ] || SSH_OPTS+=(-p "$PORT")
 
@@ -77,11 +79,22 @@ preflight() {
 # fallback -- the instance has no IAM profile.
 open_tunnel() {
   [ -z "${CRACKED_SSH_TARGET:-}" ] || { echo "going direct to $TARGET"; return; }
-  nc -z localhost "$PORT" 2>/dev/null && { echo "tunnel already up on $PORT"; return; }
+  if nc -z localhost "$PORT" 2>/dev/null; then
+    [ "$(cat "$TUNNEL_MARKER" 2>/dev/null || true)" = "$INSTANCE" ] || {
+      echo "FATAL: port $PORT is already in use by a tunnel for another instance."
+      echo "       Stop it or select another CRACKED_PORT."; exit 1; }
+    echo "tunnel already up on $PORT for $INSTANCE"
+    return
+  fi
+  rm -f "$TUNNEL_MARKER"
   aws ec2-instance-connect open-tunnel --region "$REGION" \
     --instance-id "$INSTANCE" --local-port "$PORT" &
   for _ in $(seq 20); do
-    nc -z localhost "$PORT" 2>/dev/null && { echo "tunnel up on $PORT"; return; }
+    if nc -z localhost "$PORT" 2>/dev/null; then
+      printf '%s\n' "$INSTANCE" >"$TUNNEL_MARKER"
+      echo "tunnel up on $PORT for $INSTANCE"
+      return
+    fi
     sleep 1
   done
   echo "FATAL: the tunnel never came up on $PORT"; exit 1
