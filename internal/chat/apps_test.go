@@ -2,7 +2,7 @@ package chat
 
 import (
 	"context"
-	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +16,7 @@ import (
 
 	"cracked/internal/agent"
 	"cracked/internal/agentapi"
+	"cracked/internal/composio"
 )
 
 // Stored rows are caller-writable by design, because RLS lets each person own
@@ -190,7 +191,7 @@ func (h *heldAppsStore) Delete(context.Context, string) error               { re
 //
 // Pinned by what the gateway holds WHILE the fetch runs, so moving the call back
 // after Register fails this rather than merely reordering two lines.
-func TestTheReadOnlySetIsResolvedBeforeTheTicketExists(t *testing.T) {
+func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -202,13 +203,13 @@ func TestTheReadOnlySetIsResolvedBeforeTheTicketExists(t *testing.T) {
 
 	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
 	var ticketsWhenFetched int
-	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
+	kinds, _ := stubCaps(func(app string) (map[string]string, error) {
 		gw.mu.Lock()
 		ticketsWhenFetched = len(gw.routes)
 		gw.mu.Unlock()
-		return []string{slug + "_GET"}, nil
-	}}
-	s := &Server{gw: gw, reads: reads, appsClaims: map[string]appsClaim{},
+		return map[string]string{app + "_GET": composio.CapRead}, nil
+	})
+	s := &Server{gw: gw, kinds: kinds, appsClaims: map[string]appsClaim{},
 		apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 
@@ -239,7 +240,7 @@ func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 
 	// A set that is still good keeps the machine out: re-pushing rotates its
 	// ticket, so doing it per request would 404 anything in flight for nothing.
-	s.doneApps("m1", time.Now().Add(appReadsTTL))
+	s.doneApps("m1", time.Now().Add(appCapsTTL))
 	if s.claimApps("m1") {
 		t.Error("a machine holding a fresh set was pushed again anyway")
 	}
@@ -274,35 +275,12 @@ func TestAnInFlightPushStillBlocksTheNextCaller(t *testing.T) {
 	}
 }
 
-// An outage's set must not outlive the outage by an hour. It is not cached, so
-// the machine given one comes back on the short clock instead -- soon enough to
-// heal, far enough apart not to aim a re-fan-out at a provider already down.
-func TestAnIncompleteSetComesBackSooner(t *testing.T) {
-	down := true
-	a, _ := stubReads(func(slug string) ([]string, error) {
-		if down && slug == "slack" {
-			return nil, errors.New("provider had a bad minute")
-		}
-		return []string{slug + "_GET"}, nil
-	})
-
-	_, until := a.slugs(context.Background())
-	if wait := time.Until(until); wait > appReadsRetry+time.Second {
-		t.Errorf("an incomplete set is good for %v, so an outage's set is kept "+
-			"as long as a healthy one", wait)
-	}
-
-	down = false
-	if _, until = a.slugs(context.Background()); time.Until(until) < appReadsTTL-time.Second {
-		t.Errorf("a complete set is only good for %v, so every machine re-fetches "+
-			"far more often than the catalogue moves", time.Until(until))
-	}
-}
-
 // pushingServer is a host wired to a stub guest, ready to run a real push.
-func pushingServer(t *testing.T) (*Server, *agent.Client) {
+func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 	t.Helper()
+	var body []byte
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(guest.Close)
@@ -310,14 +288,12 @@ func pushingServer(t *testing.T) (*Server, *agent.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
-		return []string{slug + "_GET"}, nil
-	}}
-	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"), reads: reads,
-		appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
+	kinds, _ := stubCaps(func(string) (map[string]string, error) { return nil, nil })
+	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"),
+		kinds: kinds, appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 	guestPort, _ := strconv.Atoi(port)
-	return s, agent.New(host, guestPort)
+	return s, agent.New(host, guestPort), &body
 }
 
 // A push that landed has to say so on the SET's clock, not the one the claim was
@@ -330,7 +306,7 @@ func pushingServer(t *testing.T) (*Server, *agent.Client) {
 // unit test that only ever calls claimApps and doneApps by hand: this drives the
 // real mintApps and reads back what it recorded.
 func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
-	s, cl := pushingServer(t)
+	s, cl, _ := pushingServer(t)
 	if !s.claimApps("m1") {
 		t.Fatal("the first caller did not get the claim")
 	}
@@ -342,7 +318,7 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 	if !held.pushed {
 		t.Fatal("a push that landed did not leave a pushed claim")
 	}
-	if wait := time.Until(held.expires); wait < appReadsTTL-time.Minute {
+	if wait := time.Until(held.expires); wait < appCapsTTL-time.Minute {
 		t.Errorf("a machine that was just pushed comes due again in %v, not on its "+
 			"set's hour -- every machine re-tickets on the mint timeout forever", wait)
 	}
@@ -351,7 +327,7 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 // The failure path still wins over the deadline: a push that did not land leaves
 // a cooldown, never a claim dated an hour out that nothing ever retries.
 func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
-	s, _ := pushingServer(t)
+	s, _, _ := pushingServer(t)
 	// No guest to answer, so SetApps fails after the ticket is minted.
 	if !s.claimApps("m1") {
 		t.Fatal("the first caller did not get the claim")

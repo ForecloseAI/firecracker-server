@@ -4,18 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"maps"
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"cracked/internal/agent"
 	"cracked/internal/agentapi"
 	"cracked/internal/composio"
 )
@@ -126,17 +119,25 @@ func TestAnAppThatDidNotAnswerContributesNoCapabilities(t *testing.T) {
 	if _, ok := got["slack_GET"]; ok {
 		t.Error("an app that failed to answer contributed actions")
 	}
-	if d := time.Until(until); d > appReadsRetry {
+	if d := time.Until(until); d > appsRetry {
 		t.Errorf("an outage's answer is good for %v, longer than the short clock", d)
 	}
 
 	down = false
 	calls.Store(0)
-	if got, _ = a.resolved(context.Background(), nil); calls.Load() == 0 {
+	got, until = a.resolved(context.Background(), nil)
+	if calls.Load() == 0 {
 		t.Fatal("a partial map was cached, so slack keeps asking for an hour")
 	}
 	if got["slack_GET"] != agentapi.ActionAuto {
 		t.Error("the retry did not pick up the app that had recovered")
+	}
+	// The other half of the same clock: a WHOLE answer is kept for the hour. Only
+	// pinning the short one would pass with both clocks set to five minutes, which
+	// re-fans-out across six apps twelve times an hour forever.
+	if d := time.Until(until); d < appCapsTTL-time.Second {
+		t.Errorf("a complete answer is good for only %v, so every machine "+
+			"re-fetches far more often than the provider ships", d)
 	}
 }
 
@@ -160,39 +161,50 @@ func TestTheAnswerIsFlatAndPerAction(t *testing.T) {
 // Everything above is about producing it; this is the only test that it leaves
 // the host.
 func TestThePushCarriesTheResolvedActions(t *testing.T) {
-	var body []byte
-	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer guest.Close()
-	host, port, err := net.SplitHostPort(strings.TrimPrefix(guest.URL, "http://"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	kinds, _ := stubCaps(func(app string) (map[string]string, error) {
+	s, cl, body := pushingServer(t)
+	s.kinds, _ = stubCaps(func(app string) (map[string]string, error) {
 		if app == "gmail" {
 			return map[string]string{"GMAIL_SEND_EMAIL": composio.CapWrite}, nil
 		}
 		return nil, nil
 	})
-	s := &Server{gw: NewAppsGateway("k", "0.0.0.0:8092"), appsClaims: map[string]appsClaim{},
-		reads: &appReads{fetch: func(context.Context, string) ([]string, error) { return nil, nil }},
-		kinds: kinds,
-		apps: &heldAppsStore{held: agentapi.Apps{
-			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1",
-			Policy: map[string]map[string]string{"gmail": {composio.CapWrite: agentapi.ActionNever}}}}}
+	s.apps = &heldAppsStore{held: agentapi.Apps{
+		SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1",
+		Policy: map[string]map[string]string{"gmail": {composio.CapWrite: agentapi.ActionNever}}}}
 
-	guestPort, _ := strconv.Atoi(port)
 	if _, err := s.pushApps(context.Background(), testUserID,
-		vmView{ID: "m1", GuestIP: host}, agent.New(host, guestPort)); err != nil {
+		vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl); err != nil {
 		t.Fatalf("push failed: %v", err)
 	}
 	var got agentapi.Apps
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("body %q: %v", body, err)
+	if err := json.Unmarshal(*body, &got); err != nil {
+		t.Fatalf("body %q: %v", *body, err)
 	}
 	if got.Actions["GMAIL_SEND_EMAIL"] != agentapi.ActionNever {
 		t.Errorf("the machine was told %q about a send this person refused", got.Actions["GMAIL_SEND_EMAIL"])
+	}
+}
+
+// The push comes due on the EARLIER of the two clocks. Each cache decides on its
+// own whether its answer was whole, so an outage at the capability map alone
+// leaves a complete read-only set on the hour beside an Actions map whose gaps
+// all ask. Taking the set's deadline would hold that for an hour with nothing
+// bringing it back early -- and it is invisible until a guest obeys Actions.
+func TestAPartialCapabilityMapShortensThePushDeadline(t *testing.T) {
+	s, cl, _ := pushingServer(t)
+	s.kinds, _ = stubCaps(func(app string) (map[string]string, error) {
+		if app == "gmail" {
+			return nil, errors.New("provider had a bad minute")
+		}
+		return map[string]string{app + "_GET": composio.CapRead}, nil
+	})
+	until, err := s.pushApps(context.Background(), testUserID,
+		vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl)
+	if err != nil {
+		t.Fatalf("push failed: %v", err)
+	}
+	if wait := time.Until(until); wait > appsRetry+time.Second {
+		t.Errorf("a machine holding a partial capability map is due again in %v, "+
+			"so every action missing from it asks for the whole hour", wait)
 	}
 }

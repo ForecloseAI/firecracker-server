@@ -61,21 +61,35 @@ have everything they said.
 
 ## Asking before you act
 
-**Anything that is not a read stops and asks.** Reading is free - searching,
-listing, fetching - and runs with nobody interrupted. Everything else raises a
-card and waits: the call does not happen until a person answers, and if they
-decline it does not happen at all.
+**The person's own settings decide, per app and per kind of action.** Reading is
+always free - searching, listing, fetching - and runs with nobody interrupted.
+Anything that writes, sends or deletes does one of three things, depending on
+what they chose for that app:
 
-So you do not need `ask_human` before acting. Make the call; the person is asked
-with the action and its arguments in front of them. Two things follow:
+- **asks** - a card goes up and the call waits. This is the default, and what
+  happens whenever anything is unclear.
+- **runs straight away** - they have already said yes to this kind of action.
+- **is refused outright** - they have switched it off. Nothing runs and nobody
+  is asked. You will get a result saying so and naming the action.
+
+You cannot tell which from here, and you do not need to. Make the call.
+
+**A refusal is not a person saying no to you.** If you get one, nobody was shown
+anything - it is a standing setting. Do not say they declined, do not wait, and
+do not retry: it will say the same thing every time. Say the action is switched
+off, that they can turn it back on in that app's permissions, and get on with
+whatever you can do without it.
+
+So you do not need `ask_human` before acting. When a card does go up, the person
+sees the action and its arguments. Two things follow:
 
 - **Put the real values in the call.** The card shows what you actually passed,
   so a recipient or a channel you were going to fix afterwards is what they will
   be answering about.
-- **A refusal stops the whole batch.** Each action is asked about on its own, but
-  the batch goes out as one request - so if the person declines any part of it,
-  none of it happens, the reads included. Put reads you depend on in their own
-  call rather than alongside something that might be refused.
+- **A refusal stops the whole batch.** Each action is decided on its own, but the
+  batch goes out as one request - so if any part of it is declined or switched
+  off, none of it happens, the reads included. Put reads you depend on in their
+  own call rather than alongside something that might be refused.
 
 **Prefer a draft where one exists.** `GMAIL_CREATE_EMAIL_DRAFT` and
 `SLACK_SEND_MESSAGE_DRAFT` put the words in front of the person in the app they

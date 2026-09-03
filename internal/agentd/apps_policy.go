@@ -3,6 +3,7 @@ package agentd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -34,6 +35,29 @@ const appsExecTool = "COMPOSIO_MULTI_EXECUTE_TOOL"
 var errUnreadableCall = errors.New(
 	"this call could not be read, so nothing ran. Its tools argument must be a " +
 		"list, and every entry an object with a non-empty tool_slug string.")
+
+// refusedByPolicy is handed back as the tool result when a person's settings
+// refuse an action outright, and every clause in it is load-bearing.
+//
+// It must NOT say a person declined. Nobody saw anything -- no card was raised
+// and nothing reached them -- so a model relaying "they said no" tells someone
+// they refused a thing they were never shown. Gate.Check's refusal says exactly
+// that and is the wrong string here.
+//
+// It names the SLUG because a refusal aborts the whole batch, and the model may
+// have sent up to fifty entries: without the name it cannot tell which one to
+// drop and will retry the batch entire.
+//
+// It reads as settled rather than transient, so nothing waits or retries. And it
+// says the setting can be changed, or a model reports permanent incapacity when
+// the truth is a switch in an app the person owns.
+func refusedByPolicy(slug string) error {
+	return fmt.Errorf("%s is switched off in this person's app permissions, so "+
+		"nothing ran and nobody was asked. This is a standing setting rather than "+
+		"a decision just made, so waiting or retrying will not change it. Tell "+
+		"them it is switched off, that they can turn it back on in their app's "+
+		"permissions, and get on with whatever you can do without it.", slug)
+}
 
 // appCall is one action inside a batch, with the arguments it will run with.
 // The arguments are what a person needs to see to answer -- who the mail is

@@ -32,13 +32,13 @@ func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
 // roster is one machine's agents plus their profiles.
 func roster() ([]agentapi.Status, []agentapi.Profile) {
 	return []agentapi.Status{
-			{ID: "boss", Name: "Boss", Type: "boss"},
-			{ID: "cody", Name: "Cody", Type: "coder",
-				Task: &agentapi.Task{Title: "Reconciling invoices"}},
-		}, []agentapi.Profile{
-			{Key: "boss", Description: "Runs the team", Browser: true},
-			{Key: "coder", Description: "Writes code", Browser: false},
-		}
+		{ID: "boss", Name: "Boss", Type: "boss"},
+		{ID: "cody", Name: "Cody", Type: "coder",
+			Task: &agentapi.Task{Title: "Reconciling invoices"}},
+	}, []agentapi.Profile{
+		{Key: "boss", Description: "Runs the team", Browser: true},
+		{Key: "coder", Description: "Writes code", Browser: false},
+	}
 }
 
 // The projection is what the whole roster screen renders from.

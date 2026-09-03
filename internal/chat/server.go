@@ -27,7 +27,6 @@ type Server struct {
 	// catalog is the featured apps' copy, shared by every person on the fleet.
 	catalog *appCatalog
 	// reads is which of their actions only read, shared the same way.
-	reads *appReads
 	// kinds is what kind of thing each connected-app action is, shared the same
 	// way. It is what a person's policy is resolved against. Not `caps`, which
 	// this struct already uses for the VNC grants.
@@ -60,7 +59,6 @@ func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server
 		}
 		s.gw = NewAppsGateway(cfg.ComposioKey, cfg.AppsAddr)
 		s.catalog = newAppCatalog(s.composio)
-		s.reads = newAppReads(s.composio)
 		s.kinds = newAppCaps(s.composio)
 	}
 	return s

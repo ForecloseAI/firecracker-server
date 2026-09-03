@@ -71,30 +71,12 @@ type UI struct {
 type Apps struct {
 	SessionURL string `json:"session_url"`
 	SessionID  string `json:"session_id,omitempty"`
-	// ReadOnly is the actions the provider annotates as only reading, pushed
-	// rather than compiled in: a tool the provider ships reaches a machine on its
-	// next push, instead of waiting for a rootfs rebuild and a recreated VM. What
-	// is absent from it asks a person, so an empty set is noisy, never permissive.
-	//
-	// A machine is pushed again once the set it was handed goes stale -- an hour
-	// for a complete one, minutes for a partial -- on the next request to reach
-	// that machine rather than on a timer, so an idle machine is not re-ticketed
-	// for a set nobody is reading. See claimApps and doneApps.
-	//
-	// Pushed only. AppsStore persists the session and not this: it is the same
-	// answer for everybody, it is the provider's to change, and a row that
-	// carried it would go stale in a place nobody looks. That is also why this
-	// struct is no longer comparable -- compare the fields you mean.
-	ReadOnly []string `json:"read_only,omitempty"`
-
 	// Policy is what the person allows their agents to do without being asked,
 	// per app and per capability: {"gmail":{"write":"ask","del":"never"}}.
 	//
-	// The mirror of ReadOnly in every respect. That set is the provider's, the
-	// same for everybody, and pushed rather than stored; this is one person's
-	// answer, theirs alone, and stored rather than derived -- so unlike ReadOnly
-	// it DOES belong in AppsStore, and a row that lost it would silently return
-	// somebody to defaults they had deliberately changed.
+	// One person's answer, theirs alone, and stored rather than derived -- so
+	// unlike Actions below it DOES belong in AppsStore, and a row that lost it
+	// would silently return somebody to defaults they had deliberately changed.
 	//
 	// Absent means ask. An unknown capability or an unrecognised value means ask
 	// too: this is the first thing that can make a machine less capable than
@@ -106,9 +88,21 @@ type Apps struct {
 	// person's Policy above.
 	//
 	// Resolved rather than shipped in halves so the guest holds no vocabulary of
-	// its own -- it looks up a string and obeys it, which is the same shape as
-	// the read-only set it replaces and the reason the name classifier could be
-	// deleted from that package. Absent means ask.
+	// its own -- it looks up a string and obeys it. Absent means ask, so a machine
+	// that was never pushed, or pushed an incomplete answer, is noisy rather than
+	// permissive.
+	//
+	// Pushed rather than compiled in: a tool the provider ships, or a setting the
+	// person changes, reaches a machine on its next push instead of waiting for a
+	// rootfs rebuild and a recreated VM. A machine is pushed again once what it
+	// holds goes stale -- an hour for a complete answer, minutes for a partial --
+	// on the next request to reach it rather than on a timer, so an idle machine
+	// is not re-ticketed for an answer nobody is reading. See claimApps/doneApps.
+	//
+	// Pushed only. AppsStore persists Policy and not this: this is derived from
+	// it, and a row carrying a derived answer would go stale in a place nobody
+	// looks. That is also why this struct is not comparable -- compare the fields
+	// you mean.
 	Actions map[string]string `json:"actions,omitempty"`
 }
 
