@@ -1,6 +1,16 @@
 package agentd
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
+
+// previewCap bounds what one card carries, in runes.
+//
+// Nothing downstream truncates: the app renders the preview in a 270pt column
+// and the web page in a pre-wrap div, both of which simply grow. This is what
+// stops a mail body becoming a card nobody scrolls to the buttons of.
+const previewCap = 240
 
 // appsExecTool is the only meta-tool that can act.
 //
@@ -23,7 +33,15 @@ var errUnreadableCall = errors.New(
 	"this call could not be read, so nothing ran. Its tools argument must be a " +
 		"list, and every entry an object with a non-empty tool_slug string.")
 
-// slugsIn reports every app action a call is about to take.
+// appCall is one action inside a batch, with the arguments it will run with.
+// The arguments are what a person needs to see to answer -- who the mail is
+// going to, which channel is being posted in.
+type appCall struct {
+	Slug string
+	Args map[string]any
+}
+
+// callsIn reports every app action a call is about to take.
 //
 // The action's identity is an ARGUMENT, not the tool name. One
 // COMPOSIO_MULTI_EXECUTE_TOOL call carries {"tools":[{"tool_slug":..},..]} -- up
@@ -36,7 +54,7 @@ var errUnreadableCall = errors.New(
 // nothing has checked, so it is an error rather than an empty answer. Nil args
 // does reach the one assertion below: Execute only returns early when JSON fails
 // to parse, and empty input parses to nothing at all.
-func slugsIn(name string, args map[string]any) ([]string, error) {
+func callsIn(name string, args map[string]any) ([]appCall, error) {
 	if name != appsExecTool {
 		return nil, nil
 	}
@@ -44,30 +62,66 @@ func slugsIn(name string, args map[string]any) ([]string, error) {
 	if !ok {
 		return nil, errUnreadableCall
 	}
-	out := make([]string, 0, len(raw))
+	out := make([]appCall, 0, len(raw))
 	for _, entry := range raw {
-		slug, ok := slugOf(entry)
+		call, ok := callOf(entry)
 		if !ok {
 			return nil, errUnreadableCall
 		}
-		out = append(out, slug)
+		out = append(out, call)
 	}
 	return out, nil
 }
 
-// slugOf reads one batch entry's action name.
+// callOf reads one batch entry: what it will do, and what with.
 //
 // The whole batch fails on a bad entry rather than that entry being skipped:
 // running the readable half of a call the model wrote as a unit is a decision
 // nobody made.
-func slugOf(entry any) (string, bool) {
+func callOf(entry any) (appCall, bool) {
 	// Refused here rather than left to the lookup below, which would also miss:
 	// indexing a nil map is legal and yields nothing. Belt and braces, on purpose
 	// -- what refuses a malformed entry should not rest on that.
-	call, ok := entry.(map[string]any)
+	held, ok := entry.(map[string]any)
 	if !ok {
-		return "", false
+		return appCall{}, false
 	}
-	slug, ok := call["tool_slug"].(string)
-	return slug, ok && slug != ""
+	slug, ok := held["tool_slug"].(string)
+	if !ok || slug == "" {
+		return appCall{}, false
+	}
+	// Absent or malformed arguments are not a refusal: they cost a card that
+	// names the action with nothing under it, and plenty of actions take none.
+	args, _ := held["arguments"].(map[string]any)
+	return appCall{Slug: slug, Args: args}, true
+}
+
+// previewOf is what a person reads before allowing an action: what it will do,
+// and what with.
+//
+// The arguments carry it. "Send an email" is a question nobody can answer;
+// "send an email to dave@example.com" is one they can. Rendered as the provider
+// gave them rather than picked over by field name -- there are 910 tools and
+// their argument names are theirs to change, so a card that showed only the
+// fields we recognised would quietly show nothing at all for a tool we did not.
+func previewOf(c appCall) string {
+	if len(c.Args) == 0 {
+		return c.Slug
+	}
+	body, err := json.Marshal(c.Args)
+	if err != nil {
+		return c.Slug
+	}
+	return c.Slug + ": " + clip(string(body), previewCap)
+}
+
+// clip shortens to n runes, saying so rather than trailing off. Runes because
+// cutting bytes can halve a character and leave the card rendering a replacement
+// glyph over somebody's name.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "... (truncated)"
 }

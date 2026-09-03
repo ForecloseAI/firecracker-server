@@ -109,7 +109,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
 		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
-		apps:  newAppsServer(ReadApps(stateDir).SessionURL),
+		apps:  newAppsServer(ReadApps(stateDir)),
 		meter: OpenMeter(stateDir), hub: NewInteractions(), schedules: schedules,
 		sweepDone: make(chan struct{}),
 	}

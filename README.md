@@ -510,25 +510,34 @@ grants authenticated callers access only through the per-user policy. Apply it
 before setting `COMPOSIO_API_KEY`; otherwise session provisioning remains
 unavailable.
 
-### Nothing is gated yet
+### Writes ask a person first
 
-**Connected-app calls are not filtered.** Unlike `Bash`, which stops at the
-approval gate when it looks destructive, a call to a connected app runs as soon
-as an agent makes it — sending an email included. The permission layer that will
-decide which actions need a person is deliberately still to be written.
+**A connected-app action runs unasked only if the provider annotates it as
+read-only.** Everything else raises a card and blocks until somebody answers:
+unknown actions, newly shipped ones, renamed ones, and every action whose name
+suggests one thing and does another.
 
-What stood here before was a guess from the tool's name, and it was worse than
-nothing: it read as enforcement while classifying `GITHUB_CREATE_A_CHECK_SUITE`
-as read-only, because the name contains `CHECK`. Names cannot carry this — the
-provider exposes no read-only annotation to ask instead (`COMPOSIO_GET_TOOL_SCHEMAS`
-returns only a description and an input schema), and 126 of the first 500 toolkit
-slugs contain an underscore, so even "the verb is the second word" is wrong for
-`MICROSOFT_TEAMS_SEND_MESSAGE`.
+Composio annotates its own catalogue and we keep no list of our own. Measured
+2026-09-02: 910 of 910 tools across the featured six carry an effect hint, 398
+are `readOnlyHint`, and none carries `readOnlyHint` alongside `destructiveHint`.
+It is right about the names that lie, which is why nothing here parses one —
+`GMAIL_SEND_DRAFT` is destructive, `GOOGLECALENDAR_CALENDAR_LIST_INSERT` creates
+despite the `LIST`, `SLACK_FIND_CHANNELS` genuinely reads. The set is fetched on
+the host, cached an hour, and pushed to each machine beside its session, so a
+tool shipped today is understood without rebuilding a rootfs. What is absent from
+it asks. An empty set therefore asks about everything: noisy, never permissive.
 
-Until that layer exists, the only thing between an agent and a live account is
-the `connected-apps` skill telling it to ask first, which is guidance and not a
-control. `beforeHook` in `internal/agentd/browser_tool.go` is the seam the real
-one plugs into.
+One entry is ours: `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text
+to an unrelated third-party service, so the host subtracts it before pushing.
+MCP's own rule is that annotations are untrusted hints.
+
+**What this does not do.** It is not an exfiltration control and must not be read
+as one. A guest has unrestricted outbound internet by design (see the firewall
+notes above), and `Bash` is gated only against its destructive denylist, so
+`curl` reaches anywhere without touching this gate at all. Nor does it inspect
+arguments: an approved send with a poisoned body is an approved send. What it
+buys is that loud, irreversible actions stop and ask, and that every one of them
+is on the record.
 
 ## Operational notes
 

@@ -76,9 +76,10 @@ type Apps struct {
 	// next push, instead of waiting for a rootfs rebuild and a recreated VM. What
 	// is absent from it asks a person, so an empty set is noisy, never permissive.
 	//
-	// A machine is pushed once per host process -- claimApps latches it -- so this
-	// is as old as that machine's last boot or the last host restart. The hourly
-	// cache behind it only decides what the NEXT machine to boot is told.
+	// A machine is pushed again once the set it was handed goes stale -- an hour
+	// for a complete one, minutes for a partial -- on the next request to reach
+	// that machine rather than on a timer, so an idle machine is not re-ticketed
+	// for a set nobody is reading. See claimApps and doneApps.
 	//
 	// Pushed only. AppsStore persists the session and not this: it is the same
 	// answer for everybody, it is the provider's to change, and a row that

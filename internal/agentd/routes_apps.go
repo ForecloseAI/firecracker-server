@@ -69,6 +69,11 @@ func (s *Server) handlePutApps(w http.ResponseWriter, r *http.Request) {
 // merely moved does not.
 func (s *Server) applyApps(had, now agentapi.Apps) {
 	s.sup.Apps().SetURL(now.SessionURL)
+	// Unconditional, and outside the eviction branch below. A push carrying a
+	// fresher set on the same session is the ordinary case -- surfaceChanged is
+	// pinned to NOT evict for it -- so this is the one path by which a running
+	// machine learns the provider re-annotated a tool.
+	s.sup.Apps().SetReadOnly(now.ReadOnly)
 	if surfaceChanged(had, now) {
 		s.sup.EvictIdle()
 	}

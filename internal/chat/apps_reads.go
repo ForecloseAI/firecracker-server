@@ -96,5 +96,34 @@ func (a *appReads) keep(held []string) time.Time {
 // nothing, so its tools fall outside the set and ask.
 func (a *appReads) fetchAll(ctx context.Context) ([]string, bool) {
 	out, whole := fanOut(ctx, a.fetch, func(string) []string { return nil })
-	return slices.Concat(out...), whole
+	return accepted(slices.Concat(out...)), whole
+}
+
+// deniedReads are actions the provider calls read-only and we do not.
+//
+// GMAIL_CREATE_PROMPT_POST carries readOnlyHint and not even openWorldHint,
+// while its own description says it posts a one-shot prompt to an unrelated
+// third-party content service. It does not modify Gmail, so the tag is arguably
+// defensible; it still carries text outward, which is the thing a person is
+// being asked about. MCP's rule is that annotations are untrusted hints, and
+// this is what that looks like once somebody goes and checks.
+//
+// Host-side deliberately. A disagreement with the provider is then updated by
+// deploying the host; the same map in the guest would need a rootfs rebuild and
+// every VM recreated, which is the cost this whole design exists to avoid.
+//
+// If this ever grows past a handful, the provider's annotations have drifted and
+// that is worth saying out loud rather than curating around.
+var deniedReads = map[string]bool{"GMAIL_CREATE_PROMPT_POST": true}
+
+// accepted drops the actions we do not accept as read-only. Applied before the
+// set is cached, so the answer a machine is handed is already the answer.
+func accepted(slugs []string) []string {
+	out := slugs[:0:0]
+	for _, slug := range slugs {
+		if !deniedReads[slug] {
+			out = append(out, slug)
+		}
+	}
+	return out
 }

@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -192,5 +193,64 @@ func TestARealSizedReadOnlySetFitsThePush(t *testing.T) {
 	}
 	if !slices.Equal(got.ReadOnly, set) || got.SessionID != "sess_abc" {
 		t.Errorf("read back %d slugs, session %q", len(got.ReadOnly), got.SessionID)
+	}
+}
+
+// A push installs the set into the RUNNING server, not merely onto the disk.
+// Landing it on disk alone is the shape this PR exists to fix: the file was
+// right and the process asked about every read regardless.
+func TestAPushInstallsTheReadOnlySet(t *testing.T) {
+	s, _ := newTestServer(t)
+	if rec := do(t, s, http.MethodPut, "/apps",
+		`{"session_url":"https://backend.composio.dev/mcp/s","session_id":"s1",
+		  "read_only":["GMAIL_FETCH_EMAILS"]}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("put status %d: %s", rec.Code, rec.Body)
+	}
+	if !s.sup.Apps().reading("GMAIL_FETCH_EMAILS") {
+		t.Error("the set reached the disk and not the server")
+	}
+	if s.sup.Apps().reading("GMAIL_SEND_EMAIL") {
+		t.Error("an action nobody pushed reads as safe")
+	}
+}
+
+// THE trap. SetURL returns early when the session has not moved, and a re-push
+// carrying a fresher set on the SAME session is the ordinary case -- it is what
+// surfaceChanged is pinned to allow. Installed from SetURL, this update would be
+// the one that got dropped.
+func TestASetMovesEvenWhenTheSessionDoesNot(t *testing.T) {
+	s, _ := newTestServer(t)
+	const same = `"session_url":"https://backend.composio.dev/mcp/s","session_id":"s1"`
+	do(t, s, http.MethodPut, "/apps", `{`+same+`,"read_only":["GMAIL_FETCH_EMAILS"]}`)
+	do(t, s, http.MethodPut, "/apps", `{`+same+`,"read_only":["SLACK_FIND_CHANNELS"]}`)
+	if !s.sup.Apps().reading("SLACK_FIND_CHANNELS") {
+		t.Error("a fresher set on an unchanged session was dropped")
+	}
+	if s.sup.Apps().reading("GMAIL_FETCH_EMAILS") {
+		t.Error("the replaced set is still in force")
+	}
+}
+
+// A machine that restarts must come back knowing what only reads, or it asks
+// about every read until its next push.
+func TestARestartComesBackWithItsSet(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteApps(dir, agentapi.Apps{SessionURL: "http://172.16.0.1:8092/apps/a",
+		SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Through NewSupervisor, not newAppsServer: the bug this guards is the boot
+	// path taking .SessionURL and dropping the rest, which a constructor test
+	// cannot see because the constructor was never the thing that was wrong.
+	sup, err := NewSupervisor(context.Background(), dir, t.TempDir(),
+		testCatalog(t), "claude-haiku-4-5", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sup.Apps().reading("GMAIL_FETCH_EMAILS") {
+		t.Error("a restarted machine forgot what only reads")
+	}
+	if sup.Apps().Current() != "http://172.16.0.1:8092/apps/a" {
+		t.Errorf("it also forgot its session: %q", sup.Apps().Current())
 	}
 }

@@ -22,12 +22,17 @@ func TestEveryActionInABatchIsReported(t *testing.T) {
 	args := batch(t, `{"tools":[
 		{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
 		{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"a@b.c"}}]}`)
-	got, err := slugsIn(appsExecTool, args)
+	got, err := callsIn(appsExecTool, args)
 	if err != nil {
-		t.Fatalf("slugsIn: %v", err)
+		t.Fatalf("callsIn: %v", err)
 	}
-	if len(got) != 2 || got[0] != "GMAIL_FETCH_EMAILS" || got[1] != "GMAIL_SEND_EMAIL" {
+	if len(got) != 2 || got[0].Slug != "GMAIL_FETCH_EMAILS" || got[1].Slug != "GMAIL_SEND_EMAIL" {
 		t.Errorf("got %v, want both actions in order", got)
+	}
+	// The arguments come with the action, because they are what a person needs
+	// to answer: who the mail is going to, not merely that mail is going.
+	if got[1].Args["to"] != "a@b.c" {
+		t.Errorf("the send lost its arguments: %v", got[1].Args)
 	}
 }
 
@@ -40,9 +45,9 @@ func TestAFullBatchIsReadWhole(t *testing.T) {
 		}
 		body += fmt.Sprintf(`{"tool_slug":"GMAIL_SEND_EMAIL_%d"}`, i)
 	}
-	got, err := slugsIn(appsExecTool, batch(t, body+`]}`))
+	got, err := callsIn(appsExecTool, batch(t, body+`]}`))
 	if err != nil {
-		t.Fatalf("slugsIn: %v", err)
+		t.Fatalf("callsIn: %v", err)
 	}
 	if len(got) != 50 {
 		t.Errorf("read %d of 50", len(got))
@@ -69,7 +74,7 @@ func TestACallThatCannotBeReadIsRefused(t *testing.T) {
 		"slug at the wrong level": `{"tool_slug":"GMAIL_SEND_EMAIL"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := slugsIn(appsExecTool, batch(t, body))
+			got, err := callsIn(appsExecTool, batch(t, body))
 			if err == nil {
 				t.Fatalf("read %v out of an unreadable call, so nothing would ask about it", got)
 			}
@@ -83,7 +88,7 @@ func TestACallThatCannotBeReadIsRefused(t *testing.T) {
 // A batch with nothing in it runs nothing, so it has nothing to ask about. This
 // is the one empty answer that is not a failure to read.
 func TestAnEmptyBatchIsNotAnError(t *testing.T) {
-	got, err := slugsIn(appsExecTool, batch(t, `{"tools":[]}`))
+	got, err := callsIn(appsExecTool, batch(t, `{"tools":[]}`))
 	if err != nil || len(got) != 0 {
 		t.Errorf("got %v, %v", got, err)
 	}
@@ -95,7 +100,7 @@ func TestTheOtherMetaToolsCarryNoActions(t *testing.T) {
 		if name == appsExecTool {
 			continue
 		}
-		got, err := slugsIn(name, batch(t, `{"toolkits":["gmail"]}`))
+		got, err := callsIn(name, batch(t, `{"toolkits":["gmail"]}`))
 		if err != nil || got != nil {
 			t.Errorf("%s reported %v, %v", name, got, err)
 		}

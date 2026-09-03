@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"cracked/internal/agentapi"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -22,7 +24,7 @@ func fakeApps(t *testing.T, tools ...*mcpsdk.Tool) *appsServer {
 	for _, tool := range tools {
 		srv.AddTool(tool, cannedResult(tool))
 	}
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	a.dial = func(ctx context.Context, _ string) (*mcpsdk.ClientSession, error) {
 		return connectInMemory(ctx, srv)
 	}
@@ -33,7 +35,7 @@ func fakeApps(t *testing.T, tools ...*mcpsdk.Tool) *appsServer {
 // every VM until the host pushes one, and it is what keeps this feature off
 // without a flag of its own.
 func TestNoSessionMeansNoTools(t *testing.T) {
-	tools, err := newAppsServer("").Tools(context.Background(), toolDeps{})
+	tools, err := newAppsServer(agentapi.Apps{SessionURL: ""}).Tools(context.Background(), toolDeps{})
 	if err != nil {
 		t.Fatalf("an unconfigured machine errored: %v", err)
 	}
@@ -114,7 +116,7 @@ func TestSetURLToTheSameSessionKeepsIt(t *testing.T) {
 func TestARepointDiscardsStaleListingState(t *testing.T) {
 	const oldURL = "https://backend.composio.dev/mcp/old"
 	const newURL = "https://backend.composio.dev/mcp/new"
-	a := newAppsServer(oldURL)
+	a := newAppsServer(agentapi.Apps{SessionURL: oldURL})
 	a.SetURL(newURL)
 
 	if a.store(oldURL, []*mcpsdk.Tool{namedTool("STALE", "stale")}) {
@@ -131,29 +133,156 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 	}
 }
 
-// Connected-app calls are NOT gated today, deliberately: the permission layer
-// is still to be written and a name-shaped guess at it let writes through while
-// reading as enforcement. This test pins that state so the day somebody wires a
-// hook in, it fails and reminds them to say so here.
-func TestConnectedAppCallsAreNotGatedYet(t *testing.T) {
+// gated stands a session up whose provider says only `reads` are safe, and
+// returns the execute tool plus the gate its cards land on.
+func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
+	t.Helper()
 	a := fakeApps(t, namedTool("COMPOSIO_MULTI_EXECUTE_TOOL", "sent"))
-	gate := NewGate(mustLog(t), NewInteractions(), t.TempDir())
-	tools, err := a.Tools(context.Background(), toolDeps{gate: gate})
+	a.SetReadOnly(reads)
+	g := NewGate(mustLog(t), NewInteractions(), t.TempDir())
+	tools, err := a.Tools(context.Background(), toolDeps{gate: g})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tools[0].(*mcpTool).before; got != nil {
-		t.Fatal("something is gating connected-app calls; update this test and the docs")
+	return tools[0], g
+}
+
+// answered runs one batch, settling every card raised with d, and reports what
+// the provider said along with the cards the person was shown. Check blocks the
+// caller, so the call runs in the background and the answers come from here.
+func answered(t *testing.T, tool anthropic.BetaTool, g *Gate, d Decision, body string) (string, []Event) {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() {
+		out, err := tool.Execute(context.Background(), json.RawMessage(body))
+		if err != nil {
+			done <- "execute failed: " + err.Error()
+			return
+		}
+		done <- blockText(out)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case got := <-done:
+			return got, cards(t, g)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the call never finished, so a card was raised that nothing answered")
+		}
+		for _, e := range cards(t, g) {
+			if g.IsPending(e.ApprovalID) {
+				g.Resolve(e.ApprovalID, d)
+			}
+		}
 	}
-	// A send reaches the provider with nobody asked. That is the current contract.
-	args, _ := json.Marshal(map[string]any{"tools": []any{
-		map[string]any{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": map[string]any{}}}})
-	out, err := tools[0].Execute(context.Background(), args)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// cards is every approval this agent has been shown.
+func cards(t *testing.T, g *Gate) []Event {
+	t.Helper()
+	events, _ := g.log.ReadAll()
+	var out []Event
+	for _, e := range events {
+		if e.Type == "approval_required" {
+			out = append(out, e)
+		}
 	}
-	if got := blockText(out); !strings.Contains(got, "sent") {
-		t.Errorf("the call did not reach the provider: %q", got)
+	return out
+}
+
+// THE test for this file. A send the person refused must not reach the provider
+// at all -- not be sent and reported as refused, not be queued. The fake answers
+// "sent", so its absence is the proof.
+func TestARefusedSendNeverReachesTheProvider(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "deny", Reason: "not that one"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if strings.Contains(got, "sent") {
+		t.Fatalf("the send reached the provider anyway: %q", got)
+	}
+	if !strings.Contains(got, "declined") {
+		t.Errorf("the model was told %q, which does not read as a refusal", got)
+	}
+	if len(shown) != 1 {
+		t.Fatalf("%d cards, want exactly one", len(shown))
+	}
+}
+
+// And the other half: approving one lets it through, or the gate is just a wall.
+func TestAnApprovedSendReachesTheProvider(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if !strings.Contains(got, "sent") {
+		t.Errorf("an approved send did not reach the provider: %q", got)
+	}
+	if len(shown) != 1 {
+		t.Errorf("%d cards, want exactly one", len(shown))
+	}
+}
+
+// A read the provider annotates as read-only runs silently. This is the half
+// that makes the other half worth reading: a gate that asks about everything
+// spends the attention it needs for the sends.
+func TestAReadTheProviderCallsSafeAsksNobody(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS")
+	got, shown := answered(t, tool, g, Decision{Decision: "deny"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"SLACK_FIND_CHANNELS","arguments":{}}]}`)
+	if len(shown) != 0 {
+		t.Fatalf("reads raised %d cards", len(shown))
+	}
+	if !strings.Contains(got, "sent") {
+		t.Errorf("the reads did not reach the provider: %q", got)
+	}
+}
+
+// A batch mixes freely -- the agent-facing skill tells agents to batch -- so the
+// gate must pick the send out of it and ask about that alone.
+func TestAMixedBatchAsksOnlyAboutTheSend(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if len(shown) != 1 {
+		t.Fatalf("%d cards, want one -- only the send needed a person", len(shown))
+	}
+	// Keyed on the ACTION. Grants are keyed on this string, so the meta-tool here
+	// would make one tap buy an hour of every action in every connected app.
+	if shown[0].Tool != "GMAIL_SEND_EMAIL" {
+		t.Errorf("the card is about %q", shown[0].Tool)
+	}
+	// And it names who the mail is going to. "Send an email?" is a question
+	// nobody can answer.
+	if !strings.Contains(shown[0].Preview, "dave@example.com") {
+		t.Errorf("the card does not say who it is to: %q", shown[0].Preview)
+	}
+}
+
+// With no set at all -- a push that never landed, a provider having a bad day --
+// every action asks. Noisy, and never permissive.
+func TestWithNoReadOnlySetEvenAReadAsks(t *testing.T) {
+	tool, g := gated(t)
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}}]}`)
+	if len(shown) != 1 {
+		t.Errorf("%d cards for a read with no set; absent must mean ask", len(shown))
+	}
+}
+
+// A batch that cannot be read is refused without asking and without running --
+// there is nothing to put on a card, and running it would be the fail-open the
+// deleted classifier shipped.
+func TestAnUnreadableBatchIsRefusedWithoutAsking(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"}, `{"tools":"GMAIL_SEND_EMAIL"}`)
+	if strings.Contains(got, "sent") {
+		t.Fatalf("an unreadable batch reached the provider: %q", got)
+	}
+	if len(shown) != 0 {
+		t.Errorf("%d cards for a batch nothing could read", len(shown))
 	}
 }
 
@@ -161,7 +290,7 @@ func TestConnectedAppCallsAreNotGatedYet(t *testing.T) {
 // a person's message, so without this a provider having a bad ten minutes would
 // add the full dial timeout to every message sent to an evicted agent.
 func TestAFailedDialIsNotRetriedImmediately(t *testing.T) {
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	dials := 0
 	a.dial = func(context.Context, string) (*mcpsdk.ClientSession, error) {
 		dials++
@@ -200,7 +329,7 @@ func TestTheCooldownExpires(t *testing.T) {
 // could read the capability straight out of its own context.
 func TestTheSessionURLNeverTravelsInAnError(t *testing.T) {
 	const url = "https://backend.composio.dev/mcp/sess_SECRET_CAPABILITY"
-	a := newAppsServer(url)
+	a := newAppsServer(agentapi.Apps{SessionURL: url})
 	a.dial = func(_ context.Context, endpoint string) (*mcpsdk.ClientSession, error) {
 		// Shaped like what the transport really returns.
 		return nil, fmt.Errorf(`Post %q: dial tcp: lookup failed`, endpoint)
@@ -254,7 +383,7 @@ func blockText(blocks []anthropic.BetaToolResultBlockParamContentUnion) string {
 // because its dial is a local exec -- blocked a live agent's tool call, the
 // error path reporting the failure, and the host's own PUT /apps.
 func TestADialInFlightBlocksNobody(t *testing.T) {
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	dialing, release := make(chan struct{}), make(chan struct{})
 	a.dial = func(ctx context.Context, _ string) (*mcpsdk.ClientSession, error) {
 		close(dialing)
