@@ -6,7 +6,7 @@
 set -euo pipefail
 
 BASE="${CRACKED_BASE:-/var/lib/cracked}"
-OUT="$BASE/images/rootfs.ext4"
+OUT="${ROOTFS_OUT:-$BASE/images/rootfs.ext4}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'sudo rm -rf "$WORK"' EXIT
