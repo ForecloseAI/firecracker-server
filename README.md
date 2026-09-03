@@ -453,15 +453,38 @@ up anyway.
 
 ## Connected apps
 
-An agent can work with the person's own Gmail, Slack, Calendar or Asana through
-an integration provider, rather than by driving a signed-in page in Chrome. It
-searches for a tool, and if the app is not connected yet it hands the person a
-**Connect** card, waits, and then retries the call it was already making — so the
-original request finishes without anyone repeating it.
+An agent can work with the person's own apps — mail, calendar, chat, tasks, CRM,
+whatever they use — through an integration provider, rather than by driving a
+signed-in page in Chrome. It searches for a tool, and if the app is not
+connected yet it hands the person a **Connect** card, waits, and then retries
+the call it was already making — so the original request finishes without anyone
+repeating it.
 
 Off unless `COMPOSIO_API_KEY` is set on `cracked-chat`. With no key, no session is
 minted, no guest-facing port opens, and an agent's tool surface is exactly what it
 was before.
+
+### Which apps
+
+Every app the provider carries and can put somebody through, which is on the
+order of a thousand. `GET /v1/apps` is the short list the Apps screen leads with
+— `featured` in `internal/chat/apps_catalog.go`, the handful most people came
+for, and the only apps written down anywhere in this repository.
+`GET /v1/apps/catalog` is the rest: headings with counts, a taste of the leading
+few, then `?q=`, `?category=` and `?cursor=` over the whole thing.
+
+The catalogue is walked once an hour for the whole fleet and answered from
+memory, so browsing costs no round trip per keystroke. Three kinds of app are
+dropped from it, because all three end as a Connect button that cannot work:
+one with nothing to authorise, one whose credentials a project has to bring
+itself, and one being withdrawn.
+
+Connecting is gated on that catalogue rather than on `featured`, and the gate is
+load-bearing: minting a link creates an **auth config** for any app nobody has
+connected yet, which is project-wide, permanent and counted against the plan.
+Minting is bounded per person for the same reason. During a catalogue outage the
+gate falls back to `featured`, which cannot create anything new — those six are
+already driven end to end and already hold configs.
 
 ### Why there is a broker
 
@@ -521,12 +544,29 @@ We keep no list of our own. Measured 2026-09-02: 910 of 910 tools across the
 featured six carry an effect hint and 398 are `readOnlyHint`, and it is right
 about the names that lie — `GMAIL_SEND_DRAFT` is destructive,
 `GOOGLECALENDAR_CALENDAR_LIST_INSERT` creates despite the `LIST`,
-`SLACK_FIND_CHANNELS` genuinely reads. Fetched on the host, cached an hour, and
-pushed to each machine beside its session, so a tool shipped today is understood
-without rebuilding a rootfs. Absent from it means ask, so an empty set asks about
-everything: noisy, never permissive. One entry is ours —
+`SLACK_FIND_CHANNELS` genuinely reads. Fetched on the host, cached an hour per
+app, and pushed to each machine beside its session, so a tool shipped today is
+understood without rebuilding a rootfs. Absent from it means ask, so an empty
+set asks about everything: noisy, never permissive. One entry is ours —
 `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text to a third party,
 and MCP's own rule is that annotations are untrusted hints.
+
+Resolved over the apps a person has **connected**, in any status, rather than
+over a list written down here: an action in an app nobody has connected cannot
+run whatever we say about it, and a thousand apps' worth would not fit. Only the
+`auto` and `never` answers are sent, because the guest already reads an unknown
+slug as ask — the same policy in half the bytes, which is what keeps the push
+under the 256 KiB the guest will accept (`appsBodyCap`, and exceeding it takes
+the session down with the set rather than just the set). Both the fan-out and
+the push are bounded well above anything real.
+
+An app connected *after* a machine was pushed would otherwise raise a card on
+every read until that machine came due, up to an hour later. Each machine's
+claim remembers which apps its answer was about, so the next time this service
+reads that person's connections for any reason — opening the Apps screen is the
+usual one — it notices and pushes again. An agent's own Connect card never
+touches this service and the page somebody lands on afterwards is deliberately
+anonymous, so there is nowhere earlier to catch it.
 
 **What this does not do.** It is not an exfiltration control. A guest has
 unrestricted outbound internet by design (see the firewall notes above) and

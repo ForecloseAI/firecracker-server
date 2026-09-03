@@ -135,6 +135,32 @@ func TestThePreviewsAreOnlyOnTheScreenAsItOpens(t *testing.T) {
 	}
 }
 
+// A preview row says whether the app is connected, like every other row. One
+// screen in the product quietly disagreeing about that is worse than the screen
+// not existing: the reader has no way to tell which list is the honest one.
+func TestAPreviewRowKnowsWhatIsAlreadyConnected(t *testing.T) {
+	p := &provider{held: `{"items":[
+		{"id":"ca_gmail","status":"ACTIVE","toolkit":{"slug":"gmail"}}]}`}
+	s, tok := p.serve(t)
+	s.catalog, _ = catalogOf([]composio.Toolkit{
+		grouped("gmail", "productivity"), grouped("notion", "productivity")})
+
+	got := catalog(t, s, tok, "")
+	for _, app := range got.Sections[0].Apps {
+		if app.Slug == "gmail" && !app.Connected {
+			t.Error("a connected app reads as unconnected in the preview")
+		}
+		if app.Slug == "notion" && app.Connected {
+			t.Error("an unconnected app reads as connected in the preview")
+		}
+	}
+	// The same row in the paged list below it has to agree, or the two halves of
+	// one screen contradict each other.
+	if got.Apps[0].Slug != "gmail" || !got.Apps[0].Connected {
+		t.Errorf("the list below says %+v", got.Apps[0])
+	}
+}
+
 // A heading with nothing under it is worse than no heading: it opens onto an
 // empty screen and reads as an outage.
 func TestAHeadingWithNothingUnderItIsNotOffered(t *testing.T) {

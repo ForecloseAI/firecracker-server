@@ -360,13 +360,14 @@ func (s *Server) browseApps(w http.ResponseWriter, r *http.Request, user string)
 	}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	group := r.URL.Query().Get("category")
-	kits, next := held.browse(query, group, cursorOf(r), browsePage)
+	from := cursorOf(r)
+	kits, next := held.browse(query, group, from, browsePage)
 	out := Catalog{Groups: held.groups, Apps: projectApps(kits, mine), NextCursor: markCursor(next)}
 	// Only on the screen as it first opens. Once somebody has searched or picked
 	// a heading they are looking at one list, and previews of other headings
 	// underneath it are furniture in the way of the answer.
-	if query == "" && group == "" && cursorOf(r) == 0 {
-		out.Sections = held.preview()
+	if query == "" && group == "" && from == 0 {
+		out.Sections = held.preview(mine)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -268,7 +268,12 @@ func matches(kit composio.Toolkit, query, group string) bool {
 
 // preview is the first few apps under each of the leading headings, which is
 // what the browse screen shows before anybody searches or picks one.
-func (c *catalogue) preview() []Section {
+//
+// The rows carry this person's connections like every other row does. A preview
+// that showed a connected app as unconnected would be the one screen in the
+// product that lies about it, and the reader has no way to tell which of the
+// two lists in front of them is the honest one.
+func (c *catalogue) preview(held []composio.Connection) []Section {
 	if c == nil {
 		return nil
 	}
@@ -278,7 +283,7 @@ func (c *catalogue) preview() []Section {
 			break
 		}
 		kits, _ := c.browse("", group.ID, 0, sectionApps)
-		out = append(out, Section{Group: group, Apps: projectApps(kits, nil)})
+		out = append(out, Section{Group: group, Apps: projectApps(kits, held)})
 	}
 	return out
 }
@@ -286,9 +291,7 @@ func (c *catalogue) preview() []Section {
 // Section is one category preview on the browse screen.
 type Section struct {
 	Group
-	// Apps is a taste of what is under the heading, never all of it. They carry
-	// no connection state: the browse screen marks what is connected from the
-	// same list every other screen uses, rather than each row being told twice.
+	// Apps is a taste of what is under the heading, never all of it.
 	Apps []App `json:"apps"`
 }
 
