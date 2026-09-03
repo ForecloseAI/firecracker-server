@@ -8,9 +8,19 @@ import (
 	"cracked/internal/agentapi"
 )
 
-// appsBodyCap bounds the push. It carries two short strings; anything near this
-// is a client bug.
-const appsBodyCap = 8 << 10
+// appsBodyCap bounds the push.
+//
+// It used to carry two short strings and was capped at 8 KiB. It now also
+// carries the read-only set, measured at 13,073 bytes for the featured six on
+// 2026-09-02 -- so the old cap refused every push, and because handlePutApps
+// answers 400 before WriteApps, it took the SESSION down with it rather than
+// just the set. Deterministic, self-repeating on the retry cooldown, and it
+// presents as "connected apps unavailable" with nothing naming the cause.
+//
+// Sized for a list that grows on the PROVIDER's schedule, not ours: that is the
+// point of fetching it rather than compiling it in, and it is why the headroom
+// is generous rather than snug.
+const appsBodyCap = 256 << 10
 
 // handleGetApps reports the app-integration session this machine holds.
 //

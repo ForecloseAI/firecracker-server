@@ -2,7 +2,9 @@ package agentd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 
 	"cracked/internal/agentapi"
@@ -117,6 +119,13 @@ func TestARemintedTicketForTheSameSessionIsNotASurfaceChange(t *testing.T) {
 		{"the surface is taken away",
 			agentapi.Apps{SessionURL: a, SessionID: "s1"},
 			agentapi.Apps{}, true},
+		// The set moves when the provider re-annotates a tool. If that counted as
+		// a new surface it would evict every idle agent on the machine whenever
+		// the host restarted with a fresher set -- the re-ticketing storm with a
+		// new cause. Nothing an agent composed at startup depends on it.
+		{"only the read-only set moved",
+			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_FETCH_EMAILS"}},
+			agentapi.Apps{SessionURL: a, SessionID: "s1", ReadOnly: []string{"GMAIL_LIST_LABELS"}}, false},
 	}
 	for _, c := range cases {
 		if got := surfaceChanged(c.had, c.now); got != c.want {
@@ -135,5 +144,53 @@ func TestARemintedTicketStillRepointsTheServer(t *testing.T) {
 	do(t, s, http.MethodPut, "/apps", `{"session_url":"`+second+`","session_id":"s1"}`)
 	if got := s.sup.Apps().Current(); got != second {
 		t.Errorf("the machine is still dialling %q", got)
+	}
+}
+
+// The read-only set has to survive the disk, because it is what the gate reads
+// and a machine that restarts must not come back asking about every read.
+func TestTheReadOnlySetSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	want := agentapi.Apps{SessionURL: "http://172.16.0.1:8092/apps/aaaa", SessionID: "s1",
+		ReadOnly: []string{"GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS"}}
+	if err := WriteApps(dir, want); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadApps(dir); !slices.Equal(got.ReadOnly, want.ReadOnly) {
+		t.Errorf("read back %+v", got)
+	}
+}
+
+// THE test for the push on this side. appsBodyCap was 8 KiB "because it carries
+// two short strings"; the real set is ~400 slugs and 13 KB, so adding it made
+// every push 400 -- and handlePutApps answers before WriteApps, so it took the
+// SESSION down with it rather than just the set. A machine ended up with no
+// connected apps at all, on the healthy path, self-repeating on the cooldown.
+func TestARealSizedReadOnlySetFitsThePush(t *testing.T) {
+	s, _ := newTestServer(t)
+	// Built from the longest real slug in the catalogue so the fixture cannot
+	// flatter itself, and floor-checked below so it cannot shrink under the cap
+	// it exists to test.
+	set := make([]string, 400)
+	for i := range set {
+		set[i] = fmt.Sprintf("MICROSOFT_TEAMS_LIST_COMMUNICATIONS_CALLS_OPERATIONS_%03d", i)
+	}
+	body, err := json.Marshal(agentapi.Apps{SessionID: "sess_abc", ReadOnly: set,
+		SessionURL: "http://172.16.0.1:8092/apps/0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) < 8<<10 {
+		t.Fatalf("fixture is %d bytes, too small to have caught the old cap", len(body))
+	}
+	if rec := do(t, s, http.MethodPut, "/apps", string(body)); rec.Code != http.StatusNoContent {
+		t.Fatalf("a real-sized push answered %d: %s", rec.Code, rec.Body)
+	}
+	var got agentapi.Apps
+	if err := json.Unmarshal(do(t, s, http.MethodGet, "/apps", "").Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.ReadOnly, set) || got.SessionID != "sess_abc" {
+		t.Errorf("read back %d slugs, session %q", len(got.ReadOnly), got.SessionID)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"time"
 )
 
@@ -277,6 +279,66 @@ func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
 	}
 	return Toolkit{Slug: out.Slug, Name: out.Name,
 		Logo: out.Meta.Logo, Description: out.Meta.Description}, nil
+}
+
+// readOnlyTag is the provider's annotation for a tool that only reads.
+//
+// Measured against the live catalogue on 2026-09-02: 910 of 910 tools across the
+// featured six carry an effect hint, none carries readOnlyHint alongside
+// destructiveHint or createHint, and it classifies correctly every slug whose
+// NAME lies -- GMAIL_SEND_DRAFT is destructive, GOOGLECALENDAR_CALENDAR_LIST_INSERT
+// creates, MICROSOFT_TEAMS_CREATE_OR_GET_ONLINE_MEETING creates. Which is why
+// nothing downstream parses a tool name.
+const readOnlyTag = "readOnlyHint"
+
+// readOnlyPage is asked for in one page. Outlook is the largest of the featured
+// six at 117 read-only tools, so this is four times the biggest real answer --
+// deliberately, because ReadOnly refuses a full page rather than paging.
+const readOnlyPage = 500
+
+// toolsResp is one page of GET /tools. Tags come back so the filter can be
+// checked rather than trusted -- see ReadOnly.
+type toolsResp struct {
+	Items []struct {
+		Slug string   `json:"slug"`
+		Tags []string `json:"tags"`
+	} `json:"items"`
+}
+
+// ReadOnly is every tool in one app that the provider annotates as only reading.
+//
+// The tag is asked for as a filter AND checked on every row that comes back,
+// which is not belt-and-braces so much as the whole safety of this call. This
+// API ignores a query parameter it does not recognise rather than rejecting it
+// -- user_id vs user_ids, toolkit vs toolkit_slug, both already met here -- so a
+// renamed filter would answer with every tool in the toolkit, writes included,
+// and a caller trusting the answer would let all of them run unasked. Checking
+// the rows turns that from a catastrophe into a no-op. The test pins the query
+// string as well, so the filter going stale is loud rather than silent.
+func (c *Client) ReadOnly(ctx context.Context, slug string) ([]string, error) {
+	var out toolsResp
+	q := "/tools?" + url.Values{
+		"toolkit_slug": {slug}, "tags": {readOnlyTag}, "limit": {strconv.Itoa(readOnlyPage)},
+	}.Encode()
+	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Items) >= readOnlyPage {
+		// Refused rather than paged. A full page means there may be more, and a
+		// silently truncated set is one whose missing tools look like writes --
+		// the caller would cache it for an hour and ask about ordinary reads. The
+		// featured six top out at 117, so this firing means the catalogue grew
+		// past what this call was designed for and wants paging, not a bigger
+		// number.
+		return nil, fmt.Errorf("composio: %s has %d or more read-only tools; this needs paging", slug, readOnlyPage)
+	}
+	got := make([]string, 0, len(out.Items))
+	for _, it := range out.Items {
+		if slices.Contains(it.Tags, readOnlyTag) {
+			got = append(got, it.Slug)
+		}
+	}
+	return got, nil
 }
 
 // Link is a hosted page where a person authorises one app.

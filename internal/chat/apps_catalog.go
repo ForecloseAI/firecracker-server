@@ -77,21 +77,36 @@ func (a *appCatalog) keep(held []composio.Toolkit) {
 	a.held, a.expires = held, time.Now().Add(appsCatalogTTL)
 }
 
-// fetchAll reads every featured app at once, reporting whether all of them
+// fetchAll reads every featured app, naming one that could not be read after its
+// own slug so it still appears on the list.
+func (a *appCatalog) fetchAll(ctx context.Context) ([]composio.Toolkit, bool) {
+	return fanOut(ctx, a.fetch, func(slug string) composio.Toolkit {
+		return composio.Toolkit{Slug: slug, Name: labelFor(slug)}
+	})
+}
+
+// fanOut reads every featured app at once, reporting whether all of them
 // answered. Parallel because this sits in front of a person opening a screen and
 // six round trips in series is a second they watch.
-func (a *appCatalog) fetchAll(ctx context.Context) ([]composio.Toolkit, bool) {
-	out := make([]composio.Toolkit, len(featured))
+//
+// miss says what an app that did not answer contributes -- a placeholder the
+// screen can still draw, or nothing at all. That is the ONLY thing the two
+// callers disagree about, so it is an argument here rather than the reason for a
+// second copy of the interesting part: index-addressed writes that need no lock,
+// missed set before the Wait, and a loop variable captured per iteration.
+func fanOut[E any](ctx context.Context, fetch func(context.Context, string) (E, error),
+	miss func(string) E) ([]E, bool) {
+	out := make([]E, len(featured))
 	var missed atomic.Bool
 	var wg sync.WaitGroup
 	for i, slug := range featured {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got, err := a.fetch(ctx, slug)
+			got, err := fetch(ctx, slug)
 			if err != nil {
 				missed.Store(true)
-				got = composio.Toolkit{Slug: slug, Name: labelFor(slug)}
+				got = miss(slug)
 			}
 			out[i] = got
 		}()

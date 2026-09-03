@@ -19,6 +19,21 @@ func kits(slugs ...string) []composio.Toolkit {
 	return out
 }
 
+// bySlug is one app's row, or a zero row.
+//
+// Looked up rather than filtered in place. "If this row is slack, check its
+// name" asserts nothing at all when the row has lost its slug -- the condition
+// simply stops matching, and the test goes green on a catalogue missing the app
+// it was written to defend.
+func bySlug(kits []composio.Toolkit, slug string) composio.Toolkit {
+	for _, kit := range kits {
+		if kit.Slug == slug {
+			return kit
+		}
+	}
+	return composio.Toolkit{}
+}
+
 // stubCatalog answers for any slug without a provider, counting the fetches.
 func stubCatalog() (*appCatalog, *atomic.Int64) {
 	var calls atomic.Int64
@@ -117,10 +132,8 @@ func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 	if len(got) != len(featured) {
 		t.Fatalf("got %d apps, want all %d", len(got), len(featured))
 	}
-	for _, kit := range got {
-		if kit.Slug == "slack" && kit.Name != "Slack" {
-			t.Errorf("the unreadable app is named %q", kit.Name)
-		}
+	if slack := bySlug(got, "slack"); slack.Name != "Slack" {
+		t.Errorf("the unreadable app is %+v, want it named after its own slug", slack)
 	}
 	// Nothing was cached, so the next open tries again and gets the real copy.
 	fail = false
@@ -129,10 +142,8 @@ func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 	if calls.Load() == 0 {
 		t.Fatal("a partial answer was cached for an hour")
 	}
-	for _, kit := range got {
-		if kit.Slug == "slack" && kit.Logo == "" {
-			t.Error("the retry did not pick up the real copy")
-		}
+	if slack := bySlug(got, "slack"); slack.Logo == "" {
+		t.Errorf("the retry did not pick up the real copy: %+v", slack)
 	}
 }
 

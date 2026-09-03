@@ -1,11 +1,21 @@
 package chat
 
 import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"cracked/internal/agent"
+	"cracked/internal/agentapi"
 )
 
 // Stored rows are caller-writable by design, because RLS lets each person own
@@ -157,5 +167,206 @@ func TestAMalformedBrokerAddressIsRefusedAtStartup(t *testing.T) {
 	good.AppsAddr = "0.0.0.0:8092"
 	if err := good.validate(); err != nil {
 		t.Fatalf("a good address was refused: %v", err)
+	}
+}
+
+// heldAppsStore answers with one already-minted session, so a push can be
+// driven without a provider or a database.
+type heldAppsStore struct{ held agentapi.Apps }
+
+func (h *heldAppsStore) Get(context.Context, string) (agentapi.Apps, error) { return h.held, nil }
+func (h *heldAppsStore) Put(context.Context, string, agentapi.Apps) error   { return nil }
+func (h *heldAppsStore) Delete(context.Context, string) error               { return nil }
+
+// The read-only set is resolved BEFORE the ticket is minted, not between the
+// ticket and the push.
+//
+// On a cold cache that fetch is a round trip to the provider. pushApps runs
+// detached, so a machine erased and recreated while it is in flight leaves the
+// old goroutine holding a ticket forgetApps has already dropped -- which it then
+// pushes over the replacement's good one, and the replacement's claim is latched
+// pushed, so nothing tries again. Ordering is not what closes that window, but a
+// provider round trip inside it is this PR's to not add.
+//
+// Pinned by what the gateway holds WHILE the fetch runs, so moving the call back
+// after Register fails this rather than merely reordering two lines.
+func TestTheReadOnlySetIsResolvedBeforeTheTicketExists(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer guest.Close()
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(guest.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	var ticketsWhenFetched int
+	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
+		gw.mu.Lock()
+		ticketsWhenFetched = len(gw.routes)
+		gw.mu.Unlock()
+		return []string{slug + "_GET"}, nil
+	}}
+	s := &Server{gw: gw, reads: reads, appsClaims: map[string]appsClaim{},
+		apps: &heldAppsStore{held: agentapi.Apps{
+			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
+
+	guestPort, _ := strconv.Atoi(port)
+	cl := agent.New(host, guestPort)
+	if _, err := s.pushApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: host}, cl); err != nil {
+		t.Fatalf("push failed: %v", err)
+	}
+	if ticketsWhenFetched != 0 {
+		t.Errorf("the provider was asked with %d ticket(s) already minted -- the fetch "+
+			"sits between Register and SetApps, widening the window where an erased "+
+			"machine's push lands on its replacement", ticketsWhenFetched)
+	}
+}
+
+// THE test for this fix. A pushed claim used to latch forever, so the TTL
+// governed only what the NEXT machine to boot was told: a machine already
+// running kept whatever set it was handed until the host process restarted.
+//
+// The permissive half is what makes it worth fixing -- a tool the provider stops
+// annotating readOnlyHint stays read-only on every live machine -- so expiry has
+// to reach machines that already hold a copy, not just the host cache.
+func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	if !s.claimApps("m1") {
+		t.Fatal("the first caller did not get the claim")
+	}
+
+	// A set that is still good keeps the machine out: re-pushing rotates its
+	// ticket, so doing it per request would 404 anything in flight for nothing.
+	s.doneApps("m1", time.Now().Add(appReadsTTL))
+	if s.claimApps("m1") {
+		t.Error("a machine holding a fresh set was pushed again anyway")
+	}
+
+	// Once the set it was handed is stale, it is due another push.
+	s.doneApps("m1", time.Now().Add(-time.Second))
+	if !s.claimApps("m1") {
+		t.Error("a machine holding a stale set was never pushed again, so a tool " +
+			"the provider stopped calling read-only stays read-only there until restart")
+	}
+}
+
+// The in-flight guard survives the deadline being added. A claim is taken before
+// the push, so it has no set to expire on yet -- and dating it now would let the
+// dozen requests that arrive at first sign-in all pass and mint a dozen sessions.
+func TestAnInFlightPushStillBlocksTheNextCaller(t *testing.T) {
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	if !s.claimApps("m1") {
+		t.Fatal("the first caller did not get the claim")
+	}
+	if s.claimApps("m1") {
+		t.Error("a push still in flight did not hold the claim")
+	}
+	// It is not held forever either: a goroutine that dies without reporting
+	// either way frees the machine on the same bound the push runs under.
+	s.mu.Lock()
+	held := s.appsClaims["m1"]
+	s.mu.Unlock()
+	if held.expires.IsZero() || held.expires.After(time.Now().Add(appsMintTimeout+time.Second)) {
+		t.Errorf("an in-flight claim is dated %v, which strands the machine if the "+
+			"goroutine dies without calling doneApps or failApps", held.expires)
+	}
+}
+
+// An outage's set must not outlive the outage by an hour. It is not cached, so
+// the machine given one comes back on the short clock instead -- soon enough to
+// heal, far enough apart not to aim a re-fan-out at a provider already down.
+func TestAnIncompleteSetComesBackSooner(t *testing.T) {
+	down := true
+	a, _ := stubReads(func(slug string) ([]string, error) {
+		if down && slug == "slack" {
+			return nil, errors.New("provider had a bad minute")
+		}
+		return []string{slug + "_GET"}, nil
+	})
+
+	_, until := a.slugs(context.Background())
+	if wait := time.Until(until); wait > appReadsRetry+time.Second {
+		t.Errorf("an incomplete set is good for %v, so an outage's set is kept "+
+			"as long as a healthy one", wait)
+	}
+
+	down = false
+	if _, until = a.slugs(context.Background()); time.Until(until) < appReadsTTL-time.Second {
+		t.Errorf("a complete set is only good for %v, so every machine re-fetches "+
+			"far more often than the catalogue moves", time.Until(until))
+	}
+}
+
+// pushingServer is a host wired to a stub guest, ready to run a real push.
+func pushingServer(t *testing.T) (*Server, *agent.Client) {
+	t.Helper()
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(guest.Close)
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(guest.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := &appReads{fetch: func(_ context.Context, slug string) ([]string, error) {
+		return []string{slug + "_GET"}, nil
+	}}
+	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"), reads: reads,
+		appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
+			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
+	guestPort, _ := strconv.Atoi(port)
+	return s, agent.New(host, guestPort)
+}
+
+// A push that landed has to say so on the SET's clock, not the one the claim was
+// taken with.
+//
+// The claim starts dated appsMintTimeout out, which is only the in-flight guard.
+// Left at that, a machine would come due twenty seconds after every successful
+// push -- a re-fan-out and a fresh ticket per machine, three times a minute,
+// forever. That is worse than the latch it replaced, and it is invisible in a
+// unit test that only ever calls claimApps and doneApps by hand: this drives the
+// real mintApps and reads back what it recorded.
+func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
+	s, cl := pushingServer(t)
+	if !s.claimApps("m1") {
+		t.Fatal("the first caller did not get the claim")
+	}
+	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl)
+
+	s.mu.Lock()
+	held := s.appsClaims["m1"]
+	s.mu.Unlock()
+	if !held.pushed {
+		t.Fatal("a push that landed did not leave a pushed claim")
+	}
+	if wait := time.Until(held.expires); wait < appReadsTTL-time.Minute {
+		t.Errorf("a machine that was just pushed comes due again in %v, not on its "+
+			"set's hour -- every machine re-tickets on the mint timeout forever", wait)
+	}
+}
+
+// The failure path still wins over the deadline: a push that did not land leaves
+// a cooldown, never a claim dated an hour out that nothing ever retries.
+func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
+	s, _ := pushingServer(t)
+	// No guest to answer, so SetApps fails after the ticket is minted.
+	if !s.claimApps("m1") {
+		t.Fatal("the first caller did not get the claim")
+	}
+	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"},
+		agent.New("127.0.0.1", 1))
+
+	s.mu.Lock()
+	held := s.appsClaims["m1"]
+	s.mu.Unlock()
+	if held.pushed {
+		t.Error("a push that failed was recorded as done, so the machine waits an " +
+			"hour before anything tries again")
+	}
+	if s.claimApps("m1") {
+		t.Error("a failure was retried immediately rather than on the cooldown")
 	}
 }
