@@ -270,26 +270,91 @@ func (c *Client) Disconnect(ctx context.Context, id string) error {
 	return c.send(ctx, http.MethodDelete, "/connected_accounts/"+url.PathEscape(id), nil, nil)
 }
 
+// Category is one of the provider's own groupings for an app -- "productivity",
+// "crm", "developer-tools".
+//
+// Theirs and not ours, for the reason the copy below is theirs: a taxonomy over
+// a thousand apps is something somebody has to keep up, and they are already
+// keeping one up. The id is what filters; the name is what a person reads.
+type Category struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // Toolkit is one app as the provider's catalogue describes it.
 //
 // Fetched rather than written down here: a name, a logo and a blurb are copy
 // that goes stale, and the only thing this project should be choosing is WHICH
-// apps to offer.
+// apps to put in front of somebody first.
 type Toolkit struct {
 	Slug        string
 	Name        string
 	Logo        string
 	Description string
+	Categories  []Category
+	// Tools is how many actions the app exposes. Carried because it is the only
+	// cheap estimate of what classifying this app will cost -- one row per tool
+	// in the map a machine is pushed -- and the caller that budgets that push
+	// would otherwise have to fetch the tools to find out.
+	Tools int
+	// NoAuth marks an app that needs no account at all. There is nothing for a
+	// person to authorise, so a Connect button on one is a button that does
+	// nothing they can see.
+	NoAuth bool
+	// ManagedAuth says the provider holds credentials for this app, which is the
+	// only kind this project can put somebody through: createAuthConfig below
+	// brings none of its own. Without it the sign-in page either never mints or
+	// mints against a config with no credentials behind it.
+	ManagedAuth bool
+	// Deprecated marks an app on its way out. Offered to nobody new: a person who
+	// connects one today is being handed a thing scheduled to stop working.
+	Deprecated bool
 }
 
-// toolkitResp is the shape of GET /toolkits/{slug}.
+// Connectable reports whether this project can put a person through this app's
+// sign-in and end up with a working account.
+//
+// Three ways to fail and they fail differently, which is why this is one
+// predicate rather than a filter written out at each call site: nothing to
+// authorise, nothing for us to authorise WITH, or something being withdrawn.
+// All three end the same way -- a Connect button that cannot work -- and the
+// screen should not offer any of them.
+func (t Toolkit) Connectable() bool {
+	return !t.NoAuth && t.ManagedAuth && !t.Deprecated
+}
+
+// toolkitResp is the shape of GET /toolkits/{slug}, and of one row of the list
+// and multi endpoints, which answer with the same object.
 type toolkitResp struct {
-	Slug string `json:"slug"`
-	Name string `json:"name"`
+	Slug   string `json:"slug"`
+	Name   string `json:"name"`
+	NoAuth bool   `json:"no_auth"`
+	// ManagedSchemes is empty for an app whose credentials a project has to bring
+	// itself. Note it is NOT auth_schemes, which lists every method the app
+	// supports including the ones the provider holds nothing for.
+	ManagedSchemes []string `json:"composio_managed_auth_schemes"`
+	// Deprecated is an object rather than a boolean, and it is ABSENT rather than
+	// false for a healthy app -- so what marks one is the field being there at
+	// all. Decoded into a pointer for exactly that: a struct would be
+	// indistinguishable from an app the provider said nothing about.
+	Deprecated *struct {
+		Version string `json:"version"`
+	} `json:"deprecated"`
 	Meta struct {
-		Logo        string `json:"logo"`
-		Description string `json:"description"`
+		Logo        string     `json:"logo"`
+		Description string     `json:"description"`
+		Categories  []Category `json:"categories"`
+		Tools       int        `json:"tools_count"`
 	} `json:"meta"`
+}
+
+// toolkit is one row in this package's own vocabulary.
+func (r toolkitResp) toolkit() Toolkit {
+	return Toolkit{
+		Slug: r.Slug, Name: r.Name, Logo: r.Meta.Logo, Description: r.Meta.Description,
+		Categories: r.Meta.Categories, Tools: r.Meta.Tools, NoAuth: r.NoAuth,
+		ManagedAuth: len(r.ManagedSchemes) > 0, Deprecated: r.Deprecated != nil,
+	}
 }
 
 // Toolkit fetches one app's public metadata.
@@ -298,8 +363,80 @@ func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
 	if err := c.send(ctx, http.MethodGet, "/toolkits/"+url.PathEscape(slug), nil, &out); err != nil {
 		return Toolkit{}, err
 	}
-	return Toolkit{Slug: out.Slug, Name: out.Name,
-		Logo: out.Meta.Logo, Description: out.Meta.Description}, nil
+	return out.toolkit(), nil
+}
+
+// toolkitsResp is one page of GET /toolkits.
+type toolkitsResp struct {
+	Items      []toolkitResp `json:"items"`
+	NextCursor string        `json:"next_cursor"`
+}
+
+// toolkitPage is how many apps are asked for at once. The provider caps limit at
+// a thousand and the catalogue is a few thousand rows, so the whole thing is a
+// handful of requests -- which is the point: the per-slug fetch this sits beside
+// costs one request per app, and that was affordable only while there were six.
+const toolkitPage = 500
+
+// toolkitPages bounds the walk, for the reason connectionPages does: a cursor
+// that never empties is a provider bug, and a loop that trusts it spends a
+// request a second forever with nobody watching.
+//
+// Deliberately far above the catalogue's real size. A short answer costs
+// somebody an app they cannot find and looks exactly like an app the provider
+// does not carry, so this ceiling exists to stop a runaway and should never be
+// the thing that ends a normal walk.
+const toolkitPages = 20
+
+// Toolkits is the provider's whole catalogue.
+//
+// Ordered by usage rather than alphabetically, so a screen showing the first few
+// of anything shows apps people actually connect. That ordering is the
+// provider's read of its own traffic, which is a better answer than a list
+// written here would be a month later -- and it is the same argument that keeps
+// the names and blurbs theirs.
+//
+// Deprecated apps are left out by the provider's own default. Asking for them
+// and filtering here would mean carrying rows only to drop them.
+func (c *Client) Toolkits(ctx context.Context) ([]Toolkit, error) {
+	var out []Toolkit
+	cursor := ""
+	for range toolkitPages {
+		q := url.Values{"sort_by": {"usage"}, "limit": {strconv.Itoa(toolkitPage)}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var page toolkitsResp
+		if err := c.send(ctx, http.MethodGet, "/toolkits?"+q.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			out = append(out, it.toolkit())
+		}
+		if page.NextCursor == "" {
+			return out, nil
+		}
+		cursor = page.NextCursor
+	}
+	// An error rather than the pages that did arrive: a truncated catalogue is a
+	// screen quietly missing its tail, and the caller caches what it is given.
+	return nil, fmt.Errorf("composio: the catalogue did not end within %d pages", toolkitPages)
+}
+
+// Categories is every grouping the catalogue uses.
+//
+// One request and no walk: it answers with the whole set, and there are dozens
+// rather than thousands. Should that stop being true a screen loses some
+// headings while every app remains reachable by search, which is not worth the
+// paging Toolkits carries.
+func (c *Client) Categories(ctx context.Context) ([]Category, error) {
+	var out struct {
+		Items []Category `json:"items"`
+	}
+	if err := c.send(ctx, http.MethodGet, "/toolkits/categories", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }
 
 // readOnlyTag is the provider's annotation for a tool that only reads.
@@ -318,12 +455,27 @@ const readOnlyTag = "readOnlyHint"
 const toolPage = 500
 
 // toolsResp is one page of GET /tools. Tags are what every row is classified
-// from, and the only other field kept -- which is what makes an unfiltered page
-// cheap to hold however large the body was.
+// from, and the rest is the little needed to know the row belongs here at all --
+// which is what makes an unfiltered page cheap to hold however large the body
+// was.
 type toolsResp struct {
 	Items []struct {
 		Slug string   `json:"slug"`
 		Tags []string `json:"tags"`
+		// Toolkit is read so an ignored filter is DETECTED rather than defended
+		// against. This API answers a parameter it does not recognise with
+		// everything it has, and the day toolkit_slug is renamed the answer to
+		// "what can gmail do" becomes the whole catalogue -- classified, cached
+		// and pushed. Reading each row's own parent is what turns that from a
+		// silent wrong answer into a named one.
+		Toolkit struct {
+			Slug string `json:"slug"`
+		} `json:"toolkit"`
+		// Deprecated tools are asked about rather than run unasked. The provider
+		// includes them by default here, unlike in the toolkit catalogue, and a
+		// withdrawn action that still classifies read-only is one nobody is
+		// choosing to keep working.
+		Deprecated bool `json:"is_deprecated"`
 	} `json:"items"`
 }
 
@@ -359,6 +511,18 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 	}
 	held := make(map[string]string, len(out.Items))
 	for _, it := range out.Items {
+		if it.Toolkit.Slug != slug {
+			// The whole answer, not this row: a filter that came back ignored
+			// means nothing in this page can be trusted to be about the app that
+			// was asked for. Refused rather than filtered down to the rows that
+			// happen to match, because the matching ones would then be cached as
+			// a complete answer for an app whose real tools never arrived.
+			return nil, fmt.Errorf("composio: asked %s for its tools and got %s; "+
+				"the toolkit filter is being ignored", slug, it.Toolkit.Slug)
+		}
+		if it.Deprecated {
+			continue
+		}
 		held[it.Slug] = capabilityOf(it.Tags)
 	}
 	return held, nil
@@ -439,8 +603,18 @@ type authConfigsResp struct {
 		Toolkit struct {
 			Slug string `json:"slug"`
 		} `json:"toolkit"`
+		// Managed and Status are read rather than assumed, because a config is
+		// the one piece of provider state this project creates that OUTLIVES the
+		// request that made it. A custom-typed config with no credentials behind
+		// it, or one somebody disabled in the provider's console, mints links
+		// that fail forever -- and the lookup below would keep finding it.
+		Managed bool   `json:"is_composio_managed"`
+		Status  string `json:"status"`
 	} `json:"items"`
 }
+
+// authConfigDisabled is the provider's word for a config somebody switched off.
+const authConfigDisabled = "DISABLED"
 
 // authConfigResp is what creating one answers with.
 type authConfigResp struct {
@@ -458,24 +632,59 @@ type authConfigResp struct {
 // the reverse of connected_accounts, where the plural user_ids is the live one
 // and the singular is ignored. Neither is guessable; both are pinned by tests.
 func (c *Client) authConfig(ctx context.Context, slug string) (string, error) {
-	var held authConfigsResp
-	q := "/auth_configs?" + url.Values{"toolkit_slug": {slug}, "limit": {"1"}}.Encode()
-	if err := c.send(ctx, http.MethodGet, q, nil, &held); err != nil {
-		return "", err
-	}
-	for _, it := range held.Items {
-		if it.Toolkit.Slug == slug {
-			return it.ID, nil
-		}
+	held, err := c.findAuthConfig(ctx, slug)
+	if err != nil || held != "" {
+		return held, err
 	}
 	return c.createAuthConfig(ctx, slug)
 }
 
-// createAuthConfig asks for a provider-managed config for one app. The body
-// carries only the toolkit: everything else defaults to managed OAuth, which is
-// the whole point of not bringing our own credentials yet.
+// authConfigPage is how many configs the lookup reads. More than one, because
+// the filters are asked for and then CHECKED here: a project that has both a
+// managed and a custom config for an app must not have its answer decided by
+// which the provider happened to sort first.
+const authConfigPage = 20
+
+// findAuthConfig is this project's usable managed config for one app, or the
+// empty string when it has none yet.
+//
+// Every condition is re-checked on the rows that come back. is_composio_managed
+// is asked for as a filter AND read off each row for the reason toolkit_slug is:
+// a filter this API does not recognise is ignored rather than refused, and the
+// row it would then hand back is the one that mints dead links for the life of
+// the project.
+func (c *Client) findAuthConfig(ctx context.Context, slug string) (string, error) {
+	var held authConfigsResp
+	q := "/auth_configs?" + url.Values{
+		"toolkit_slug":        {slug},
+		"is_composio_managed": {"true"},
+		"limit":               {strconv.Itoa(authConfigPage)},
+	}.Encode()
+	if err := c.send(ctx, http.MethodGet, q, nil, &held); err != nil {
+		return "", err
+	}
+	for _, it := range held.Items {
+		if it.Toolkit.Slug == slug && it.Managed && it.Status != authConfigDisabled {
+			return it.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// createAuthConfig asks for a provider-managed config for one app.
+//
+// The type is SENT rather than left to default, though the default is the same
+// thing today. It decides whether the provider brings credentials or expects
+// ours, it is now reached for any app in the catalogue rather than six that were
+// checked by hand, and what it produces sticks: findAuthConfig above will hand
+// back whatever this made for as long as the project exists. A default worth
+// depending on is a default worth writing down -- the same reason sessionReq
+// spells out every field it could have inherited.
 func (c *Client) createAuthConfig(ctx context.Context, slug string) (string, error) {
-	body := map[string]any{"toolkit": map[string]string{"slug": slug}}
+	body := map[string]any{
+		"toolkit":     map[string]string{"slug": slug},
+		"auth_config": map[string]any{"type": "use_composio_managed_auth"},
+	}
 	var made authConfigResp
 	if err := c.send(ctx, http.MethodPost, "/auth_configs", body, &made); err != nil {
 		return "", err

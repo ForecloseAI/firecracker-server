@@ -7,7 +7,9 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -209,7 +211,7 @@ func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
 	}
 	want := Toolkit{Slug: "gmail", Name: "Gmail",
 		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service"}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v", got)
 	}
 }
@@ -227,7 +229,8 @@ func TestAuthConfigLooksUpByTheSingularSlug(t *testing.T) {
 		switch {
 		case r.URL.Path == "/auth_configs" && r.Method == http.MethodGet:
 			gotQuery = r.URL.RawQuery
-			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"}}]}`))
+			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"},
+				"is_composio_managed":true,"status":"ENABLED"}]}`))
 		default:
 			json.NewEncoder(w).Encode(map[string]any{
 				"redirect_url": "https://connect.composio.dev/link/lk_1",
@@ -298,7 +301,8 @@ func TestAuthConfigIsCreatedWhenTheAppHasNoneYet(t *testing.T) {
 func TestALinkWithNoURLIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/auth_configs" && r.Method == http.MethodGet {
-			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"}}]}`))
+			w.Write([]byte(`{"items":[{"id":"ac_1","toolkit":{"slug":"gmail"},
+				"is_composio_managed":true,"status":"ENABLED"}]}`))
 			return
 		}
 		w.Write([]byte(`{"expires_at":"2099-01-01T00:00:00Z"}`))
@@ -355,9 +359,11 @@ func TestCapabilitiesAsksForEveryToolAndClassifiesTheRows(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
 		w.Write([]byte(`{"items":[
-			{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"]},
-			{"slug":"GMAIL_SEND_EMAIL","tags":["openWorldHint","createHint"]},
-			{"slug":"GMAIL_DELETE_MESSAGE","tags":["destructiveHint"]}]}`))
+			{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"],"toolkit":{"slug":"gmail"}},
+			{"slug":"GMAIL_SEND_EMAIL","tags":["openWorldHint","createHint"],"toolkit":{"slug":"gmail"}},
+			{"slug":"GMAIL_OLD_SEARCH","tags":["readOnlyHint"],"toolkit":{"slug":"gmail"},
+				"is_deprecated":true},
+			{"slug":"GMAIL_DELETE_MESSAGE","tags":["destructiveHint"],"toolkit":{"slug":"gmail"}}]}`))
 	}))
 	defer srv.Close()
 
@@ -371,6 +377,9 @@ func TestCapabilitiesAsksForEveryToolAndClassifiesTheRows(t *testing.T) {
 	if !strings.Contains(gotQuery, "toolkit_slug=gmail") {
 		t.Errorf("query %q does not name the app", gotQuery)
 	}
+	// The deprecated row is deliberately absent rather than classified: absent
+	// resolves to asking, and a withdrawn action that still reads as safe is one
+	// nobody chose to keep running.
 	want := map[string]string{
 		"GMAIL_FETCH_EMAILS": CapRead, "GMAIL_SEND_EMAIL": CapWrite,
 		"GMAIL_DELETE_MESSAGE": CapDelete,
@@ -380,13 +389,38 @@ func TestCapabilitiesAsksForEveryToolAndClassifiesTheRows(t *testing.T) {
 	}
 }
 
+// THE test for the trap this API has already sprung twice -- user_id against
+// user_ids, toolkit against toolkit_slug. A filter it does not recognise is
+// IGNORED rather than refused, and the answer to "what can gmail do" quietly
+// becomes the whole catalogue: classified, cached for an hour and pushed to a
+// machine as the set of actions that may run unasked.
+//
+// The whole page is refused rather than filtered down to the rows that match,
+// because those rows would then be cached as a complete answer for an app whose
+// real tools never arrived.
+func TestAPageAboutAnotherAppIsRefusedRatherThanFiltered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[
+			{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"],"toolkit":{"slug":"gmail"}},
+			{"slug":"JIRA_DELETE_ISSUE","tags":["readOnlyHint"],"toolkit":{"slug":"jira"}}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "gmail")
+	if err == nil {
+		t.Fatalf("kept %v from a page carrying another app's tools", got)
+	}
+	if !strings.Contains(err.Error(), "jira") {
+		t.Errorf("the error does not name what came back instead: %v", err)
+	}
+}
+
 // A full page is refused rather than kept: the tools it did not return would be
 // absent from the map, and absent resolves to asking about everything.
 func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"items":[` + strings.Repeat(
-			`{"slug":"X","tags":["readOnlyHint"]},`, toolPage-1) +
-			`{"slug":"X","tags":["readOnlyHint"]}]}`))
+			`{"slug":"X","tags":["readOnlyHint"],"toolkit":{"slug":"outlook"}},`, toolPage-1) +
+			`{"slug":"X","tags":["readOnlyHint"],"toolkit":{"slug":"outlook"}}]}`))
 	}))
 	defer srv.Close()
 	if got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook"); err == nil {
@@ -404,14 +438,15 @@ func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
 // kept, so the toolkit that outgrew the call reports an outage rather than the
 // named paging error written for it. Never cached, so it re-fans-out forever.
 func TestARealSizedPageIsDecodedRatherThanTruncated(t *testing.T) {
-	row := `{"slug":"OUTLOOK_%d","tags":["readOnlyHint"],"description":"` +
-		strings.Repeat("x", 2<<10) + `"},`
+	row := `{"slug":"OUTLOOK_%d","tags":["readOnlyHint"],"toolkit":{"slug":"outlook"},` +
+		`"description":"` + strings.Repeat("x", 2<<10) + `"},`
 	var body strings.Builder
 	body.WriteString(`{"items":[`)
 	for i := range toolPage - 2 {
 		body.WriteString(fmt.Sprintf(row, i))
 	}
-	body.WriteString(`{"slug":"OUTLOOK_LAST","tags":["destructiveHint"]}]}`)
+	body.WriteString(`{"slug":"OUTLOOK_LAST","tags":["destructiveHint"],` +
+		`"toolkit":{"slug":"outlook"}}]}`)
 	if body.Len() < 1<<20 {
 		t.Fatalf("fixture is %d bytes, under the ceiling it exists to exceed", body.Len())
 	}
@@ -429,5 +464,180 @@ func TestARealSizedPageIsDecodedRatherThanTruncated(t *testing.T) {
 	}
 	if got["OUTLOOK_LAST"] != CapDelete {
 		t.Errorf("the last row of a big page was lost or misread: %q", got["OUTLOOK_LAST"])
+	}
+}
+
+// The catalogue is walked to its end, and the rows come back in the provider's
+// own usage order rather than re-sorted here -- a screen showing the first few
+// of anything should show apps people actually connect.
+func TestTheCatalogueIsWalkedToItsEnd(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("cursor") == "" {
+			w.Write([]byte(`{"items":[{"slug":"gmail","name":"Gmail",
+				"composio_managed_auth_schemes":["oauth2"],
+				"meta":{"logo":"https://l/gmail","description":"Email",
+					"tools_count":102,"categories":[{"id":"productivity","name":"Productivity"}]}}],
+				"next_cursor":"c2"}`))
+			return
+		}
+		w.Write([]byte(`{"items":[{"slug":"jira","name":"Jira",
+			"composio_managed_auth_schemes":["oauth2"],"meta":{"tools_count":40}}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Toolkits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Slug != "gmail" || got[1].Slug != "jira" {
+		t.Fatalf("got %+v, want both pages in the order they arrived", got)
+	}
+	if got[0].Tools != 102 || len(got[0].Categories) != 1 ||
+		got[0].Categories[0].ID != "productivity" {
+		t.Errorf("the grouping and the size did not survive the decode: %+v", got[0])
+	}
+	if len(queries) != 2 || !strings.Contains(queries[0], "sort_by=usage") {
+		t.Errorf("queries were %q", queries)
+	}
+	if !strings.Contains(queries[1], "cursor=c2") {
+		t.Errorf("the second page did not carry the cursor: %q", queries[1])
+	}
+}
+
+// A cursor that never empties is a provider bug, and the pages that did arrive
+// are not an answer: the caller caches what it is given, so a truncated
+// catalogue would become an hour of apps nobody can find.
+func TestACatalogueThatNeverEndsIsRefusedRatherThanTruncated(t *testing.T) {
+	var pages atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		w.Write([]byte(`{"items":[{"slug":"gmail"}],"next_cursor":"always"}`))
+	}))
+	defer srv.Close()
+	if got, err := New("k", srv.URL).Toolkits(context.Background()); err == nil {
+		t.Fatalf("kept %d rows off a walk that never ended", len(got))
+	}
+	if n := pages.Load(); n != toolkitPages {
+		t.Errorf("asked %d times, want the walk to stop at %d", n, toolkitPages)
+	}
+}
+
+// Three ways an app cannot be offered, and they are three different things
+// going wrong -- so each is pinned rather than left to whichever the filter
+// happens to catch first.
+func TestOnlyAnAppWeCanActuallyPutSomebodyThroughIsConnectable(t *testing.T) {
+	for name, c := range map[string]struct {
+		kit  Toolkit
+		want bool
+	}{
+		"a managed app":            {Toolkit{ManagedAuth: true}, true},
+		"nothing to authorise":     {Toolkit{ManagedAuth: true, NoAuth: true}, false},
+		"no credentials of theirs": {Toolkit{}, false},
+		"on its way out":           {Toolkit{ManagedAuth: true, Deprecated: true}, false},
+	} {
+		if got := c.kit.Connectable(); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+}
+
+// The deprecated block is ABSENT for a healthy app rather than false, so what
+// marks one is the field being there at all.
+func TestAWithdrawnAppIsRecognisedByTheBlockBeingPresent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"slug":"oldapp","name":"Old App",
+			"composio_managed_auth_schemes":["oauth2"],
+			"deprecated":{"version":"20250905_00"}}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Toolkit(context.Background(), "oldapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Deprecated || got.Connectable() {
+		t.Errorf("got %+v, which is still on offer", got)
+	}
+}
+
+// THE test for the config lookup, and it is about the one piece of provider
+// state this project creates that outlives the request making it.
+//
+// A custom-typed config with no credentials behind it, or one somebody disabled,
+// mints links that fail forever -- and a lookup taking the first row back would
+// keep finding it. So both are asked for as filters AND re-checked on the rows,
+// for the reason toolkit_slug is: an unrecognised filter here is ignored rather
+// than refused.
+func TestOnlyALiveManagedConfigIsReused(t *testing.T) {
+	var gotQuery, created string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth_configs" && r.Method == http.MethodGet:
+			gotQuery = r.URL.RawQuery
+			// What an ignored is_composio_managed filter looks like: rows the
+			// project holds for this app that nobody can connect through.
+			w.Write([]byte(`{"items":[
+				{"id":"ac_custom","toolkit":{"slug":"gmail"},
+					"is_composio_managed":false,"status":"ENABLED"},
+				{"id":"ac_off","toolkit":{"slug":"gmail"},
+					"is_composio_managed":true,"status":"DISABLED"}]}`))
+		case r.URL.Path == "/auth_configs" && r.Method == http.MethodPost:
+			var body struct {
+				AuthConfig struct {
+					Type string `json:"type"`
+				} `json:"auth_config"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			created = body.AuthConfig.Type
+			w.Write([]byte(`{"auth_config":{"id":"ac_new"}}`))
+		default:
+			var body struct {
+				AuthConfigID string `json:"auth_config_id"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			if body.AuthConfigID != "ac_new" {
+				t.Errorf("minted against %q, a config nobody can connect through",
+					body.AuthConfigID)
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"redirect_url": "https://connect.composio.dev/link/lk_1",
+				"expires_at":   "2099-01-01T00:00:00Z"})
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := New("k", srv.URL).Link(context.Background(), "u", "gmail", "https://back"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "is_composio_managed=true") {
+		t.Errorf("the lookup did not ask for managed configs: %q", gotQuery)
+	}
+	// Sent rather than left to default. It decides whether the provider brings
+	// credentials or expects ours, it is now reached for any app in the
+	// catalogue, and what it makes sticks for the life of the project.
+	if created != "use_composio_managed_auth" {
+		t.Errorf("created a %q config", created)
+	}
+}
+
+// The groupings are the provider's, so nothing about them is written down here
+// either -- what a category is called is copy, the same as an app's blurb.
+func TestCategoriesComeBackAsTheProviderNamesThem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/toolkits/categories" {
+			t.Errorf("asked for %q", r.URL.Path)
+		}
+		w.Write([]byte(`{"items":[{"id":"productivity","name":"Productivity"},
+			{"id":"crm","name":"CRM"}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Categories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Category{{ID: "productivity", Name: "Productivity"}, {ID: "crm", Name: "CRM"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v", got)
 	}
 }
