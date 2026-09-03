@@ -25,8 +25,9 @@ const appReadsTTL = time.Hour
 // 30-second cadence would aim that at a provider already having a bad day.
 const appReadsRetry = 5 * time.Minute
 
-// appReads is which of the featured apps' actions only read, as the PROVIDER
-// annotates them. Nothing here is a list this project maintains.
+// appReads is which of the featured apps' actions only read: the PROVIDER's
+// annotations, less the handful we reject (see deniedReads). No catalogue of our
+// own -- 910 tools we would have to keep in step with somebody else's release.
 //
 // A separate cache entry from appCatalog, sharing its fan-out. Separate because
 // the failures are not worth the same -- a blurb that will not load costs an app
@@ -96,5 +97,27 @@ func (a *appReads) keep(held []string) time.Time {
 // nothing, so its tools fall outside the set and ask.
 func (a *appReads) fetchAll(ctx context.Context) ([]string, bool) {
 	out, whole := fanOut(ctx, a.fetch, func(string) []string { return nil })
-	return slices.Concat(out...), whole
+	// Subtracted before the answer is cached, so what a machine is handed is
+	// already the answer and no later consumer can forget to.
+	return slices.DeleteFunc(slices.Concat(out...), denied), whole
+}
+
+// deniedReads are actions the provider calls read-only and we do not.
+//
+// GMAIL_CREATE_PROMPT_POST is tagged readOnlyHint, carries not even
+// openWorldHint, and posts text to an unrelated third party -- MCP's "annotations
+// are untrusted hints" with a name on it. Host-side so a disagreement is fixed by
+// deploying rather than rebuilding a rootfs. Growing past a handful would mean
+// the annotations have drifted, which is worth saying rather than curating around.
+var deniedReads = map[string]bool{"GMAIL_CREATE_PROMPT_POST": true}
+
+// denied reports an action we will not pass on as read-only, saying so when it
+// fires. Silence here would leave nobody able to tell whether the provider still
+// annotates it the way we disagreed with, or quietly stopped.
+func denied(slug string) bool {
+	if !deniedReads[slug] {
+		return false
+	}
+	log.Printf("chat: %s is annotated read-only and we do not accept it", slug)
+	return true
 }

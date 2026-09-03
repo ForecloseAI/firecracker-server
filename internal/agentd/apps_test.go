@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"cracked/internal/agentapi"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,7 +25,7 @@ func fakeApps(t *testing.T, tools ...*mcpsdk.Tool) *appsServer {
 	for _, tool := range tools {
 		srv.AddTool(tool, cannedResult(tool))
 	}
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	a.dial = func(ctx context.Context, _ string) (*mcpsdk.ClientSession, error) {
 		return connectInMemory(ctx, srv)
 	}
@@ -33,7 +36,7 @@ func fakeApps(t *testing.T, tools ...*mcpsdk.Tool) *appsServer {
 // every VM until the host pushes one, and it is what keeps this feature off
 // without a flag of its own.
 func TestNoSessionMeansNoTools(t *testing.T) {
-	tools, err := newAppsServer("").Tools(context.Background(), toolDeps{})
+	tools, err := newAppsServer(agentapi.Apps{SessionURL: ""}).Tools(context.Background(), toolDeps{})
 	if err != nil {
 		t.Fatalf("an unconfigured machine errored: %v", err)
 	}
@@ -114,7 +117,7 @@ func TestSetURLToTheSameSessionKeepsIt(t *testing.T) {
 func TestARepointDiscardsStaleListingState(t *testing.T) {
 	const oldURL = "https://backend.composio.dev/mcp/old"
 	const newURL = "https://backend.composio.dev/mcp/new"
-	a := newAppsServer(oldURL)
+	a := newAppsServer(agentapi.Apps{SessionURL: oldURL})
 	a.SetURL(newURL)
 
 	if a.store(oldURL, []*mcpsdk.Tool{namedTool("STALE", "stale")}) {
@@ -131,29 +134,142 @@ func TestARepointDiscardsStaleListingState(t *testing.T) {
 	}
 }
 
-// Connected-app calls are NOT gated today, deliberately: the permission layer
-// is still to be written and a name-shaped guess at it let writes through while
-// reading as enforcement. This test pins that state so the day somebody wires a
-// hook in, it fails and reminds them to say so here.
-func TestConnectedAppCallsAreNotGatedYet(t *testing.T) {
+// gated stands a session up whose provider calls only `reads` safe.
+func gated(t *testing.T, reads ...string) (anthropic.BetaTool, *Gate) {
+	t.Helper()
 	a := fakeApps(t, namedTool("COMPOSIO_MULTI_EXECUTE_TOOL", "sent"))
-	gate := NewGate(mustLog(t), NewInteractions(), t.TempDir())
-	tools, err := a.Tools(context.Background(), toolDeps{gate: gate})
+	a.SetReadOnly(reads)
+	g := NewGate(mustLog(t), NewInteractions(), t.TempDir())
+	tools, err := a.Tools(context.Background(), toolDeps{gate: g})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tools[0].(*mcpTool).before; got != nil {
-		t.Fatal("something is gating connected-app calls; update this test and the docs")
+	return tools[0], g
+}
+
+// answered runs one batch, settling every card with d, and reports what the
+// provider said and what the person was shown. Check parks the caller, so the
+// call runs in the background and the answers come from here.
+func answered(t *testing.T, tool anthropic.BetaTool, g *Gate, d Decision, body string) (string, []Event) {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() {
+		out, _ := tool.Execute(context.Background(), json.RawMessage(body))
+		done <- blockText(out) // Execute never returns a Go error; see its doc
+	}()
+	// Ticked, not spun: cards() parses the log off disk on every turn.
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	fail := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-done:
+			return got, cards(t, g)
+		case <-fail:
+			t.Fatal("a card was raised that nothing answered")
+		case <-tick.C:
+			for _, e := range cards(t, g) {
+				g.Resolve(e.ApprovalID, d) // false when already answered
+			}
+		}
 	}
-	// A send reaches the provider with nobody asked. That is the current contract.
-	args, _ := json.Marshal(map[string]any{"tools": []any{
-		map[string]any{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": map[string]any{}}}})
-	out, err := tools[0].Execute(context.Background(), args)
+}
+
+// cards is every approval this agent has been shown.
+func cards(t *testing.T, g *Gate) []Event {
+	t.Helper()
+	events, err := g.log.ReadAll()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read the log: %v", err)
 	}
-	if got := blockText(out); !strings.Contains(got, "sent") {
-		t.Errorf("the call did not reach the provider: %q", got)
+	return slices.DeleteFunc(events, func(e Event) bool { return e.Type != "approval_required" })
+}
+
+// THE test for this file. A refused send must not reach the provider at all. The
+// fake answers "sent", so the absence of that word is the proof.
+func TestARefusedSendNeverReachesTheProvider(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "deny", Reason: "not that one"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if strings.Contains(got, "sent") {
+		t.Fatalf("the send reached the provider anyway: %q", got)
+	}
+	if !strings.Contains(got, "declined") {
+		t.Errorf("the model was told %q, which does not read as a refusal", got)
+	}
+	if len(shown) != 1 {
+		t.Fatalf("%d cards, want exactly one", len(shown))
+	}
+}
+
+// And the other half: approving one lets it through, or the gate is just a wall.
+func TestAnApprovedSendReachesTheProvider(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if !strings.Contains(got, "sent") {
+		t.Errorf("an approved send did not reach the provider: %q", got)
+	}
+	if len(shown) != 1 {
+		t.Errorf("%d cards, want exactly one", len(shown))
+	}
+}
+
+// A read the provider calls read-only runs silently -- the half that makes the
+// other half worth reading, since a gate that asks about everything is ignored.
+func TestAReadTheProviderCallsSafeAsksNobody(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS", "SLACK_FIND_CHANNELS")
+	got, shown := answered(t, tool, g, Decision{Decision: "deny"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"SLACK_FIND_CHANNELS","arguments":{}}]}`)
+	if len(shown) != 0 {
+		t.Fatalf("reads raised %d cards", len(shown))
+	}
+	if !strings.Contains(got, "sent") {
+		t.Errorf("the reads did not reach the provider: %q", got)
+	}
+}
+
+// A batch mixes freely, so the gate must pick the send out and ask about it.
+func TestAMixedBatchAsksOnlyAboutTheSend(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if len(shown) != 1 {
+		t.Fatalf("%d cards, want one -- only the send needed a person", len(shown))
+	}
+	// Keyed on the ACTION, not the meta-tool. See permit for why that matters.
+	if shown[0].Tool != "GMAIL_SEND_EMAIL" {
+		t.Errorf("the card is about %q", shown[0].Tool)
+	}
+	// And it names who the mail is going to.
+	if !strings.Contains(shown[0].Preview, "dave@example.com") {
+		t.Errorf("the card does not say who it is to: %q", shown[0].Preview)
+	}
+}
+
+// With no set at all -- a push that never landed, a provider having a bad day --
+// every action asks.
+func TestWithNoReadOnlySetEvenAReadAsks(t *testing.T) {
+	tool, g := gated(t)
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}}]}`)
+	if len(shown) != 1 {
+		t.Errorf("%d cards for a read with no set; absent must mean ask", len(shown))
+	}
+}
+
+// A batch nothing can read is refused without asking and without running: there
+// is nothing to put on a card.
+func TestAnUnreadableBatchIsRefusedWithoutAsking(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, shown := answered(t, tool, g, Decision{Decision: "allow"}, `{"tools":"GMAIL_SEND_EMAIL"}`)
+	if strings.Contains(got, "sent") {
+		t.Fatalf("an unreadable batch reached the provider: %q", got)
+	}
+	if len(shown) != 0 {
+		t.Errorf("%d cards for a batch nothing could read", len(shown))
 	}
 }
 
@@ -161,7 +277,7 @@ func TestConnectedAppCallsAreNotGatedYet(t *testing.T) {
 // a person's message, so without this a provider having a bad ten minutes would
 // add the full dial timeout to every message sent to an evicted agent.
 func TestAFailedDialIsNotRetriedImmediately(t *testing.T) {
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	dials := 0
 	a.dial = func(context.Context, string) (*mcpsdk.ClientSession, error) {
 		dials++
@@ -200,7 +316,7 @@ func TestTheCooldownExpires(t *testing.T) {
 // could read the capability straight out of its own context.
 func TestTheSessionURLNeverTravelsInAnError(t *testing.T) {
 	const url = "https://backend.composio.dev/mcp/sess_SECRET_CAPABILITY"
-	a := newAppsServer(url)
+	a := newAppsServer(agentapi.Apps{SessionURL: url})
 	a.dial = func(_ context.Context, endpoint string) (*mcpsdk.ClientSession, error) {
 		// Shaped like what the transport really returns.
 		return nil, fmt.Errorf(`Post %q: dial tcp: lookup failed`, endpoint)
@@ -254,7 +370,7 @@ func blockText(blocks []anthropic.BetaToolResultBlockParamContentUnion) string {
 // because its dial is a local exec -- blocked a live agent's tool call, the
 // error path reporting the failure, and the host's own PUT /apps.
 func TestADialInFlightBlocksNobody(t *testing.T) {
-	a := newAppsServer("https://backend.composio.dev/mcp/test")
+	a := newAppsServer(agentapi.Apps{SessionURL: "https://backend.composio.dev/mcp/test"})
 	dialing, release := make(chan struct{}), make(chan struct{})
 	a.dial = func(ctx context.Context, _ string) (*mcpsdk.ClientSession, error) {
 		close(dialing)
@@ -297,5 +413,70 @@ func TestRedactionKeepsTheCause(t *testing.T) {
 	plain := fmt.Errorf("dial: %w", context.Canceled)
 	if got := redactURL(plain, url); !errors.Is(got, context.Canceled) {
 		t.Error("an unredacted error lost its cause")
+	}
+}
+
+// The same action twice in one batch is two actions. A map keyed on slug would
+// collapse them, so one card would be answered and the provider would run both
+// sends -- to different people.
+func TestTheSameActionTwiceIsAskedAboutTwice(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	_, shown := answered(t, tool, g, Decision{Decision: "allow"},
+		`{"tools":[{"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"someone@else.com"}}]}`)
+	if len(shown) != 2 {
+		t.Fatalf("%d cards for two sends", len(shown))
+	}
+	if shown[0].Preview == shown[1].Preview {
+		t.Error("both cards describe the same send, so one recipient was lost")
+	}
+}
+
+// A refusal takes the whole batch with it, reads included. The provider runs a
+// batch as one request, so there is no half of it to run -- and the safe
+// direction is that nothing does.
+func TestARefusalAbortsTheWholeBatch(t *testing.T) {
+	tool, g := gated(t, "GMAIL_FETCH_EMAILS")
+	got, _ := answered(t, tool, g, Decision{Decision: "deny"},
+		`{"tools":[{"tool_slug":"GMAIL_FETCH_EMAILS","arguments":{}},
+		           {"tool_slug":"GMAIL_SEND_EMAIL","arguments":{"to":"dave@example.com"}}]}`)
+	if strings.Contains(got, "sent") {
+		t.Error("the batch reached the provider after one of its actions was refused")
+	}
+}
+
+// An action with no arguments adds no detail line. The host renders the slug as
+// the card's title, so a preview repeating it would spend the one line a person
+// reads on something already above it.
+func TestAnActionWithNoArgumentsHasNoPreview(t *testing.T) {
+	if got := previewOf(appCall{Slug: "GMAIL_ARCHIVE_ALL"}); got != "" {
+		t.Errorf("preview is %q, which the card already says as its title", got)
+	}
+	if got := previewOf(appCall{Slug: "X", Args: map[string]any{"to": "d@e.com"}}); got != `{"to":"d@e.com"}` {
+		t.Errorf("preview is %q", got)
+	}
+}
+
+// A long argument is cut without splitting a character, and says it was cut.
+func TestALongArgumentIsClippedOnARuneBoundary(t *testing.T) {
+	got := previewOf(appCall{Slug: "X", Args: map[string]any{"body": strings.Repeat("é", 400)}})
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("a long body was not clipped: %d chars", len([]rune(got)))
+	}
+	if strings.ContainsRune(got, '�') {
+		t.Error("the cut landed inside a character")
+	}
+}
+
+// A long body must not consume the bounded card before the person can see the
+// destination. json.Marshal's alphabetical map ordering used to do exactly
+// that because body sorts before recipient_email.
+func TestALongArgumentDoesNotHideTheRecipient(t *testing.T) {
+	got := previewOf(appCall{Slug: "GMAIL_SEND_EMAIL", Args: map[string]any{
+		"body":            strings.Repeat("x", previewCap),
+		"recipient_email": "dave@example.com",
+	}})
+	if !strings.Contains(got, "dave@example.com") {
+		t.Errorf("the bounded preview hid its recipient: %q", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	neturl "net/url"
 	"os"
 	"path/filepath"
@@ -175,12 +176,74 @@ type appsServer struct {
 	// and handed to the second would raise that agent's approvals in someone
 	// else's transcript.
 	listed []*mcpsdk.Tool
+
+	// reads is the actions the provider annotates as only reading, pushed by the
+	// host rather than compiled in. Absent means ask -- see agentapi.Apps.
+	reads map[string]bool
 }
 
 // newAppsServer prepares the manager. It starts nothing, and a blank url is the
 // ordinary state of a machine whose host has no integration provider configured.
-func newAppsServer(url string) *appsServer {
-	return &appsServer{url: url, dial: dialApps}
+//
+// Takes the whole pushed record rather than the URL alone: the read-only set is
+// on the same disk and a machine that came back without it would ask about every
+// read until its next push.
+func newAppsServer(a agentapi.Apps) *appsServer {
+	s := &appsServer{url: a.SessionURL, dial: dialApps}
+	s.SetReadOnly(a.ReadOnly)
+	return s
+}
+
+// SetReadOnly installs the actions a person need not be asked about.
+//
+// Separate from SetURL, which returns early when the session has not moved --
+// and a re-push carrying a fresher set on the SAME session is the ordinary case,
+// the one surfaceChanged is pinned to allow. Folded together, the update this
+// design exists to deliver is the one that would be dropped. SetURL does not
+// clear it either: the set is the provider's catalogue, not this session.
+func (s *appsServer) SetReadOnly(slugs []string) {
+	held := make(map[string]bool, len(slugs))
+	for _, slug := range slugs {
+		held[slug] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads = held
+	if len(held) == 0 && s.url != "" {
+		// Once here rather than per call. Such a machine asks about every read,
+		// which looks like a cautious gate rather than a push that never landed.
+		log.Printf("agentd: session but no read-only actions; every app call will ask")
+	}
+}
+
+// SetConfig installs a pushed URL and policy as one state transition. In
+// particular, no call can observe a refreshed session URL while still using
+// the preceding session's read-only classification.
+func (s *appsServer) SetConfig(url string, slugs []string) {
+	held := make(map[string]bool, len(slugs))
+	for _, slug := range slugs {
+		held[slug] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads = held
+	if url != s.url {
+		s.url, s.listed, s.failedAt = url, nil, time.Time{}
+		if s.sess != nil {
+			s.sess.Close()
+			s.sess = nil
+		}
+	}
+	if len(held) == 0 && url != "" {
+		log.Printf("agentd: session but no read-only actions; every app call will ask")
+	}
+}
+
+// reading reports whether the provider says this action only reads.
+func (s *appsServer) reading(slug string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads[slug]
 }
 
 // SetURL points the server at a session, dropping anything held for the old one.
@@ -217,12 +280,46 @@ func (s *appsServer) Tools(ctx context.Context, d toolDeps) ([]anthropic.BetaToo
 	if listed == nil {
 		return nil, nil // this machine has no session, which is not an error
 	}
-	// No hook: connected-app calls are NOT gated. The permission layer that
-	// decides which of them need a person is deliberately still to be written,
-	// and the name-shaped guess that stood in for it was worse than nothing --
-	// it read as enforcement while letting GITHUB_CREATE_A_CHECK_SUITE through
-	// for containing "CHECK". beforeHook is the seam it plugs into.
-	return wrapAll(listed, s, appsNoun, nil, d), nil
+	return wrapAll(listed, s, appsNoun, s.hook(d), d), nil
+}
+
+// hook asks a person before any action the provider does not call read-only.
+//
+// Closed over ONE agent's deps, sound because the wrapping is per agent even
+// though the listing is cached -- see the note on listed. Nothing here reads a
+// tool NAME to decide; the classifier that did was deleted from this package.
+func (s *appsServer) hook(d toolDeps) beforeHook {
+	return func(ctx context.Context, name string, args map[string]any) error {
+		calls, err := callsIn(name, args)
+		if err != nil {
+			return err
+		}
+		for _, c := range calls {
+			if err := s.permit(ctx, d.gate, c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// permit decides one action, asking a person and waiting when the provider does
+// not call it read-only. It runs nothing: the batch goes out afterwards, whole.
+//
+// So a refusal anywhere aborts ALL of it, reads included -- the call never
+// reaches the provider. That is the safe direction and the only coherent one,
+// since the provider executes the batch as one request and cannot be asked for
+// part of it.
+//
+// Asked per action rather than per call, so every card names one thing and every
+// grant is scoped to one slug. The key handed to Check is the SLUG and never the
+// meta-tool: grants key on that string, so passing the wrapper would make one tap
+// buy an hour of every action in every connected app.
+func (s *appsServer) permit(ctx context.Context, g *Gate, c appCall) error {
+	if s.reading(c.Slug) {
+		return nil
+	}
+	return g.Check(ctx, c.Slug, previewOf(c), c.Args)
 }
 
 // listing returns the session's tool list, fetching it once if it is cold.

@@ -95,3 +95,23 @@ func TestAnEmptyAnswerIsStillAnAnswer(t *testing.T) {
 		t.Errorf("re-fetched %d times for an answer it already had", calls.Load())
 	}
 }
+
+// THE test for the overlay. GMAIL_CREATE_PROMPT_POST is tagged readOnlyHint by
+// the provider and posts text to an unrelated third party, so it must never
+// reach a machine as safe -- and asserted on what is PUSHED, not on what the
+// fetch returned, or the subtraction can be reintroduced one layer lower.
+func TestAnActionWeDisagreeAboutIsNeverPushedAsSafe(t *testing.T) {
+	a, _ := stubReads(func(slug string) ([]string, error) {
+		if slug == "gmail" {
+			return []string{"GMAIL_FETCH_EMAILS", "GMAIL_CREATE_PROMPT_POST"}, nil
+		}
+		return []string{slug + "_GET"}, nil
+	})
+	got, _ := a.slugs(context.Background())
+	if slices.Contains(got, "GMAIL_CREATE_PROMPT_POST") {
+		t.Error("a tool we do not accept as read-only was pushed as read-only")
+	}
+	if !slices.Contains(got, "GMAIL_FETCH_EMAILS") {
+		t.Error("the overlay took a genuine read with it")
+	}
+}
