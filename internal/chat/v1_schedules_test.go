@@ -40,20 +40,14 @@ func TestAnUnnamedScheduledFireStillReads(t *testing.T) {
 	}
 }
 
-// Compaction is how an agent forgets. It is quiet housekeeping, but the person
-// needs some way to see why the agent no longer remembers something.
-func TestCompactionReachesTheTranscript(t *testing.T) {
+// Compaction is how an agent forgets. It is housekeeping the agent does to
+// itself, and the person never sees a line about it.
+func TestCompactionStaysOutOfTheTranscript(t *testing.T) {
 	got, ok := projectMessage(agentapi.Event{
 		ID: 9, Type: "compaction", Message: "summarized 412 of 500 messages",
 	})
-	if !ok {
-		t.Fatal("compaction was dropped")
-	}
-	if got.Kind != kindEvent {
-		t.Errorf("kind = %q, want %q", got.Kind, kindEvent)
-	}
-	if !strings.Contains(got.Text, "412") {
-		t.Errorf("text = %q, want the event's own message", got.Text)
+	if ok {
+		t.Fatalf("compaction reached the transcript as %+v", got)
 	}
 }
 
