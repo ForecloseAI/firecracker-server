@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"cracked/internal/agent"
@@ -36,9 +37,8 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, user st
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	cl, err := guestOf(r.Context(), s, user)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
 		return
 	}
 	s.deliver(w, cl, r.PathValue("id"), r.PathValue("messageId"), req)
@@ -147,17 +147,8 @@ func allowBody(ui *AskUI, answer string) (map[string]any, bool) {
 		// agent "no" on behalf of someone who meant to say something.
 		return map[string]any{"answer": answer}, answer != ""
 	case askChoice:
-		return map[string]any{"answer": answer}, offered(ui, answer)
+		// Only an answer the person was actually offered.
+		return map[string]any{"answer": answer}, slices.Contains(ui.Options, answer)
 	}
 	return nil, false
-}
-
-// offered reports whether an answer is one the person was actually given.
-func offered(ui *AskUI, answer string) bool {
-	for _, o := range ui.Options {
-		if o == answer {
-			return true
-		}
-	}
-	return false
 }

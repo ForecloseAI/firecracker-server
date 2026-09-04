@@ -255,9 +255,11 @@ func TestHandoffAskCarriesTheURL(t *testing.T) {
 	}
 }
 
-// Events the app has no way to render must not reach it.
+// Events the app has no way to render must not reach it. The default arm is
+// what keeps this surface small: a guest that learns a new event type must not
+// start pushing it at an app that cannot draw it.
 func TestNoiseIsDropped(t *testing.T) {
-	for _, typ := range []string{"tool_use", "usage", "ready", "memory", "turn_complete"} {
+	for _, typ := range []string{"tool_use", "usage", "ready", "memory", "state", "turn_complete"} {
 		if _, ok := projectMessage(ev(1, typ)); ok {
 			t.Errorf("%s reached the client", typ)
 		}

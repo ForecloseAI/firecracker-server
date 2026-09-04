@@ -40,7 +40,7 @@ func attachBrowser(d *toolDeps, dir string, team *Supervisor) error {
 //
 // The context is made here rather than threaded through Tools: this is a
 // one-off at agent construction, and every caller of Tools would otherwise grow
-// a parameter for a path five of the six shipped profiles never take.
+// a parameter for a path four of the six shipped profiles never take.
 func browserTools(d toolDeps) ([]anthropic.BetaTool, error) {
 	if !d.browser || d.chrome == nil {
 		return nil, nil

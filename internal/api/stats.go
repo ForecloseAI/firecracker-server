@@ -107,13 +107,8 @@ func (s *Server) probeGuest(row *vmStats, id string) {
 	}
 }
 
-// roster is who lives on this machine, fetched on demand.
-//
-// This used to return the BOSS's event tail and nothing else, so a specialist
-// doing the actual work was invisible in the peek-inside view. The client now
-// picks an agent and reads its log through the guest proxy, which no longer
-// starts an agent to serve a poll. Errors degrade to an empty list: an
-// unreachable guest is already reported by the agent column.
+// roster is who lives on this machine, fetched on demand. Errors degrade to an
+// empty list: an unreachable guest is already reported by the agent column.
 func roster(v *vm.VM) []agentapi.Status {
 	out, err := agent.New(v.GuestIP, vm.AgentPort).Agents()
 	if err != nil {

@@ -26,7 +26,6 @@ type Server struct {
 	apps     AppsStore
 	// catalog is the featured apps' copy, shared by every person on the fleet.
 	catalog *appCatalog
-	// reads is which of their actions only read, shared the same way.
 	// kinds is what kind of thing each connected-app action is, shared the same
 	// way. It is what a person's policy is resolved against. Not `caps`, which
 	// this struct already uses for the VNC grants.

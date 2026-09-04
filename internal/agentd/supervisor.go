@@ -82,7 +82,7 @@ var ChromeURL = "http://127.0.0.1:9222"
 
 // Browser is the machine's shared chrome-devtools-mcp server.
 //
-// Constructed with the supervisor but started on first use, because five of the
+// Constructed with the supervisor but started on first use, because four of the
 // six shipped profiles never open a page and a VM that never browses should
 // never fork node.
 func (s *Supervisor) Browser() *browserServer { return s.browser }

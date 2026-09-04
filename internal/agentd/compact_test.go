@@ -82,12 +82,7 @@ func TestCutPointReportsWhenThereIsNoSafeCut(t *testing.T) {
 // The API requires the first message to be a user message and the roles to
 // alternate, so the summary cannot simply replace the prefix on its own.
 func TestCompactionLeavesAWellFormedHistory(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "the person asked about deploys", nil)
-
-	msgs := longHistory(20)
-	a.messages = msgs
-	a.lastInput = compactAtTokens + 1
+	a, msgs := primed(t, "the person asked about deploys", nil)
 	a.compactIfNeeded(context.Background())
 
 	got := a.Messages()
@@ -108,12 +103,7 @@ func TestCompactionLeavesAWellFormedHistory(t *testing.T) {
 // Everything after the cut has to survive untouched. The recent turns are the
 // thread the agent is in the middle of, and a summary of those is a regression.
 func TestCompactionKeepsTheRecentTailVerbatim(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "earlier work", nil)
-
-	msgs := longHistory(20)
-	a.messages = msgs
-	a.lastInput = compactAtTokens + 1
+	a, msgs := primed(t, "earlier work", nil)
 	a.compactIfNeeded(context.Background())
 
 	got := a.Messages()
@@ -130,12 +120,7 @@ func TestCompactionKeepsTheRecentTailVerbatim(t *testing.T) {
 // until a later turn manages it, which is the right trade against dropping
 // history no one has read.
 func TestFailedSummaryLeavesTheConversationUntouched(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "", errors.New("the model is unreachable"))
-
-	msgs := longHistory(20)
-	a.messages = msgs
-	a.lastInput = compactAtTokens + 1
+	a, msgs := primed(t, "", errors.New("the model is unreachable"))
 	a.compactIfNeeded(context.Background())
 
 	if got := len(a.Messages()); got != len(msgs) {
@@ -152,11 +137,7 @@ func TestFailedSummaryLeavesTheConversationUntouched(t *testing.T) {
 // Under both limits there is nothing to do, and a summariser call would be paid
 // for on every single turn.
 func TestNoCompactionBelowTheLimits(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "should never run", nil)
-
-	msgs := longHistory(20)
-	a.messages = msgs
+	a, msgs := primed(t, "should never run", nil)
 	a.lastInput = compactAtTokens - 1
 	a.convBytes = compactAtBytes - 1
 	a.compactIfNeeded(context.Background())
@@ -169,11 +150,7 @@ func TestNoCompactionBelowTheLimits(t *testing.T) {
 // A conversation full of base64 the API has stopped charging for still has to
 // be compacted: it is re-sent on every turn and read whole into memory at start.
 func TestBytesAloneTriggerCompaction(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "a long browsing session", nil)
-
-	msgs := longHistory(20)
-	a.messages = msgs
+	a, msgs := primed(t, "a long browsing session", nil)
 	a.lastInput = 0 // nothing billed, so only the byte limit can fire
 	a.convBytes = compactAtBytes + 1
 	a.compactIfNeeded(context.Background())
@@ -185,14 +162,10 @@ func TestBytesAloneTriggerCompaction(t *testing.T) {
 
 // The copy is what makes a bad summary recoverable.
 func TestCompactionKeepsARollbackCopy(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "earlier work", nil)
-
-	a.messages = longHistory(20)
+	a, _ := primed(t, "earlier work", nil)
 	if err := a.save(); err != nil {
 		t.Fatal(err)
 	}
-	a.lastInput = compactAtTokens + 1
 	a.compactIfNeeded(context.Background())
 
 	if _, err := os.Stat(a.prevConvPath()); err != nil {
@@ -220,6 +193,18 @@ func TestRenderingLeavesImagesOut(t *testing.T) {
 	if !strings.Contains(got, "screenshot") {
 		t.Errorf("the rendered prefix does not say a screenshot was there: %q", got)
 	}
+}
+
+// primed builds an agent holding a twenty-message history and a stubbed
+// summariser, already over the token trigger. Returns the history it was given,
+// which is what a test compares the compacted one against.
+func primed(t *testing.T, summary string, err error) (*Agent, []anthropic.BetaMessageParam) {
+	t.Helper()
+	a := newTestAgent(t)
+	stubSummary(t, summary, err)
+	a.messages = longHistory(20)
+	a.lastInput = compactAtTokens + 1
+	return a, a.messages
 }
 
 // stubSummary swaps the summariser for the length of one test.
@@ -279,15 +264,11 @@ func loggedType(a *Agent, kind string) bool {
 // it, since events.jsonl is what the app draws and conversation.json is only
 // ever the model's input.
 func TestCompactionSurvivesRestartAndLeavesTheTranscriptAlone(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "earlier work on the deploy", nil)
-
-	a.messages = longHistory(20)
+	a, _ := primed(t, "earlier work on the deploy", nil)
 	if err := a.save(); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := a.log.ReadAll()
-	a.lastInput = compactAtTokens + 1
 	a.compactIfNeeded(context.Background())
 	compacted := a.Messages()
 
@@ -319,11 +300,7 @@ func TestCompactionSurvivesRestartAndLeavesTheTranscriptAlone(t *testing.T) {
 // that were allowed to fire, it would summarize the summary and lose a little
 // more of the conversation on every failed turn.
 func TestCompactionDoesNotRepeatWithoutAFreshMeasurement(t *testing.T) {
-	a := newTestAgent(t)
-	stubSummary(t, "earlier work", nil)
-
-	a.messages = longHistory(20)
-	a.lastInput = compactAtTokens + 1
+	a, _ := primed(t, "earlier work", nil)
 	a.compactIfNeeded(context.Background())
 	once := a.Messages()
 

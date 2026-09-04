@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -63,14 +64,7 @@ func newVM(id string, slot int) *VM {
 }
 
 // freeSlot returns the first unused slot index, or -1. Caller holds mu.
-func (r *Registry) freeSlot() int {
-	for i, v := range r.slots {
-		if v == nil {
-			return i
-		}
-	}
-	return -1
-}
+func (r *Registry) freeSlot() int { return slices.Index(r.slots[:], nil) }
 
 // Release frees a VM's slot and id. Safe to call more than once.
 func (r *Registry) Release(v *VM) {

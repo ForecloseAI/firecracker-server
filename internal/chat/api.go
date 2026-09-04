@@ -159,10 +159,7 @@ func emitFrame(w http.ResponseWriter, f Frame, sent int) int {
 		return sent
 	}
 	writeFrame(w, f)
-	if f.ID > sent {
-		return f.ID
-	}
-	return sent
+	return max(f.ID, sent)
 }
 
 // writeFrame emits one SSE event, keyed by the guest's event id so that

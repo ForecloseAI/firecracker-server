@@ -112,13 +112,32 @@ func TestDeleteAccountPurgesTheCallersMachine(t *testing.T) {
 	}
 }
 
-// A failure must not read as success. The app tells someone their data is gone
-// on the strength of this status.
-func TestDeleteAccountReportsAFailure(t *testing.T) {
-	s, fc, tok := accountServer(t)
-	fc.fail = true
-	if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
+// A refusal must never read as success. The app tells someone their data is
+// gone on the strength of this status, so every way the control plane can
+// refuse has to arrive as a failure.
+//
+// A 404 is not "already gone": the fixed control plane erases a stopped
+// machine's workspace and reports 200 whether or not there was anything there,
+// so a 404 means the OLD one is still deployed -- the one that leaves the
+// workspace on disk -- and 204 would claim an erasure during exactly the
+// rolling deploy where it did not happen.
+//
+// A 409 is the machine having been replaced before the purge reached it. The
+// replacement and its workspace are untouched, so the person retries and that
+// attempt targets the machine actually there.
+func TestDeleteAccountReportsEveryRefusal(t *testing.T) {
+	for name, refuse := range map[string]func(*fakeControl){
+		"unreachable": func(f *fakeControl) { f.fail = true },
+		"not found":   func(f *fakeControl) { f.notFound = true },
+		"conflict":    func(f *fakeControl) { f.conflict = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, fc, tok := accountServer(t)
+			refuse(fc)
+			if w := call(t, s, tok, "DELETE", "/v1/account", ""); w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", w.Code)
+			}
+		})
 	}
 }
 
@@ -196,25 +215,6 @@ func TestDeleteAccountLeavesOtherMachinesAlone(t *testing.T) {
 	}
 }
 
-// A 404 must not read as "already gone".
-//
-// The fixed control plane never answers one to a purge: it erases a stopped
-// machine's workspace and reports 200 whether or not there was anything there.
-// So a 404 means the old control plane is still deployed -- the one that leaves
-// the workspace on disk -- and answering 204 would tell someone their data was
-// erased during exactly the rolling deploy where it was not.
-func TestDeleteAccountDoesNotTreatNotFoundAsSuccess(t *testing.T) {
-	s, fc, tok := accountServer(t)
-	fc.notFound = true
-	w := call(t, s, tok, "DELETE", "/v1/account", "")
-	if w.Code == http.StatusNoContent {
-		t.Fatal("a 404 from the control plane was reported as data erased")
-	}
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502", w.Code)
-	}
-}
-
 // A subscriber racing the delete must not bring the bridge back.
 //
 // Subscribe treats a cancelled context as an idle stop and revives from it, and
@@ -242,24 +242,6 @@ func TestADeletedBridgeCannotBeRevived(t *testing.T) {
 	}
 	if _, open := <-ch; open {
 		t.Error("a deleted bridge delivered a frame")
-	}
-}
-
-// A purge the control plane could not carry out must not read as erased.
-//
-// It answers 409 when the machine was replaced before the purge reached it --
-// the replacement and its workspace are untouched, so 204 here would claim an
-// erasure that did not happen. The app shows a failure and the person retries,
-// which then targets the machine that is actually there.
-func TestDeleteAccountDoesNotTreatAConflictAsSuccess(t *testing.T) {
-	s, fc, tok := accountServer(t)
-	fc.conflict = true
-	w := call(t, s, tok, "DELETE", "/v1/account", "")
-	if w.Code == http.StatusNoContent {
-		t.Fatal("a purge the control plane refused was reported as data erased")
-	}
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502", w.Code)
 	}
 }
 

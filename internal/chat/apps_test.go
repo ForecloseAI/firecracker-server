@@ -70,13 +70,19 @@ func TestOnlyOneCallerMintsPerMachine(t *testing.T) {
 	}
 }
 
+// mustClaim takes the claim on m1, which is where every claim test starts.
+func mustClaim(t *testing.T, s *Server) {
+	t.Helper()
+	if !s.claimApps("m1") {
+		t.Fatal("the first caller did not get the claim")
+	}
+}
+
 // A failed push releases the claim, so the next request tries again rather than
 // leaving the machine without app tools for the life of the process.
 func TestAFailedPushIsRetried(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 	s.forgetApps("m1")
 	if !s.claimApps("m1") {
 		t.Error("a released claim was not available again")
@@ -88,9 +94,7 @@ func TestAFailedPushIsRetried(t *testing.T) {
 // request, and the app opens by fetching every agent's thread at once.
 func TestAFailedPushWaitsBeforeTryingAgain(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 	s.failApps("m1")
 	if s.claimApps("m1") {
 		t.Error("a failure was retried immediately")
@@ -234,9 +238,7 @@ func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 // to reach machines that already hold a copy, not just the host cache.
 func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 
 	// A set that is still good keeps the machine out: re-pushing rotates its
 	// ticket, so doing it per request would 404 anything in flight for nothing.
@@ -258,9 +260,7 @@ func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 // dozen requests that arrive at first sign-in all pass and mint a dozen sessions.
 func TestAnInFlightPushStillBlocksTheNextCaller(t *testing.T) {
 	s := &Server{appsClaims: map[string]appsClaim{}}
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 	if s.claimApps("m1") {
 		t.Error("a push still in flight did not hold the claim")
 	}
@@ -307,9 +307,7 @@ func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 // real mintApps and reads back what it recorded.
 func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
 	s, cl, _ := pushingServer(t)
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl)
 
 	s.mu.Lock()
@@ -329,9 +327,7 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 	s, _, _ := pushingServer(t)
 	// No guest to answer, so SetApps fails after the ticket is minted.
-	if !s.claimApps("m1") {
-		t.Fatal("the first caller did not get the claim")
-	}
+	mustClaim(t, s)
 	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"},
 		agent.New("127.0.0.1", 1))
 

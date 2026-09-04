@@ -162,9 +162,8 @@ func digestSnapshotBlocks(blocks []anthropic.BetaToolResultBlockParamContentUnio
 			continue
 		}
 		text, err := d.snaps.digest(b.OfText.Text)
-		if err != nil && d.log != nil {
-			d.log.Append(Event{Type: "error",
-				Message: "could not save the page snapshot: " + err.Error()})
+		if err != nil {
+			logTo(d, "could not save the page snapshot: "+err.Error())
 		}
 		b.OfText.Text = emptyToNote(text)
 		return

@@ -1,10 +1,12 @@
 package agentd
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -142,16 +144,11 @@ func previewOf(c appCall) string {
 // preview. encoding/json sorts map keys, which used to let a long body hide the
 // recipient or channel that a person most needs when deciding whether to act.
 func marshalPreview(args map[string]any) string {
-	keys := make([]string, 0, len(args))
-	for key := range args {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		pi, pj := previewPriority(keys[i]), previewPriority(keys[j])
-		if pi != pj {
-			return pi < pj
+	keys := slices.SortedFunc(maps.Keys(args), func(a, b string) int {
+		if pa, pb := previewPriority(a), previewPriority(b); pa != pb {
+			return cmp.Compare(pa, pb)
 		}
-		return keys[i] < keys[j]
+		return strings.Compare(a, b)
 	})
 
 	var out strings.Builder
@@ -173,7 +170,7 @@ func marshalPreview(args map[string]any) string {
 func previewPriority(key string) int {
 	key = strings.ToLower(key)
 	for _, part := range []string{"recipient", "channel", "destination", "address"} {
-		if key == part || strings.Contains(key, part) {
+		if strings.Contains(key, part) {
 			return 0
 		}
 	}

@@ -24,9 +24,13 @@ var streamClient = &http.Client{Timeout: 0}
 // Stream consumes the guest's SSE event log from after id, calling fn for each
 // event. It returns when ctx ends, the guest closes, or the stream stalls.
 func (c *Client) Stream(ctx context.Context, agentID string, since int, fn func(agentapi.Event)) error {
-	req, err := c.streamRequest(ctx, agentID, since)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+agentID+"/events", nil)
 	if err != nil {
 		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if since > 0 {
+		req.Header.Set("Last-Event-ID", fmt.Sprint(since))
 	}
 	resp, err := streamClient.Do(req)
 	if err != nil {
@@ -36,24 +40,6 @@ func (c *Client) Stream(ctx context.Context, agentID string, since int, fn func(
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("agent stream: %s", resp.Status)
 	}
-	return c.consume(ctx, resp, fn)
-}
-
-// streamRequest builds the SSE request, resuming from the given event id.
-func (c *Client) streamRequest(ctx context.Context, agentID string, since int) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+agentID+"/events", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	if since > 0 {
-		req.Header.Set("Last-Event-ID", fmt.Sprint(since))
-	}
-	return req, nil
-}
-
-// consume reads SSE frames until the stream ends or goes quiet.
-func (c *Client) consume(ctx context.Context, resp *http.Response, fn func(agentapi.Event)) error {
 	return scanSSE(ctx, resp, func(payload string) {
 		if ev, ok := decodeLine(payload); ok {
 			fn(ev)
@@ -78,7 +64,11 @@ func scanSSE(ctx context.Context, resp *http.Response, deliver func(payload stri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return orStalled(sc.Err())
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	// A clean end-of-stream is an error too: the caller always wants to reconnect.
+	return fmt.Errorf("agent stream ended")
 }
 
 // decodeLine turns one payload into an Event. The id is inside the JSON, so the
@@ -126,13 +116,4 @@ func deliverChange(payload string, fn func(agentapi.PendingChange)) {
 	if c.Raised != nil || c.ClearedID != "" {
 		fn(c)
 	}
-}
-
-// orStalled reports a clean end-of-stream as an error too, since the caller
-// always wants to reconnect.
-func orStalled(err error) error {
-	if err != nil {
-		return err
-	}
-	return fmt.Errorf("agent stream ended")
 }

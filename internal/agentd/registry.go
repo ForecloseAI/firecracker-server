@@ -176,17 +176,12 @@ func slug(name string) string {
 	return out
 }
 
-// saveLocked persists the roster via a temp file and a rename, so a crash
-// mid-write cannot leave a half-written roster that would lose every agent.
-// Caller holds r.mu.
+// saveLocked persists the roster atomically, so a crash mid-write cannot leave
+// a half-written roster that would lose every agent. Caller holds r.mu.
 func (r *Roster) saveLocked() error {
 	buf, err := json.MarshalIndent(r.listLocked(), "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	return writeAtomic(r.path, buf)
 }

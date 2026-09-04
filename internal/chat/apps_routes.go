@@ -147,7 +147,8 @@ func (s *Server) setAppPolicy(w http.ResponseWriter, r *http.Request, user strin
 		return
 	}
 	var req policyReq
-	if !decodePolicy(w, r, &req) {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req) != nil {
+		fail(w, http.StatusBadRequest, "that is not a permission this version can set")
 		return
 	}
 	if !governable[req.Capability] || !settable[req.Policy] {
@@ -196,15 +197,6 @@ func (s *Server) settledConnection(w http.ResponseWriter, r *http.Request, user,
 	conn := connectionFor(held, slug)
 	writeJSON(w, http.StatusOK, Connection{ID: conn.ID, Slug: slug, Name: labelFor(slug),
 		Status: conn.Status, Policy: s.storedPolicy(r.Context(), user)[slug]})
-}
-
-// decodePolicy reads the body, answering the client itself when it cannot.
-func decodePolicy(w http.ResponseWriter, r *http.Request, out *policyReq) bool {
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(out) != nil {
-		fail(w, http.StatusBadRequest, "that is not a permission this version can set")
-		return false
-	}
-	return true
 }
 
 // ConnectLink is where a person signs in to authorise an app.

@@ -34,26 +34,7 @@ func (s *Server) handlePendingEvents(w http.ResponseWriter, r *http.Request) {
 		emitChange(w, agentapi.PendingChange{Raised: &raised})
 	}
 	rc.Flush()
-	pumpPending(r, w, rc, ch)
-}
-
-// pumpPending forwards hub changes until the client goes away.
-func pumpPending(r *http.Request, w http.ResponseWriter, rc *http.ResponseController,
-	ch <-chan agentapi.PendingChange) {
-	tick := time.NewTicker(beat)
-	defer tick.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case c := <-ch:
-			emitChange(w, c)
-			rc.Flush()
-		case <-tick.C:
-			fmt.Fprint(w, ": beat\n\n")
-			rc.Flush()
-		}
-	}
+	pump(r, w, rc, ch, func(c agentapi.PendingChange) { emitChange(w, c) })
 }
 
 // emitChange writes one hub change as an SSE frame.
@@ -84,10 +65,11 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad_request", "could not read the decision", "")
 		return
 	}
+	d = normalise(d)
 	id := r.PathValue("apid")
-	if !s.sup.ResolveApproval(id, normalise(d)) {
+	if !s.sup.ResolveApproval(id, d) {
 		fail(w, http.StatusNotFound, "not_found", "no pending decision", "approval")
 		return
 	}
-	reply(w, http.StatusOK, map[string]any{"approval_id": id, "decision": normalise(d).Decision})
+	reply(w, http.StatusOK, map[string]any{"approval_id": id, "decision": d.Decision})
 }

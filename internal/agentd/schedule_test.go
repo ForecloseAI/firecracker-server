@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -244,40 +245,31 @@ func TestAPastOneOffIsRefusedWhenItIsCreated(t *testing.T) {
 	}
 }
 
-// runs is the first n firings of an expression, as readable stamps. Comparing a
-// whole sequence rather than one next() catches the errors that matter here: a
-// day-of-week filter that lands right once and then drifts, a monthly clamp that
-// works in April and not in February, a time list that never reaches its second
-// entry.
-func runs(t *testing.T, expr string, loc *time.Location, from time.Time, n int) []string {
+// wantRuns compares an expression's first len(want) firings, as readable
+// stamps, against what they should be. Comparing a whole sequence rather than
+// one next() catches the errors that matter here: a day-of-week filter that
+// lands right once and then drifts, a monthly clamp that works in April and not
+// in February, a time list that never reaches its second entry.
+func wantRuns(t *testing.T, expr string, loc *time.Location, from time.Time, want ...string) {
 	t.Helper()
 	sp, err := parseSchedule(expr, loc)
 	if err != nil {
 		t.Fatalf("%q: %v", expr, err)
 	}
-	out := make([]string, 0, n)
+	got := make([]string, 0, len(want))
 	at := from
-	for range n {
+	for range want {
 		if at = sp.next(at); at.IsZero() {
-			return append(out, "no more runs")
+			got = append(got, "no more runs")
+			break
 		}
 		// Reported in the schedule's own zone, not the person's: a pinned
 		// expression means its own wall clock, and showing the person's would
 		// make a correct firing look wrong.
-		out = append(out, at.In(sp.loc).Format("Mon 2006-01-02 15:04"))
+		got = append(got, at.In(sp.loc).Format("Mon 2006-01-02 15:04"))
 	}
-	return out
-}
-
-// wantRuns compares a firing sequence against what it should be.
-func wantRuns(t *testing.T, expr string, loc *time.Location, from time.Time, want ...string) {
-	t.Helper()
-	got := runs(t, expr, loc, from, len(want))
-	for i := range want {
-		if i >= len(got) || got[i] != want[i] {
-			t.Errorf("%q\n got %v\nwant %v", expr, got, want)
-			return
-		}
+	if !slices.Equal(got, want) {
+		t.Errorf("%q\n got %v\nwant %v", expr, got, want)
 	}
 }
 
@@ -530,20 +522,15 @@ func TestAmPmTimesAreReadCorrectly(t *testing.T) {
 	}
 }
 
-// The country picked at onboarding resolves to an IANA name, and that name is
-// what the machine keeps.
-func TestRememberZoneStoresTheName(t *testing.T) {
+// The country picked at onboarding resolves to an IANA name, that name is what
+// the machine keeps, and it is what the schedule math reads with no client
+// involved.
+func TestScheduleUsesTheStoredZone(t *testing.T) {
 	dir := t.TempDir()
 	rememberZone(dir, "Asia/Kolkata")
 	if got := loadZone(dir).String(); got != "Asia/Kolkata" {
 		t.Errorf("zone = %q, want Asia/Kolkata", got)
 	}
-}
-
-// The stored name is what the schedule math reads, with no client involved.
-func TestScheduleUsesTheStoredZone(t *testing.T) {
-	dir := t.TempDir()
-	rememberZone(dir, "Asia/Kolkata")
 	sp, err := parseSchedule("daily at 09:00", loadZone(dir))
 	if err != nil {
 		t.Fatal(err)
@@ -732,15 +719,22 @@ func TestAScheduledFireIsNotLoggedAsTheUser(t *testing.T) {
 	}
 }
 
-// due books a schedule that is already overdue.
-func due(t *testing.T, sup *Supervisor, expr string) Schedule {
+// book stores a schedule and hands it back, failing the test if the store
+// refuses it.
+func book(t *testing.T, sup *Supervisor, sc Schedule) Schedule {
 	t.Helper()
-	sc, err := sup.Schedules().Add(Schedule{Name: "sweep", Agent: BossID,
-		Task: "check the deploy", Expr: expr, NextRunAt: time.Now().Add(-time.Minute)})
+	added, err := sup.Schedules().Add(sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sc
+	return added
+}
+
+// due books a schedule that is already overdue.
+func due(t *testing.T, sup *Supervisor, expr string) Schedule {
+	t.Helper()
+	return book(t, sup, Schedule{Name: "sweep", Agent: BossID,
+		Task: "check the deploy", Expr: expr, NextRunAt: time.Now().Add(-time.Minute)})
 }
 
 // The basic contract: a due schedule reaches the agent, and moves on.
@@ -804,54 +798,71 @@ func TestABusyAgentIsSkippedButTheOccurrenceIsStillSpent(t *testing.T) {
 	}
 }
 
-// The whole point of the form: it runs, and then it is over. A repeating job
-// left standing after its one useful morning spends a turn a day forever, and
-// the person has to notice and cancel it.
-func TestAOneOffRunsOnceAndThenStops(t *testing.T) {
-	sup := newTestSupervisor(t)
-	sc := due(t, sup, oneOffAt(time.Now().Add(-time.Minute)))
-	now := time.Now()
+// The whole point of the one-off form: it runs, and then it is over. A
+// repeating job left standing after its one useful morning spends a turn a day
+// forever, and the person has to notice and cancel it. The last run of a
+// bounded series is the same case reached from the other direction: nothing
+// comes after it, so the schedule is spent by it.
+func TestALastRunFiresOnceAndThenRetires(t *testing.T) {
+	for _, tc := range []struct{ name, expr string }{
+		{"a one-off", oneOffAt(time.Now().Add(-time.Minute))},
+		{"the final run before an until", lastRunToday()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := newTestSupervisor(t)
+			sc := due(t, sup, tc.expr)
+			now := time.Now()
 
-	sup.sweep(now)
-	sup.sweep(now.Add(time.Minute)) // and again, the way the ticker would
+			sup.sweep(now)
+			sup.sweep(now.Add(time.Minute)) // and again, the way the ticker would
 
-	after := byID(t, sup, sc.ID)
-	if after.Fires != 1 {
-		t.Errorf("fires = %d after two sweeps, want exactly 1", after.Fires)
-	}
-	if after.Enabled {
-		t.Error("a one-off is still enabled after its run; it would be swept forever")
-	}
-	if !loggedType(agentOf(t, sup, sc.Agent), "scheduled") {
-		t.Error("the fire left no scheduled event in the agent's transcript")
+			after := byID(t, sup, sc.ID)
+			if after.Fires != 1 {
+				t.Errorf("fires = %d after two sweeps, want exactly 1", after.Fires)
+			}
+			if after.Enabled {
+				t.Error("a spent schedule is still enabled; it would be swept forever")
+			}
+			if !loggedType(agentOf(t, sup, sc.Agent), "scheduled") {
+				t.Error("the fire left no scheduled event in the agent's transcript")
+			}
+		})
 	}
 }
 
 // The opposite of the repeating case, and deliberately so. A repeating job that
-// finds the agent busy spends the occurrence and waits for the next one; a
-// one-off that did the same would simply never happen.
-func TestABusyAgentDoesNotSpendAOneOff(t *testing.T) {
-	sup := newTestSupervisor(t)
-	dueAt := time.Now().Add(-time.Minute)
-	sc := due(t, sup, oneOffAt(dueAt))
-	a := agentOf(t, sup, BossID)
-	a.setState("working")
+// finds the agent busy spends the occurrence and waits for the next one; a run
+// with nothing behind it that did the same would simply never happen. The final
+// run of a bounded series gets the same protection for the same reason -- and
+// there is no occurrence after it to catch the miss either.
+func TestABusyAgentDoesNotSpendALastRun(t *testing.T) {
+	for _, tc := range []struct{ name, expr string }{
+		{"a one-off", oneOffAt(time.Now().Add(-time.Minute))},
+		{"the final run before an until", lastRunToday()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := newTestSupervisor(t)
+			sc := due(t, sup, tc.expr)
+			a := agentOf(t, sup, BossID)
+			a.setState("working")
 
-	sup.sweep(time.Now())
+			sup.sweep(time.Now())
 
-	held := byID(t, sup, sc.ID)
-	if held.Fires != 0 || loggedType(a, "scheduled") {
-		t.Fatal("a busy agent was sent scheduled work anyway")
-	}
-	if !held.Enabled || !held.NextRunAt.Equal(sc.NextRunAt) {
-		t.Fatalf("the one-off was spent on a busy agent: %+v", held)
-	}
+			held := byID(t, sup, sc.ID)
+			if held.Fires != 0 || loggedType(a, "scheduled") {
+				t.Fatal("a busy agent was sent scheduled work anyway")
+			}
+			if !held.Enabled || !held.NextRunAt.Equal(sc.NextRunAt) {
+				t.Fatalf("the last run was spent on a busy agent: %+v", held)
+			}
 
-	a.setState("idle")
-	sup.sweep(time.Now())
+			a.setState("idle")
+			sup.sweep(time.Now())
 
-	if got := byID(t, sup, sc.ID); got.Fires != 1 {
-		t.Errorf("fires = %d once the agent freed up, want 1: the run was dropped", got.Fires)
+			if got := byID(t, sup, sc.ID); got.Fires != 1 {
+				t.Errorf("fires = %d once the agent freed up, want 1: the run was dropped", got.Fires)
+			}
+		})
 	}
 }
 
@@ -901,6 +912,14 @@ func oneOffAt(at time.Time) string {
 	return "once on " + at.UTC().Format("2006-01-02") + " at " + at.UTC().Format("15:04")
 }
 
+// lastRunToday is a repeating expression whose window ends today, with the
+// day's only run already due -- so the occurrence coming up is its last.
+func lastRunToday() string {
+	now := time.Now().UTC()
+	return "daily at " + now.Add(-time.Minute).Format("15:04") +
+		" until " + now.Format("2006-01-02") + " in UTC"
+}
+
 // "once in 2h" only means anything at the moment it is written, and Expr is
 // re-read on every sweep -- stored as typed it would mean two hours from each
 // sweep and never come due. It has to be resolved at creation.
@@ -946,7 +965,7 @@ func TestARelativeOneOffDoesNotFollowThePerson(t *testing.T) {
 
 	done := make(chan string, 1)
 	go func() { done <- sup.CreateSchedule(context.Background(), gate, BossID, in) }()
-	gate.Resolve(pendingID(t, gate, gate.log), Decision{Decision: "allow"})
+	gate.Resolve(pendingID(t, gate), Decision{Decision: "allow"})
 	<-done
 
 	sc := sup.Schedules().List()[0]
@@ -962,17 +981,11 @@ func TestARelativeOneOffDoesNotFollowThePerson(t *testing.T) {
 func TestAPinnedScheduleDoesNotFollowThePerson(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Europe/London")
-	pinned, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
+	pinned := book(t, sup, Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr:      "daily at 11:00 in Asia/Kolkata",
 		NextRunAt: nextOf(t, "daily at 11:00 in Asia/Kolkata", mustZone(t, "Europe/London"))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	floating, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+	floating := book(t, sup, Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 11:00", NextRunAt: nextOf(t, "daily at 11:00", mustZone(t, "Europe/London"))})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("America/Los_Angeles")
 
@@ -998,16 +1011,10 @@ func TestAZoneChangeDoesNotSkipAPendingPinnedRun(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Europe/London")
 	overdue := time.Now().Add(-2 * time.Minute)
-	pinned, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
+	pinned := book(t, sup, Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr: "daily at 11:00 in Asia/Kolkata", NextRunAt: overdue})
-	if err != nil {
-		t.Fatal(err)
-	}
-	floating, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+	floating := book(t, sup, Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 11:00", NextRunAt: overdue})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("America/Los_Angeles")
 
@@ -1018,27 +1025,6 @@ func TestAZoneChangeDoesNotSkipAPendingPinnedRun(t *testing.T) {
 	// The control: rezone is still doing its job for schedules that should move.
 	if got := byID(t, sup, floating.ID).NextRunAt; got.Equal(overdue) {
 		t.Error("rezone moved nothing at all; the pinned case would pass by accident")
-	}
-}
-
-// The last run of a bounded series is the one-off case reached from the other
-// direction: nothing comes after it, so the schedule is spent by it.
-func TestTheFinalRunBeforeUntilRetiresTheSchedule(t *testing.T) {
-	sup := newTestSupervisor(t)
-	// A window ending today, with the day's only run already due.
-	today := time.Now().UTC().Format("2006-01-02")
-	expr := "daily at " + time.Now().UTC().Add(-time.Minute).Format("15:04") +
-		" until " + today + " in UTC"
-	sc := due(t, sup, expr)
-
-	sup.sweep(time.Now())
-
-	after := byID(t, sup, sc.ID)
-	if after.Fires != 1 {
-		t.Fatalf("fires = %d, want 1: the final run was dropped", after.Fires)
-	}
-	if after.Enabled {
-		t.Error("a series past its end date is still enabled; it would be swept forever")
 	}
 }
 
@@ -1059,36 +1045,6 @@ func TestASeriesInsideItsUntilKeepsGoing(t *testing.T) {
 	}
 	if !after.NextRunAt.After(now) {
 		t.Errorf("next run %v is not in the future", after.NextRunAt)
-	}
-}
-
-// The final run gets the same protection a one-off does. Spending it on a busy
-// agent would drop the last thing the person asked for, and there is no
-// occurrence behind it to catch the miss.
-func TestABusyAgentDoesNotSpendTheFinalRun(t *testing.T) {
-	sup := newTestSupervisor(t)
-	today := time.Now().UTC().Format("2006-01-02")
-	expr := "daily at " + time.Now().UTC().Add(-time.Minute).Format("15:04") +
-		" until " + today + " in UTC"
-	sc := due(t, sup, expr)
-	a := agentOf(t, sup, BossID)
-	a.setState("working")
-
-	sup.sweep(time.Now())
-
-	held := byID(t, sup, sc.ID)
-	if held.Fires != 0 || loggedType(a, "scheduled") {
-		t.Fatal("a busy agent was sent scheduled work anyway")
-	}
-	if !held.Enabled || !held.NextRunAt.Equal(sc.NextRunAt) {
-		t.Fatalf("the final run was spent on a busy agent: %+v", held)
-	}
-
-	a.setState("idle")
-	sup.sweep(time.Now())
-
-	if got := byID(t, sup, sc.ID); got.Fires != 1 {
-		t.Errorf("fires = %d once the agent freed up, want 1: the last run was dropped", got.Fires)
 	}
 }
 
@@ -1163,7 +1119,7 @@ func TestSchedulingIsRefusedUntilThePersonAgrees(t *testing.T) {
 	} {
 		done := make(chan string, 1)
 		go func() { done <- sup.CreateSchedule(context.Background(), gate, BossID, in) }()
-		gate.Resolve(pendingID(t, gate, gate.log), Decision{Decision: tc.decision})
+		gate.Resolve(pendingID(t, gate), Decision{Decision: tc.decision})
 		answer := <-done
 
 		if got := len(sup.Schedules().List()); got != tc.wantStore {
@@ -1234,7 +1190,7 @@ func TestCreateSaysWhenAOneOffRuns(t *testing.T) {
 
 	done := make(chan string, 1)
 	go func() { done <- sup.CreateSchedule(context.Background(), gate, BossID, in) }()
-	gate.Resolve(pendingID(t, gate, gate.log), Decision{Decision: "allow"})
+	gate.Resolve(pendingID(t, gate), Decision{Decision: "allow"})
 	answer := <-done
 
 	if !strings.Contains(answer, "Runs once at") {
@@ -1260,11 +1216,8 @@ func cancelAs(t *testing.T, sup *Supervisor, self, id string) string {
 // relying on and never told anyone about.
 func TestCancelOnlyReachesTheCallersOwnSchedules(t *testing.T) {
 	sup := newTestSupervisor(t)
-	sc, err := sup.Schedules().Add(Schedule{Name: "sweep", Agent: "colleague",
+	sc := book(t, sup, Schedule{Name: "sweep", Agent: "colleague",
 		Task: "check the deploy", Expr: "every 30m", NextRunAt: time.Now().Add(time.Hour)})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	got := cancelAs(t, sup, BossID, sc.ID)
 
@@ -1285,16 +1238,10 @@ func TestCancelOnlyReachesTheCallersOwnSchedules(t *testing.T) {
 func TestAChangedZoneMovesTheClockSchedules(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Europe/London")
-	daily, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+	daily := book(t, sup, Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	every, err := sup.Schedules().Add(Schedule{Name: "sweep", Agent: BossID, Task: "check",
+	every := book(t, sup, Schedule{Name: "sweep", Agent: BossID, Task: "check",
 		Expr: "every 30m", NextRunAt: time.Now().Add(30 * time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("America/Los_Angeles")
 
@@ -1319,11 +1266,8 @@ func TestAChangedZoneMovesAOneOff(t *testing.T) {
 	sup.RememberZone("Europe/London")
 	london := mustZone(t, "Europe/London")
 	expr := "once on " + time.Now().In(london).AddDate(0, 0, 30).Format("2006-01-02") + " at 11:00"
-	sc, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
+	sc := book(t, sup, Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr: expr, NextRunAt: nextOf(t, expr, london)})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("Asia/Kolkata")
 
@@ -1340,11 +1284,8 @@ func TestAChangedZoneLeavesAPastOneOffAlone(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Europe/London")
 	missed := time.Now().Add(-time.Minute)
-	sc, err := sup.Schedules().Add(Schedule{Name: "sale", Agent: BossID, Task: "queue up",
+	sc := book(t, sup, Schedule{Name: "sale", Agent: BossID, Task: "queue up",
 		Expr: oneOffAt(missed), NextRunAt: missed})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("Asia/Kolkata")
 
@@ -1359,11 +1300,8 @@ func TestAChangedZoneLeavesAPastOneOffAlone(t *testing.T) {
 func TestAnUnchangedZoneLeavesSchedulesAlone(t *testing.T) {
 	sup := newTestSupervisor(t)
 	sup.RememberZone("Europe/London")
-	sc, err := sup.Schedules().Add(Schedule{Name: "brief", Agent: BossID, Task: "brief me",
+	sc := book(t, sup, Schedule{Name: "brief", Agent: BossID, Task: "brief me",
 		Expr: "daily at 09:00", NextRunAt: nextOf(t, "daily at 09:00", mustZone(t, "Europe/London"))})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sup.RememberZone("Europe/London")
 

@@ -174,8 +174,9 @@ func TestCleanupSkipsWhenTheIdBelongsToANewerMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The conflict is the point of the companion test; here it is the resources
-	// surviving that matters.
+	// A skipped cleanup must not report a purge that did not happen: the machine
+	// now holding this id was never touched and its workspace is intact, so nil
+	// here would answer 204 and tell someone their data was erased.
 	if err := r.cleanup(stale, stale.workspaceIsNew); !errors.Is(err, ErrState) {
 		t.Fatalf("cleanup = %v, want a conflict", err)
 	}
@@ -235,32 +236,6 @@ func TestCleanupDoesNotSignalWhenNothingSpawned(t *testing.T) {
 	}
 	if err := r.cleanup(v, true); err != nil { // must not signal, must not hang
 		t.Fatalf("cleanup: %v", err)
-	}
-}
-
-// A skipped cleanup must not report a purge that did not happen.
-//
-// The machine now holding this id was never touched and its workspace is intact,
-// so nil here would answer 204 and tell someone their data was erased. Reachable
-// without two deletes racing: firecracker exits on its own just before a delete,
-// watchProcess cleans up with purge=false and releases the id, a first-use
-// request recreates the machine, and the delete's own cleanup lands here.
-func TestASkippedPurgeIsReportedAsAConflict(t *testing.T) {
-	r, path := workspaceIn(t, "alice1")
-	stale, err := r.Allocate("alice1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.Release(stale)
-	if _, err := r.Allocate("alice1"); err != nil { // the replacement
-		t.Fatal(err)
-	}
-	err = r.cleanup(stale, true)
-	if !errors.Is(err, ErrState) {
-		t.Fatalf("a skipped purge returned %v, want a conflict", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("the replacement's workspace was removed: %v", err)
 	}
 }
 

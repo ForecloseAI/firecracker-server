@@ -38,19 +38,14 @@ func run() error {
 		return err
 	}
 	srv := chat.NewServer(cfg, control, caps, auth)
-	serve(cfg, srv.Routes(), gw.Routes())
+	go listen(cfg.Addr, srv.Routes(), "chat")
+	go listen(cfg.VNCAddr, gw.Routes(), "vnc")
 	// The one listener a guest can reach. Started only when a provider is
 	// configured, so a deployment without one opens no guest-facing port at all.
 	if apps := srv.AppsRoutes(); apps != nil {
 		go listen(cfg.AppsAddr, apps, "apps")
 	}
 	return waitForSignal()
-}
-
-// serve starts both listeners in the background.
-func serve(cfg chat.Config, app, vnc http.Handler) {
-	go listen(cfg.Addr, app, "chat")
-	go listen(cfg.VNCAddr, vnc, "vnc")
 }
 
 // listen runs one HTTP server. WriteTimeout is deliberately unset: it is an

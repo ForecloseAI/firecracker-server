@@ -24,11 +24,6 @@ type Totals struct {
 	UnpricedModels []string `json:"unpriced_models,omitempty"`
 }
 
-// TotalTokens is every token billed across all four categories.
-func (t Totals) TotalTokens() int64 {
-	return t.InputTokens + t.OutputTokens + t.CacheReadTokens + t.CacheCreationTokens
-}
-
 // Accumulator caches each VM's last known spend.
 //
 // It used to rebuild these totals itself, folding an event stream behind a
@@ -100,15 +95,4 @@ func addTokens(t *Totals, u agentapi.Usage) {
 	t.OutputTokens += u.OutputTokens
 	t.CacheReadTokens += u.CacheReadInputTokens
 	t.CacheCreationTokens += u.CacheCreationInputTokens
-}
-
-// Sum adds one VM's spend into a fleet total.
-func (t *Totals) Sum(o Totals) {
-	t.CostUSD += o.CostUSD
-	t.InputTokens += o.InputTokens
-	t.OutputTokens += o.OutputTokens
-	t.CacheReadTokens += o.CacheReadTokens
-	t.CacheCreationTokens += o.CacheCreationTokens
-	t.Turns += o.Turns
-	t.UnpricedModels = append(t.UnpricedModels, o.UnpricedModels...)
 }

@@ -2,9 +2,10 @@ package agentd
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -65,12 +66,10 @@ func LoadSkills(builtinDir, agentDir string) ([]Skill, []string) {
 		}
 		problems = append(problems, bad...)
 	}
-	out := make([]Skill, 0, len(by))
-	for _, s := range by {
-		out = append(out, s)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, problems
+	sorted := slices.SortedFunc(maps.Values(by), func(a, b Skill) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return sorted, problems
 }
 
 // reportBadSkills records every skill that was skipped and why.

@@ -30,6 +30,18 @@ func fakeServer(t *testing.T, pageSize int, tools ...*mcpsdk.Tool) *browserServe
 	return b
 }
 
+// fakeTools is the same server with its surface already listed, which is how
+// every test below but the digest one starts.
+func fakeTools(t *testing.T, pageSize int, tools ...*mcpsdk.Tool) (*browserServer, []anthropic.BetaTool) {
+	t.Helper()
+	srv := fakeServer(t, pageSize, tools...)
+	listed, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, listed
+}
+
 // connectInMemory joins a client to an in-process MCP server, so a test drives
 // the same handshake, tools/list and tools/call the guest will.
 func connectInMemory(ctx context.Context, srv *mcpsdk.Server) (*mcpsdk.ClientSession, error) {
@@ -122,13 +134,9 @@ func TestSnapshotResultsAreStillDigested(t *testing.T) {
 // partial page. A tool that never arrives simply never reaches the model, and
 // nothing anywhere reports it -- the agent is just quietly less capable.
 func TestEveryPageOfToolsIsListed(t *testing.T) {
-	srv := fakeServer(t, 1,
+	_, tools := fakeTools(t, 1,
 		namedTool("navigate_page", "ok"), namedTool("take_snapshot", "ok"),
 		namedTool("click", "ok"), namedTool("fill", "ok"))
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(tools) != 4 {
 		t.Errorf("got %d tools with a page size of 1, want all 4", len(tools))
 	}
@@ -141,11 +149,7 @@ func TestEveryPageOfToolsIsListed(t *testing.T) {
 // on Restart=always and takes the server's connection with it, so this is the
 // ordinary case rather than an exotic one.
 func TestToolsKeepWorkingAfterTheServerRestarts(t *testing.T) {
-	srv := fakeServer(t, 0, namedTool("navigate_page", "opened"))
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv, tools := fakeTools(t, 0, namedTool("navigate_page", "opened"))
 	if got := runTool(t, tools, "navigate_page", `{}`); got[0].OfText.Text != "opened" {
 		t.Fatalf("first call = %q", got[0].OfText.Text)
 	}
@@ -159,13 +163,9 @@ func TestToolsKeepWorkingAfterTheServerRestarts(t *testing.T) {
 // The server advertises about 53 tools; the ones not named in browserAllowed
 // must never reach the model, because every schema is charged on every turn.
 func TestOnlyTheAllowlistedToolsReachTheModel(t *testing.T) {
-	srv := fakeServer(t, 0,
+	_, tools := fakeTools(t, 0,
 		namedTool("take_snapshot", "ok"), namedTool("take_heapsnapshot", "ok"),
 		namedTool("lighthouse_audit", "ok"), namedTool("evaluate_script", "ok"))
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(tools) != 1 || tools[0].Name() != "take_snapshot" {
 		var names []string
 		for _, tool := range tools {
@@ -178,11 +178,7 @@ func TestOnlyTheAllowlistedToolsReachTheModel(t *testing.T) {
 // A tool that says no is something the model can fix; a Go error becomes an
 // is_error result it reads as a broken tool instead.
 func TestAToolErrorComesBackAsTextNotAGoError(t *testing.T) {
-	srv := fakeServer(t, 0, namedTool("click", "ERROR"))
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, tools := fakeTools(t, 0, namedTool("click", "ERROR"))
 	got := runTool(t, tools, "click", `{"uid":"1_1"}`)
 	if got[0].OfText == nil || !strings.Contains(got[0].OfText.Text, "the page said no") {
 		t.Errorf("result = %+v, want the server's own wording", got[0])
@@ -192,11 +188,7 @@ func TestAToolErrorComesBackAsTextNotAGoError(t *testing.T) {
 // A screenshot has to arrive as an image block. Stringifying it would hand the
 // model base64 it cannot see and cannot say it cannot see.
 func TestAnImageResultStaysAnImage(t *testing.T) {
-	srv := fakeServer(t, 0, namedTool("take_screenshot", "IMAGE"))
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, tools := fakeTools(t, 0, namedTool("take_screenshot", "IMAGE"))
 	got := runTool(t, tools, "take_screenshot", `{}`)
 	if got[0].OfImage == nil {
 		t.Fatalf("result = %+v, want an image block", got[0])
@@ -221,11 +213,7 @@ func TestTheWholeSchemaReachesTheModel(t *testing.T) {
 		"properties":           map[string]any{"uid": map[string]any{"type": "string"}},
 		"required":             []any{"uid"},
 	}
-	srv := fakeServer(t, 0, tool)
-	tools, err := srv.Tools(context.Background(), toolDeps{browser: true, chrome: srv})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, tools := fakeTools(t, 0, tool)
 	raw, err := json.Marshal(tools[0].InputSchema())
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +245,7 @@ func TestBrowserToolsSurviveTheServerBeingDown(t *testing.T) {
 	}
 }
 
-// Five of the six shipped profiles never open a page. Building their tools must
+// Four of the six shipped profiles never open a page. Building their tools must
 // not fork node, and thirteen supervisor tests would otherwise each start one.
 func TestABrowserlessProfileStartsNothing(t *testing.T) {
 	srv := fakeServer(t, 0, namedTool("take_snapshot", "ok"))

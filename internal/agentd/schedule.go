@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -170,11 +171,7 @@ func (s *ScheduleStore) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return writeAtomic(s.path, buf)
 }
 
 // dayKind is which days a clock-based expression fires on.
@@ -324,13 +321,9 @@ func parseBase(f []string, loc *time.Location) (spec, error) {
 		times, err := parseTimes(f[2:])
 		return spec{kind: kindDaily, times: times}, err
 
-	case len(f) >= 4 && f[0] == "every" && isWeekdayWord(f[1]) && f[2] == "at":
+	case len(f) >= 4 && f[0] == "every" && f[2] == "at" && dayWords[f[1]] != kindDaily:
 		times, err := parseTimes(f[3:])
-		return spec{kind: kindWeekdays, times: times}, err
-
-	case len(f) >= 4 && f[0] == "every" && isWeekendWord(f[1]) && f[2] == "at":
-		times, err := parseTimes(f[3:])
-		return spec{kind: kindWeekends, times: times}, err
+		return spec{kind: dayWords[f[1]], times: times}, err
 
 	case len(f) >= 5 && f[0] == "weekly" && f[1] == "on" && f[3] == "at":
 		day, ok := weekdays[f[2]]
@@ -387,10 +380,14 @@ func parseBase(f []string, loc *time.Location) (spec, error) {
 	return spec{}, errors.New(grammarHelp)
 }
 
-// isWeekdayWord and isWeekendWord accept either number, since a model writing
-// "every weekdays at 09:00" means the same thing and should not be corrected.
-func isWeekdayWord(s string) bool { return s == "weekday" || s == "weekdays" }
-func isWeekendWord(s string) bool { return s == "weekend" || s == "weekends" }
+// dayWords maps the day-set words "every <word> at ..." accepts. Both numbers
+// are listed, since a model writing "every weekdays at 09:00" means the same
+// thing and should not be corrected. An absent word reads as kindDaily, which
+// is what lets the lookup double as the match test.
+var dayWords = map[string]dayKind{
+	"weekday": kindWeekdays, "weekdays": kindWeekdays,
+	"weekend": kindWeekends, "weekends": kindWeekends,
+}
 
 // parts is an expression being taken apart, kept as two aligned slices so
 // keywords match without regard to case while a timezone name keeps its own.
@@ -512,10 +509,7 @@ func (p *parts) takeWindow() (clock, clock, bool, error) {
 // that wraps past midnight ("between 22:00 and 06:00") falls out as an ordinary
 // list of times, because it repeats every day exactly like one.
 func spread(start, end clock, every time.Duration) []clock {
-	step := int(every / time.Minute)
-	if step < 1 {
-		step = 1
-	}
+	step := max(int(every/time.Minute), 1)
 	span := end.mins() - start.mins()
 	if span < 0 {
 		span += 24 * 60 // the window runs past midnight
@@ -555,14 +549,8 @@ func parseTimes(f []string) ([]clock, error) {
 // tidyClocks sorts times and drops repeats, so "daily at 09:00 and 09:00" is one
 // firing rather than two a sweep apart.
 func tidyClocks(in []clock) []clock {
-	sort.Slice(in, func(i, j int) bool { return in[i].mins() < in[j].mins() })
-	out := make([]clock, 0, len(in))
-	for i, c := range in {
-		if i == 0 || c != in[i-1] {
-			out = append(out, c)
-		}
-	}
-	return out
+	slices.SortFunc(in, func(a, b clock) int { return a.mins() - b.mins() })
+	return slices.Compact(in)
 }
 
 // parseMonthDay reads "1st", "15" or "last day", returning 0 for the last day
@@ -797,10 +785,7 @@ func rememberZone(stateDir, tz string) bool {
 // exists to remove; "" resolves to UTC, which is the absence of an answer
 // rather than one.
 func validZone(tz string) error {
-	if tz == "" || tz == "Local" {
-		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
-	}
-	if _, err := time.LoadLocation(tz); err != nil {
+	if _, err := time.LoadLocation(tz); tz == "" || tz == "Local" || err != nil {
 		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
 	}
 	return nil

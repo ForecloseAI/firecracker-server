@@ -15,13 +15,17 @@ func newTestGate(t *testing.T) *Gate {
 }
 
 // pendingID waits for the gate to register an interaction and returns its id.
-func pendingID(t *testing.T, g *Gate, log *Log) string {
+func pendingID(t *testing.T, g *Gate) string { return pendingIDBesides(t, g, "") }
+
+// pendingIDBesides is pendingID for the case where one id is already known, so
+// a test with two open asks can name the other one.
+func pendingIDBesides(t *testing.T, g *Gate, known string) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		events, _ := log.ReadAll()
+		events, _ := g.log.ReadAll()
 		for _, e := range events {
-			if e.ApprovalID != "" && g.IsPending(e.ApprovalID) {
+			if e.ApprovalID != "" && e.ApprovalID != known && g.IsPending(e.ApprovalID) {
 				return e.ApprovalID
 			}
 		}
@@ -70,7 +74,7 @@ func TestCheckBlocksUntilAllowed(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- g.Check(context.Background(), "Bash", "rm -rf x", nil) }()
 
-	id := pendingID(t, g, g.log)
+	id := pendingID(t, g)
 	if !g.Resolve(id, Decision{Decision: "allow"}) {
 		t.Fatal("Resolve found nothing pending")
 	}
@@ -87,7 +91,7 @@ func TestDenialTellsTheModelNotToRetry(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- g.Check(context.Background(), "Bash", "rm -rf x", nil) }()
 
-	id := pendingID(t, g, g.log)
+	id := pendingID(t, g)
 	g.Resolve(id, Decision{Decision: "deny", Reason: "that is the real workspace"})
 	err := <-done
 	if err == nil {
@@ -106,7 +110,7 @@ func TestBatchGrantSkipsThePromptForThatToolOnly(t *testing.T) {
 	g := newTestGate(t)
 	done := make(chan error, 1)
 	go func() { done <- g.Check(context.Background(), "Bash", "rm -rf x", nil) }()
-	id := pendingID(t, g, g.log)
+	id := pendingID(t, g)
 	g.Resolve(id, Decision{Decision: "allow", Scope: "batch", MaxUses: 2, TTLSeconds: 60})
 	<-done
 
@@ -130,7 +134,7 @@ func TestRevokeAllDeniesPendingAndClearsGrants(t *testing.T) {
 	g := newTestGate(t)
 	done := make(chan error, 1)
 	go func() { done <- g.Check(context.Background(), "Bash", "rm -rf x", nil) }()
-	pendingID(t, g, g.log)
+	pendingID(t, g)
 
 	if n := g.RevokeAll(); n != 0 {
 		t.Errorf("RevokeAll reported %d grants, want 0", n)
@@ -148,7 +152,7 @@ func TestCancelledContextUnblocksAWaitingCall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- g.Check(ctx, "Bash", "rm -rf x", nil) }()
-	pendingID(t, g, g.log)
+	pendingID(t, g)
 	cancel()
 
 	select {
@@ -180,7 +184,7 @@ func TestSecondAnswerFindsNothingPending(t *testing.T) {
 	g := newTestGate(t)
 	done := make(chan error, 1)
 	go func() { done <- g.Check(context.Background(), "Bash", "rm -rf x", nil) }()
-	id := pendingID(t, g, g.log)
+	id := pendingID(t, g)
 
 	if !g.Resolve(id, Decision{Decision: "allow"}) {
 		t.Fatal("first answer was not accepted")
@@ -209,7 +213,7 @@ func TestAnAskReportsWaitingRatherThanWorking(t *testing.T) {
 	if got := <-states; got != "waiting" {
 		t.Fatalf("an open ask reported %q", got)
 	}
-	g.Resolve(pendingID(t, g, g.log), Decision{Answer: "Lisbon"})
+	g.Resolve(pendingID(t, g), Decision{Answer: "Lisbon"})
 	if got := <-states; got != "working" {
 		t.Fatalf("an answered ask reported %q", got)
 	}
@@ -220,13 +224,13 @@ func TestAnAskReportsWaitingRatherThanWorking(t *testing.T) {
 // concurrently, so this is reachable whenever the model asks twice in one turn.
 func TestTwoOpenAsksKeepTheAgentWaitingUntilBothAreAnswered(t *testing.T) {
 	g := newTestGate(t)
-	var depth atomicInt
-	g.onWait = func(delta int) { depth.add(delta) }
+	var depth atomic.Int64
+	g.onWait = func(delta int) { depth.Add(int64(delta)) }
 
 	go g.Ask(context.Background(), "first?", UI{Kind: "text"})
-	first := pendingID(t, g, g.log)
+	first := pendingID(t, g)
 	go g.Ask(context.Background(), "second?", UI{Kind: "text"})
-	second := waitForOther(t, g, g.log, first)
+	second := pendingIDBesides(t, g, first)
 
 	g.Resolve(first, Decision{Answer: "one"})
 	waitForDepth(t, &depth, 1)
@@ -234,39 +238,17 @@ func TestTwoOpenAsksKeepTheAgentWaitingUntilBothAreAnswered(t *testing.T) {
 	waitForDepth(t, &depth, 0)
 }
 
-// atomicInt is a counter the gate's callback writes and the test reads.
-type atomicInt struct{ n atomic.Int64 }
-
-// add moves the counter by delta.
-func (a *atomicInt) add(delta int) { a.n.Add(int64(delta)) }
-
 // waitForDepth blocks until the wait counter settles on want.
-func waitForDepth(t *testing.T, depth *atomicInt, want int64) {
+func waitForDepth(t *testing.T, depth *atomic.Int64, want int64) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := depth.n.Load(); got == want {
+		if got := depth.Load(); got == want {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("wait depth stayed at %d, want %d", depth.n.Load(), want)
-}
-
-// waitForOther returns the pending id that is not the one already known.
-func waitForOther(t *testing.T, g *Gate, log *Log, known string) string {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		events, _ := log.ReadAll()
-		for _, e := range events {
-			if e.ApprovalID != "" && e.ApprovalID != known && g.IsPending(e.ApprovalID) {
-				return e.ApprovalID
-			}
-		}
-	}
-	t.Fatal("a second pending interaction never appeared")
-	return ""
+	t.Fatalf("wait depth stayed at %d, want %d", depth.Load(), want)
 }
 
 // Approval ids must not repeat after a restart. They used to be a counter that
@@ -298,7 +280,7 @@ func TestApprovalIDsDoNotRepeatAfterARestart(t *testing.T) {
 func idFromOneAsk(t *testing.T, g *Gate) string {
 	t.Helper()
 	go g.Ask(context.Background(), "which city?", UI{Kind: "text"})
-	id := pendingID(t, g, g.log)
+	id := pendingID(t, g)
 	g.Resolve(id, Decision{Answer: "Lisbon"})
 	return id
 }

@@ -2,6 +2,7 @@ package vm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -99,23 +100,14 @@ func prepareWorkspace(v *VM, l Layout) error {
 // successfully repaired; 4 and above are real failures.
 func fsckWorkspace(path string) error {
 	err := exec.Command("e2fsck", "-p", "-f", path).Run()
-	var ee *exec.ExitError
 	if err == nil {
 		return nil
 	}
-	if ok := asExitError(err, &ee); ok && ee.ExitCode() < 4 {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() < 4 {
 		return nil
 	}
 	return fmt.Errorf("e2fsck %s: %w", path, err)
-}
-
-// asExitError unwraps err into an *exec.ExitError if it is one.
-func asExitError(err error, target **exec.ExitError) bool {
-	ee, ok := err.(*exec.ExitError)
-	if ok {
-		*target = ee
-	}
-	return ok
 }
 
 // spawn removes any stale socket, starts firecracker, and begins watching it.

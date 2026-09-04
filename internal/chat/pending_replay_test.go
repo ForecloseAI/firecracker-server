@@ -30,8 +30,7 @@ func cardsIn(fs []Frame) []Frame {
 // derived cards from that log could not show one at all -- and the person would
 // never learn the agent was blocked.
 func TestCardsComeFromTheHubNotTheLog(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	raise(b, "cody.ap_001", "cody")
 	got := cardsIn(b.withPending(nil))
 	if len(got) != 1 {
@@ -47,8 +46,7 @@ func TestCardsComeFromTheHubNotTheLog(t *testing.T) {
 // per pending frame -- so duplicates piled up with live-looking buttons, while
 // only the newest ever greyed out.
 func TestReconnectDoesNotDuplicateCards(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	raise(b, "boss.ap_001", "boss")
 	first := cardsIn(b.withPending(nil))
 	second := cardsIn(b.withPending(nil))
@@ -59,8 +57,7 @@ func TestReconnectDoesNotDuplicateCards(t *testing.T) {
 
 // An answered card must not come back on the next page load.
 func TestResolvedCardIsNotReemitted(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	raise(b, "boss.ap_001", "boss")
 	b.onPending(agentapi.PendingChange{ClearedID: "boss.ap_001"})
 	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
@@ -73,8 +70,7 @@ func TestResolvedCardIsNotReemitted(t *testing.T) {
 // permanent orphan that every later page load re-rendered, and clicking it hit
 // an id the guest had already forgotten.
 func TestTimedOutCardDisappears(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	raise(b, "cody.ap_001", "cody")
 	b.onPending(agentapi.PendingChange{ClearedID: "cody.ap_001"})
 	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
@@ -89,8 +85,7 @@ func TestTimedOutCardDisappears(t *testing.T) {
 // cannot come from a `decision` event: a worker's decision lands in the
 // worker's log, which chat does not stream.
 func TestClearingEmitsResolved(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	ch := b.Subscribe()
 	defer b.Unsubscribe(ch)
 	raise(b, "cody.ap_001", "cody")
@@ -104,8 +99,7 @@ func TestClearingEmitsResolved(t *testing.T) {
 // Cards render in a stable order, not Go's map order, so they do not shuffle on
 // every reload.
 func TestCardsComeBackInAStableOrder(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	for _, id := range []string{"cody.ap_003", "boss.ap_001", "cody.ap_002"} {
 		raise(b, id, "x")
 	}
@@ -120,8 +114,7 @@ func TestCardsComeBackInAStableOrder(t *testing.T) {
 // node per card per reconnect, and because its map keeps only the newest, the
 // older copies keep live-looking buttons that can never grey out.
 func TestRaisedTwiceEmitsOneCard(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	ch := b.Subscribe()
 	defer b.Unsubscribe(ch)
 	raise(b, "cody.ap_001", "cody")
@@ -142,8 +135,7 @@ func TestRaisedTwiceEmitsOneCard(t *testing.T) {
 // that 404 — the stale orphan this phase exists to end, returning through the
 // one door the stream cannot cover.
 func TestResyncClearsCardsSettledWhileStopped(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	raise(b, "cody.ap_001", "cody")
 	b.resync(nil) // the hub no longer holds it
 	if got := cardsIn(b.withPending(nil)); len(got) != 0 {
@@ -158,8 +150,7 @@ func TestResyncClearsCardsSettledWhileStopped(t *testing.T) {
 // sorting by id would group by agent — a worker's newer question would jump
 // above the boss's older one purely on the letter it starts with.
 func TestCardsAreOrderedByWhenAsked(t *testing.T) {
-	b := newBridge("alice", deadControl(t), nil)
-	defer b.stop()
+	b := testBridge(t)
 	base := time.Now().UTC()
 	for i, id := range []string{"zeta.ap_001", "alpha.ap_001"} {
 		b.onPending(agentapi.PendingChange{Raised: &agentapi.Raised{

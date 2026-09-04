@@ -91,7 +91,7 @@ func (g *AppsGateway) Register(machine, guestIP, hostIP, upstream string) (strin
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.dropLocked(machine, guestIP)
-	g.evictLocked()
+	evictTo(g.routes, appsRouteCap)
 	g.routes[ticket] = appsRoute{machine: machine, guestIP: guestIP, upstream: target}
 	return "http://" + net.JoinHostPort(hostIP, g.port) + appsGatewayPrefix + ticket, nil
 }
@@ -113,20 +113,6 @@ func (g *AppsGateway) dropLocked(machine, guestIP string) {
 		if route.machine == machine || (guestIP != "" && route.guestIP == guestIP) {
 			delete(g.routes, ticket)
 		}
-	}
-}
-
-// evictLocked keeps the table bounded. Caller holds g.mu.
-//
-// Which route goes is not worth choosing. The cap is fifty times the fleet, so
-// nothing live is ever evicted in practice -- the point is only that a service
-// running for weeks does not accumulate a route per machine it has ever seen.
-func (g *AppsGateway) evictLocked() {
-	for ticket := range g.routes {
-		if len(g.routes) < appsRouteCap {
-			return
-		}
-		delete(g.routes, ticket)
 	}
 }
 

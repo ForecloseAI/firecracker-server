@@ -146,9 +146,7 @@ func writeVMErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, vm.ErrNotFound):
 		writeErr(w, http.StatusNotFound, apiError{"not_found", err.Error(), ""})
-	case errors.Is(err, vm.ErrDuplicate):
-		writeErr(w, http.StatusConflict, apiError{"conflict", err.Error(), ""})
-	case errors.Is(err, vm.ErrState):
+	case errors.Is(err, vm.ErrDuplicate), errors.Is(err, vm.ErrState):
 		writeErr(w, http.StatusConflict, apiError{"conflict", err.Error(), ""})
 	case errors.Is(err, vm.ErrNoSlots):
 		writeErr(w, http.StatusServiceUnavailable,

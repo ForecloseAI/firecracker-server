@@ -43,11 +43,6 @@ type Usage struct {
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
-// TotalTokens is every token billed across all four categories.
-func (u Usage) TotalTokens() int64 {
-	return u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-}
-
 // UI tells a client how to render a pending interaction.
 type UI struct {
 	Kind    string   `json:"kind"` // text | confirm | choice | handoff | connect

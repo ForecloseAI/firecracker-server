@@ -3,6 +3,7 @@ package vm
 
 import (
 	"os/exec"
+	"slices"
 	"sync/atomic"
 	"time"
 )
@@ -84,13 +85,5 @@ var legalTransitions = map[State][]State{
 
 // canTransition reports whether from -> to is a legal state change.
 func canTransition(from, to State) bool {
-	for _, s := range legalTransitions[from] {
-		if s == to {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(legalTransitions[from], to)
 }
-
-// Done exposes the channel closed once the firecracker process has exited.
-func (v *VM) Done() <-chan struct{} { return v.done }

@@ -86,7 +86,7 @@ const browserListTimeout = 30 * time.Second
 //
 // One per daemon, not one per agent: every agent shares the browser the person
 // is watching, and a second server would be a second puppeteer connection to
-// the same Chrome. Spawned lazily, because five of the six shipped profiles
+// the same Chrome. Spawned lazily, because four of the six shipped profiles
 // never open a page and a VM that never browses should never fork node.
 type browserServer struct {
 	url string

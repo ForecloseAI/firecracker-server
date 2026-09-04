@@ -51,15 +51,10 @@ func serve(addr string, reg *vm.Registry, token string) {
 			log.Fatalf("listen: %v", err)
 		}
 	}()
-	waitForSignal()
-	shutdown(srv, reg)
-}
-
-// waitForSignal blocks until SIGINT or SIGTERM.
-func waitForSignal() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	log.Printf("received %s, shutting down", <-ch)
+	shutdown(srv, reg)
 }
 
 // shutdown stops accepting requests, then tears down every running VM.
