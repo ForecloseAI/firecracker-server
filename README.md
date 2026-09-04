@@ -152,12 +152,13 @@ firewall change was needed to make this work.
 `vm-ssh`. The **public** half is baked into the image at build time:
 
 ```sh
-SSH_PUBKEY="$(cat ~/.ssh/cracked_guest.pub)" ANTHROPIC_API_KEY=sk-ant-... scripts/build-rootfs.sh
+SSH_PUBKEY="$(cat ~/.ssh/cracked_guest.pub)" scripts/build-rootfs.sh
 ```
 
-Unlike the API key in the same image, this is safe to bake: the private half
-never enters a guest, it stays on the host, which is already fully privileged
-over every VM. Rotating it does mean rebuilding the rootfs.
+This is safe to bake: the private half never enters a guest, it stays on the
+host, which is already fully privileged over every VM. Rotating it does mean
+rebuilding the rootfs. The model key is never baked -- see the broker below --
+so the build needs no secret at all.
 
 ```sh
 vm-ssh                       # one VM running -> straight in
@@ -487,8 +488,32 @@ on every push and dropped when a machine is created or erased, because slots are
 recycled and a route that outlived its machine is how one person's agent would end
 up acting as another.
 
-This is the token broker `rootfs/Dockerfile:207` sketches for the Anthropic key,
-built for this case first.
+### The model key goes the same way
+
+The same listener lends the Anthropic key. The guest image carries no credential:
+`agentd` reads its default gateway from `/proc/net/route`, uses
+`http://172.16.<4N+1>:8092` as the SDK's base URL, and presents the placeholder
+key `brokered`. The host accepts `POST /v1/messages` and `/v1/messages/count_tokens`
+from a guest address, keeps only `Content-Type`, `Accept`, `Anthropic-Version` and
+`Anthropic-Beta`, sets the real `x-api-key`, and streams the answer back.
+
+```
+guest                      host                              Anthropic
+agentd ──▶ http://172.16.<4N+1>:8092/v1/messages
+                             │  source address must be a guest's
+                             │  drops what the guest sent, adds x-api-key
+                             └──────────────▶ https://api.anthropic.com/v1/messages
+```
+
+No ticket here, on purpose: a ticket routes each guest to a *different* session,
+and every guest goes to the same model with the same key. That also makes it
+boot-order proof — a schedule firing seconds after a guest boots reaches the model
+before the host has said anything to it, and a `cracked-chat` restart forgets
+nothing a guest depends on. `ANTHROPIC_API_KEY` is required on `cracked-chat`
+(a `systemctl edit` drop-in) and the service refuses to start without it; a
+developer's laptop with the key in its own environment keeps calling Anthropic
+directly, so nothing changes off the fleet. Rotating the key is now a drop-in
+edit and a restart, not a rootfs rebuild.
 
 ### What is stored, and where
 
@@ -544,13 +569,15 @@ actions stop and ask, and that every one is on the record.
   The startup sweep guarantees no orphan processes and no stray taps.
 - Guests are firewalled off from IMDS (`169.254.0.0/16`), the VPC, each other,
   and the host — with **one exception**: TCP 8092 on their own tap address, the
-  connected-apps broker, and only when it is running. Verify after any firewall
+  guest broker (connected apps and the model key). Verify after any firewall
   change, from inside a guest:
   `curl -m 3 http://169.254.169.254/latest/meta-data/iam/` must time out, and so
   must `curl -m 3 http://172.16.0.1:8080/healthz` — the control plane is still
   unreachable. `curl -m 3 http://<gateway>:8092/apps/anything` should answer
   **404**, which is the broker refusing a ticket it did not issue rather than
-  nothing listening.
+  nothing listening, and `curl -m 3 -X POST http://<gateway>:8092/v1/messages`
+  should answer with Anthropic's own `invalid_request_error`, which proves the
+  key was added on the way through.
 - `MaxVMs` is 5 in `internal/vm/vm.go`. Raise to 6 only after confirming host
   memory headroom at steady state — swap is off, so overcommit means the OOM
   killer reaps a live VM.

@@ -142,8 +142,9 @@ type inbound struct {
 }
 
 // New builds an agent rooted at dir, working in workspace, restoring its
-// conversation and log from disk. The client reads ANTHROPIC_API_KEY from the
-// environment.
+// conversation and log from disk. The model client comes from defaultEndpoint:
+// a credential in the environment when there is one, otherwise the host's
+// broker on this guest's own gateway.
 //
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
@@ -180,7 +181,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		return nil, err
 	}
 	a := &Agent{
-		id: id, dir: dir, client: anthropic.NewClient(),
+		id: id, dir: dir, client: newClient(defaultEndpoint()),
 		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,

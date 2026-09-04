@@ -21,7 +21,9 @@ Environment=PATH=/opt/agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 # harder as it approaches the ceiling rather than letting the kernel's OOM killer
 # pick a victim -- and with swap off on the host, that reaps the whole VM.
 Environment=GOMEMLIMIT=2GiB
-EnvironmentFile=-/etc/cracked-agent.env
+# No credential file, deliberately. The image carries no model key: agentd
+# dials the host's broker on this guest's own tap gateway, which adds the key
+# on its way upstream. A key in here would be readable by every Bash call.
 WorkingDirectory=/home/agent
 # Both paths absolute, deliberately. Under systemd the working directory is /,
 # so a relative -workspace would make the file tools reject every path while Glob

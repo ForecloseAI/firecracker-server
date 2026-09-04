@@ -66,26 +66,22 @@ func run(once, profile, model, workspace, stateDir, addr string, maxLive int) er
 		return err
 	}
 	defer sup.Close()
-	warnMissingKey()
+	logEndpoint()
 	if once != "" {
 		return runOnce(sup, profile, once)
 	}
 	return serve(ctx, sup, addr)
 }
 
-// warnMissingKey reports a missing credential at startup instead of leaving it
-// to be discovered one turn at a time.
-//
-// anthropic.NewClient() cannot fail, and each agent builds its own client only
-// when it first runs -- so without this a keyless daemon boots clean, answers
-// /health with ok:true, accepts messages with 202, and buries the real error in
-// one agent's event log. It is a warning and not fatal on purpose: Restart=always
-// would turn a config typo into a crash loop that still satisfies the control
-// plane's TCP boot probe, which is strictly harder to diagnose than this line.
-func warnMissingKey() {
-	if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
-		log.Printf("agentd: WARNING no ANTHROPIC_API_KEY in the environment; every turn will fail")
-	}
+// logEndpoint says at startup how model calls will travel, so a guest with no
+// way to the model is diagnosed from one line rather than one failed turn at a
+// time: without it a daemon with no route boots clean, answers /health with
+// ok:true, accepts messages with 202, and buries the real error in one agent's
+// event log. A line and not a fatal on purpose: Restart=always would turn a
+// config problem into a crash loop that still satisfies the control plane's
+// TCP boot probe, which is strictly harder to diagnose than this.
+func logEndpoint() {
+	log.Printf("agentd: model calls go through %s", agentd.DescribeEndpoint())
 }
 
 // serve runs the HTTP surface until interrupted.

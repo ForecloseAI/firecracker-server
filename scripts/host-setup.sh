@@ -245,11 +245,12 @@ setup_firewall() {
   # The single exception, inserted ABOVE the drop above -- which is why it comes
   # after it here, since both go in at position 1.
   #
-  # This is the connected-apps broker. A guest needs to reach its own app
-  # integrations, and the provider's endpoint requires a key that is authority
-  # over EVERY user's connected accounts; that key cannot live on a machine its
-  # owner has root on. So the host holds it and the guest gets a ticket, and this
-  # rule is what lets the guest hand that ticket in.
+  # This is the guest broker: two credentials the host holds on a guest's
+  # behalf, on one port. Under /apps/ the connected-apps session, whose
+  # provider needs a key that is authority over EVERY user's accounts; under
+  # /v1/ the model itself, whose key would otherwise be baked into an image every
+  # guest can read. Neither can live on a machine its owner has root on, so the
+  # host adds each on the way upstream, and this rule is what lets a guest ask.
   #
   # Narrow on purpose: one TCP port, only from a tap, and only to an address on
   # the guest side -- so it opens the broker and not sshd, not the control plane
