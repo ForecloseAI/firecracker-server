@@ -83,7 +83,6 @@ func TestParseSchedule(t *testing.T) {
 		{expr: "daily at 09:00 until", wantErr: "needs a date"},
 		{expr: "daily at 09:00 until soon", wantErr: "date such as"},
 		{expr: "daily at 09:00 in Mars/Olympus", wantErr: "not a timezone"},
-		{expr: "daily at 09:00 in asia/kolkata", wantErr: "not a timezone"}, // case matters
 		{expr: "monthly on the 0th at 09:00", wantErr: "day of the month"},
 		{expr: "monthly on the 32nd at 09:00", wantErr: "day of the month"},
 		{expr: "monthly on the 1st", wantErr: "needs a time"},
@@ -99,6 +98,31 @@ func TestParseSchedule(t *testing.T) {
 		case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
 			t.Errorf("%q: error %q does not mention %q", tc.expr, err, tc.wantErr)
 		}
+	}
+}
+
+// The zone token is the one word in an expression that keeps its own case, so
+// it has to reach time.LoadLocation exactly as it was written.
+//
+// This was checked by asserting that "in asia/kolkata" is refused, which is not
+// this package's behaviour to assert. time.LoadLocation resolves a name against
+// the host's tzdata directory, and a case-insensitive filesystem -- the default
+// on macOS -- opens /usr/share/zoneinfo/asia/kolkata quite happily and hands
+// back a Location named "asia/kolkata". So the case passed on Linux, failed on
+// a Mac, and told you nothing about the parser either way.
+//
+// The round-trip below holds on both. Folding the zone in with the keywords
+// fails here on a case-sensitive host, where the lowercased name no longer
+// resolves, and on a case-insensitive one, where it resolves under a name no
+// tzdata actually carries -- which is the name that would go on to be stored in
+// the expression and exported as TZ.
+func TestAZoneNameKeepsItsOwnCase(t *testing.T) {
+	sp, err := parseSchedule("DAILY AT 09:00 IN Asia/Kolkata", time.UTC)
+	if err != nil {
+		t.Fatalf("a shouted expression naming a zone did not parse: %v", err)
+	}
+	if got := sp.loc.String(); got != "Asia/Kolkata" {
+		t.Errorf("zone = %q, want Asia/Kolkata: the name was lowercased with the keywords", got)
 	}
 }
 
