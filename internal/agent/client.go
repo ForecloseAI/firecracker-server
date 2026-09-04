@@ -208,16 +208,23 @@ type Send struct {
 	File *agentapi.File `json:"file,omitempty"`
 }
 
-// CreateAgent adds an agent of the given type to the roster. It does not start
-// it -- an agent runs when it is first addressed.
+// CreateAgent adds an agent to the roster and returns it as the roster reports
+// it -- never the record, which for a custom agent carries the person's key. It
+// does not start it: an agent runs when it is first addressed.
 //
 // The name is passed explicitly because the daemon falls back to the TYPE KEY
 // when it is empty, which is lowercase: the roster card would read "researcher"
 // where the gallery card the person tapped said "Researcher".
-func (c *Client) CreateAgent(typeKey, name string) (agentapi.Record, error) {
-	var out agentapi.Record
-	body := map[string]string{"type": typeKey, "name": name}
-	err := c.write(http.MethodPost, "/agents", body, &out)
+func (c *Client) CreateAgent(req agentapi.CreateAgentReq) (agentapi.Status, error) {
+	var out agentapi.Status
+	err := c.write(http.MethodPost, "/agents", req, &out)
+	return out, err
+}
+
+// UpdateAgent changes a custom agent's name, role or model.
+func (c *Client) UpdateAgent(id string, p agentapi.AgentPatch) (agentapi.Status, error) {
+	var out agentapi.Status
+	err := c.write(http.MethodPatch, "/agents/"+id, p, &out)
 	return out, err
 }
 

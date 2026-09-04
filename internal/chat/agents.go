@@ -2,6 +2,7 @@ package chat
 
 import (
 	"hash/fnv"
+	"strings"
 	"time"
 	"unicode"
 
@@ -31,6 +32,12 @@ type Agent struct {
 	Machine      string       `json:"machine"`
 	Stats        AgentStats   `json:"stats"`
 	Capabilities Capabilities `json:"capabilities"`
+	// Custom marks an agent the person built. Instructions is the role they
+	// wrote, and Model their own model if they chose one -- as a view, never
+	// with its key, which does not leave their machine.
+	Custom       bool                `json:"custom"`
+	Instructions string              `json:"instructions,omitempty"`
+	Model        *agentapi.ModelView `json:"model,omitempty"`
 }
 
 // AgentStats is the three tiles on the detail screen. Zero for now: the real
@@ -152,8 +159,8 @@ func projectTemplates(profiles []agentapi.Profile, roster []agentapi.Status) []T
 	}
 	out := make([]Template, 0, len(profiles))
 	for _, p := range profiles {
-		if p.Key == agentapi.BossID {
-			continue
+		if p.Key == agentapi.BossID || p.Key == agentapi.CustomType {
+			continue // the boss is already there; a custom agent is built, not picked
 		}
 		out = append(out, projectTemplate(p, active[p.Key]))
 	}
@@ -192,14 +199,39 @@ func projectRoster(roster []agentapi.Status, profiles []agentapi.Profile, machin
 	return out
 }
 
-// projectAgent builds one row.
+// projectAgent builds one row. A custom agent's role is the opening of what
+// the person wrote, since it has no profile description of its own.
 func projectAgent(st agentapi.Status, p agentapi.Profile, machine string, online bool) Agent {
-	return Agent{
+	a := Agent{
 		ID: st.ID, Name: st.Name, Role: p.Description,
 		Initial: initialOf(st.Name), Hue: hueOf(st.ID), Shape: shapeOf(st.Type),
 		Online: online, Task: taskOf(st), State: stateOf(st), Machine: machine + " · Linux",
 		Capabilities: Capabilities{Browse: p.Browser},
 	}
+	if st.Type == agentapi.CustomType {
+		a.Custom, a.Instructions, a.Model = true, st.Instructions, st.Model
+		a.Role = roleOf(st.Instructions)
+	}
+	return a
+}
+
+// roleCap is how much of a custom agent's instructions the roster shows.
+const roleCap = 60
+
+// roleOf is the one-line role for an agent the person described in prose: the
+// first sentence, cut to fit the roster row.
+func roleOf(instructions string) string {
+	line := strings.TrimSpace(instructions)
+	if i := strings.IndexAny(line, ".\n!?"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	if r := []rune(line); len(r) > roleCap {
+		line = strings.TrimSpace(string(r[:roleCap-1])) + "…"
+	}
+	if line == "" {
+		return "Built by you"
+	}
+	return line
 }
 
 // stateOf is what the agent is doing. An agent that has never been started

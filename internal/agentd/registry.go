@@ -20,6 +20,9 @@ import (
 // whole result, and a machine with no boss has nobody to ask.
 const BossID = agentapi.BossID
 
+// CustomType is the profile of an agent the person built in the app.
+const CustomType = agentapi.CustomType
+
 // validID is the same shape the control plane already requires of a VM id, so
 // agent ids are safe in a path and in a URL without further escaping.
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -86,17 +89,36 @@ func (r *Roster) Get(id string) (Record, bool) {
 	return *rec, true
 }
 
-// Add registers a new agent, choosing a free id derived from its name or type.
-func (r *Roster) Add(typeKey, name string) (Record, error) {
+// Add registers a new agent from a record with no id or timestamp yet,
+// choosing a free id derived from its name or type.
+func (r *Roster) Add(rec Record) (Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id, err := r.freeIDLocked(orDefault(name, typeKey))
+	rec.Name = orDefault(rec.Name, rec.Type)
+	id, err := r.freeIDLocked(rec.Name)
 	if err != nil {
 		return Record{}, err
 	}
-	rec := &Record{ID: id, Name: orDefault(name, typeKey), Type: typeKey, CreatedAt: time.Now().UTC()}
-	r.by[id] = rec
-	return *rec, r.saveLocked()
+	rec.ID, rec.CreatedAt = id, time.Now().UTC()
+	r.by[id] = &rec
+	return rec, r.saveLocked()
+}
+
+// Update applies a change to one record and persists it. The change works on
+// a copy, so one that fails partway leaves the roster as it was.
+func (r *Roster) Update(id string, change func(*Record) error) (Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.by[id]
+	if !ok {
+		return Record{}, fmt.Errorf("no agent %s", id)
+	}
+	next := *rec
+	if err := change(&next); err != nil {
+		return Record{}, err
+	}
+	*rec = next
+	return next, r.saveLocked()
 }
 
 // EnsureBoss creates the boss record if this machine has never had one.

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agents", s.apiGuard(s.listAgents))
 	mux.HandleFunc("GET /v1/agent-types", s.apiGuard(s.listTypes))
 	mux.HandleFunc("POST /v1/agents", s.apiGuard(s.createAgent))
+	mux.HandleFunc("PATCH /v1/agents/{id}", s.apiGuard(s.updateAgent))
 	mux.HandleFunc("DELETE /v1/agents/{id}", s.apiGuard(s.deleteAgent))
 	mux.HandleFunc("POST /v1/threads/{id}/messages", s.apiGuard(s.sendMessage))
 	mux.HandleFunc("POST /v1/threads/{id}/files", s.apiGuard(s.uploadFile))
@@ -302,16 +305,41 @@ func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, user string) 
 	writeJSON(w, http.StatusOK, projectTemplates(profiles, roster))
 }
 
-// createReq is the body of POST /v1/agents. TemplateId is a profile key
-// straight from the gallery, so there is no mapping table to drift.
+// createReq is the body of POST /v1/agents: a profile key straight from the
+// gallery, so there is no mapping table to drift -- or, with no templateId, an
+// agent the person is building themselves, from a name and a role.
 type createReq struct {
-	TemplateID string `json:"templateId"`
+	TemplateID   string     `json:"templateId"`
+	Name         string     `json:"name"`
+	Instructions string     `json:"instructions"`
+	Model        *modelSpec `json:"model"`
 }
 
-// createAgent activates one kind of agent on the person's machine.
+// modelSpec is a model of the person's own, as the app sends it. The key is
+// accepted here and forwarded to their machine, and never sent back.
+type modelSpec struct {
+	URL      string `json:"url"`
+	APIKey   string `json:"apiKey"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking"`
+}
+
+// config is the spec as the guest stores it. Nil stays nil.
+func (m *modelSpec) config() *agentapi.ModelConfig {
+	if m == nil {
+		return nil
+	}
+	return &agentapi.ModelConfig{URL: m.URL, APIKey: m.APIKey, Model: m.Model, Thinking: m.Thinking}
+}
+
+// agentBodyCap bounds a create or update: a role is a page or two of text.
+const agentBodyCap = 64 << 10
+
+// createAgent activates one kind of agent on the person's machine, or adds one
+// they described themselves.
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string) {
 	var req createReq
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req) != nil {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&req) != nil {
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
@@ -319,7 +347,159 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string
 	if !ok {
 		return
 	}
-	s.activate(w, cl, req.TemplateID, machineFor(user))
+	if req.TemplateID != "" {
+		s.activate(w, cl, req.TemplateID, machineFor(user))
+		return
+	}
+	s.createCustom(w, cl, req, machineFor(user))
+}
+
+// createCustom adds an agent the person described themselves. Any number may
+// exist, so there is no duplicate check; the id comes from the name.
+func (s *Server) createCustom(w http.ResponseWriter, cl *agent.Client, req createReq, machine string) {
+	if msg := invalidCustom(req.Name, req.Instructions, req.Model, true); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
+	}
+	profile, _, err := lookupType(cl, agentapi.CustomType)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: agentapi.CustomType, Name: req.Name,
+		Instructions: req.Instructions, Model: req.Model.config()})
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, projectAgent(st, profile, machine, true))
+}
+
+// invalidCustom says what is wrong with a custom agent's fields, or "". The key
+// is required when a model is being set for the first time and optional on an
+// edit, where an empty one keeps what the machine already holds.
+func invalidCustom(name, instructions string, m *modelSpec, needKey bool) string {
+	if n := len([]rune(strings.TrimSpace(name))); n == 0 || n > 40 {
+		return "name must be 1 to 40 characters"
+	}
+	if n := len([]rune(strings.TrimSpace(instructions))); n == 0 || n > 8000 {
+		return "instructions must be 1 to 8000 characters"
+	}
+	return invalidModel(m, needKey)
+}
+
+// invalidModel says what is wrong with a model spec, or "".
+func invalidModel(m *modelSpec, needKey bool) string {
+	if m == nil {
+		return ""
+	}
+	if m.URL == "" || m.Model == "" || (needKey && m.APIKey == "") {
+		return "model needs url, model and apiKey"
+	}
+	if m.Thinking != "" && !slices.Contains(agentapi.ThinkingLevels, m.Thinking) {
+		return "model thinking must be low, medium or high"
+	}
+	return ""
+}
+
+// patchReq is the body of PATCH /v1/agents/{id}. An absent field is left
+// alone. A model of {"clear": true} goes back to the default model, and an
+// empty apiKey keeps the stored key, which the app never sees.
+type patchReq struct {
+	Name         *string     `json:"name"`
+	Instructions *string     `json:"instructions"`
+	Model        *modelPatch `json:"model"`
+}
+
+// modelPatch is a modelSpec that can also mean "no model of my own".
+type modelPatch struct {
+	Clear bool `json:"clear"`
+	modelSpec
+}
+
+// updateAgent edits a custom agent. A gallery agent may only be renamed: its
+// role is the product's, and the boss is the boss.
+func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, user string) {
+	var req patchReq
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&req) != nil {
+		fail(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if code, msg := editable(cl, id, req); code != 0 {
+		fail(w, code, msg)
+		return
+	}
+	s.finishUpdate(w, cl, id, req, machineFor(user))
+}
+
+// finishUpdate sends the patch and projects the row that comes back.
+func (s *Server) finishUpdate(w http.ResponseWriter, cl *agent.Client, id string, req patchReq, machine string) {
+	patch := agentapi.AgentPatch{Name: req.Name, Instructions: req.Instructions}
+	if req.Model != nil {
+		patch.Model = &agentapi.ModelPatch{Clear: req.Model.Clear, ModelConfig: *req.Model.config()}
+	}
+	st, err := cl.UpdateAgent(id, patch)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	profile, _, _ := lookupType(cl, st.Type) // a failure only costs the description
+	writeJSON(w, http.StatusOK, projectAgent(st, profile, machine, true))
+}
+
+// editable checks a patch against the roster: the agent must exist, only a
+// custom agent's role or model may change, and what is sent must be sound.
+func editable(cl *agent.Client, id string, req patchReq) (int, string) {
+	roster, err := cl.Agents()
+	if err != nil {
+		return http.StatusBadGateway, err.Error()
+	}
+	st, ok := find(roster, id)
+	if !ok {
+		return http.StatusNotFound, "no such agent"
+	}
+	if st.Type != agentapi.CustomType && (req.Instructions != nil || req.Model != nil) {
+		return http.StatusConflict, "only a custom agent's instructions or model can change"
+	}
+	if msg := invalidPatch(st, req); msg != "" {
+		return http.StatusBadRequest, msg
+	}
+	return 0, ""
+}
+
+// invalidPatch validates the fields a patch carries against the row as it is.
+func invalidPatch(st agentapi.Status, req patchReq) string {
+	name, role := st.Name, st.Instructions
+	if role == "" {
+		role = "unchanged" // a gallery agent has none, and is not being given one
+	}
+	if req.Name != nil {
+		name = *req.Name
+	}
+	if req.Instructions != nil {
+		role = *req.Instructions
+	}
+	var m *modelSpec
+	if req.Model != nil && !req.Model.Clear {
+		m = &req.Model.modelSpec
+	}
+	// A key is needed only when there is none stored to keep.
+	return invalidCustom(name, role, m, st.Model == nil || !st.Model.KeySet)
+}
+
+// find is one roster row by id.
+func find(roster []agentapi.Status, id string) (agentapi.Status, bool) {
+	for _, st := range roster {
+		if st.ID == id {
+			return st, true
+		}
+	}
+	return agentapi.Status{}, false
 }
 
 // activate refuses a duplicate, creates, and returns the finished roster row.
@@ -332,7 +512,7 @@ func (s *Server) activate(w http.ResponseWriter, cl *agent.Client, typeKey, mach
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if profile.Key == "" || typeKey == agentapi.BossID {
+	if profile.Key == "" || typeKey == agentapi.BossID || typeKey == agentapi.CustomType {
 		fail(w, http.StatusBadRequest, "unknown templateId")
 		return
 	}
@@ -348,12 +528,11 @@ func (s *Server) activate(w http.ResponseWriter, cl *agent.Client, typeKey, mach
 // finishActivate creates the agent and projects it as the app's roster row.
 func (s *Server) finishActivate(w http.ResponseWriter, cl *agent.Client,
 	p agentapi.Profile, machine string) {
-	rec, err := cl.CreateAgent(p.Key, p.Title)
+	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: p.Key, Name: p.Title})
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	st := agentapi.Status{ID: rec.ID, Name: rec.Name, Type: rec.Type}
 	writeJSON(w, http.StatusOK, projectAgent(st, p, machine, true))
 }
 

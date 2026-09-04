@@ -14,8 +14,8 @@ import (
 // -- both come back as the same refusal, so it cannot tell which it made.
 func TestBrowserProfilesGetTheSnapshotRuleInTheirPrompt(t *testing.T) {
 	dir := t.TempDir()
-	with := ComposeSystemPrompt(Profile{Browser: true}, roots{own: dir}, "", nil)
-	without := ComposeSystemPrompt(Profile{Browser: false}, roots{own: dir}, "", nil)
+	with := ComposeSystemPrompt(Profile{Browser: true}, Record{}, roots{own: dir}, "", nil)
+	without := ComposeSystemPrompt(Profile{Browser: false}, Record{}, roots{own: dir}, "", nil)
 	if !strings.Contains(with, "Take a snapshot before you act") {
 		t.Error("a browser profile was not told the snapshot rule")
 	}

@@ -282,7 +282,7 @@ func TestCompactionSurvivesRestartAndLeavesTheTranscriptAlone(t *testing.T) {
 		}
 	}
 
-	reopened, err := New("boss", a.dir, t.TempDir(), testProfile(), nil)
+	reopened, err := New(Record{ID: "boss", Name: "Boss"}, a.dir, t.TempDir(), testProfile(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

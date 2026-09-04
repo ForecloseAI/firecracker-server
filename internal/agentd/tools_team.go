@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"cracked/internal/agentapi"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/toolrunner"
 )
@@ -138,11 +140,23 @@ func listTypesTool(d toolDeps) (anthropic.BetaTool, error) {
 		"list_agent_types", "List the kinds of specialist you can create.",
 		func(ctx context.Context, _ noInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
 			var lines []string
-			for _, p := range d.team.Catalog().List() {
+			for _, p := range hireable(d.team.Catalog()) {
 				lines = append(lines, p.Key+" - "+p.Description)
 			}
 			return toolText(strings.Join(lines, "\n")), nil
 		})
+}
+
+// hireable is the gallery an agent may hire from: every profile but the shell
+// a person's own role goes into, which has no role of its own to offer.
+func hireable(c *Catalog) []Profile {
+	var out []Profile
+	for _, p := range c.List() {
+		if p.Key != agentapi.CustomType {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // createAgentTool adds a specialist to the roster.
@@ -153,12 +167,21 @@ func createAgentTool(d toolDeps) (anthropic.BetaTool, error) {
 			"Give them a human first name: the person sees this name at the top of a "+
 			"conversation and says it back, and \"whatsapp-researcher\" is not a name.",
 		func(ctx context.Context, in createAgentInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
-			rec, err := d.team.Create(in.Type, in.Name)
-			if err != nil {
-				return toolText(err.Error()), nil
-			}
-			return toolText("Created " + rec.ID + " (" + rec.Type + "). Delegate to it by that id."), nil
+			return toolText(hire(d.team, in)), nil
 		})
+}
+
+// hire adds a specialist for an agent, or says why not. A custom agent is
+// refused: its role is something only the person writes.
+func hire(team *Supervisor, in createAgentInput) string {
+	if in.Type == agentapi.CustomType {
+		return "Custom agents are made by the person in the app. Pick a profile from list_agent_types."
+	}
+	rec, err := team.Create(in.Type, in.Name)
+	if err != nil {
+		return err.Error()
+	}
+	return "Created " + rec.ID + " (" + rec.Type + "). Delegate to it by that id."
 }
 
 // deleteAgentTool removes a specialist, keeping its files.

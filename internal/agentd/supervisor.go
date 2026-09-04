@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -182,7 +183,8 @@ func (s *Supervisor) List() []Status {
 // history, which is exactly wrong: an evicted agent is the one most likely to
 // have a long one.
 func (s *Supervisor) statusFor(rec Record) Status {
-	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task}
+	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task,
+		Instructions: rec.Instructions, Model: rec.Model.View()}
 	l, ok := s.liveAgent(rec.ID)
 	if !ok {
 		_, last, _ := ReadLogSince(s.dirFor(rec.ID), 0)
@@ -272,7 +274,7 @@ func (s *Supervisor) start(rec Record) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	agent, err := New(rec.ID, s.dirFor(rec.ID), s.workspace, profile, s)
+	agent, err := New(rec, s.dirFor(rec.ID), s.workspace, profile, s)
 	if err != nil {
 		return nil, err
 	}
@@ -351,12 +353,122 @@ func (s *Supervisor) idleByAgeLocked() []string {
 }
 
 // Create adds an agent of the given type and starts nothing: it runs when it
-// is first addressed.
+// is first addressed. For one the person builds themselves, see CreateWith.
 func (s *Supervisor) Create(typeKey, name string) (Record, error) {
-	if _, ok := s.catalog.Get(typeKey); !ok {
-		return Record{}, fmt.Errorf("no profile %q", typeKey)
+	return s.CreateWith(agentapi.CreateAgentReq{Type: typeKey, Name: name})
+}
+
+// CreateWith adds an agent from a full request: type and name, and for a
+// custom agent the role the person wrote and the model they chose.
+func (s *Supervisor) CreateWith(req agentapi.CreateAgentReq) (Record, error) {
+	if _, ok := s.catalog.Get(req.Type); !ok {
+		return Record{}, fmt.Errorf("no profile %q", req.Type)
 	}
-	return s.roster.Add(typeKey, name)
+	if err := validRole(req.Instructions); err != nil {
+		return Record{}, err
+	}
+	if err := validModel(req.Model); err != nil {
+		return Record{}, err
+	}
+	return s.roster.Add(Record{Name: req.Name, Type: req.Type,
+		Instructions: req.Instructions, Model: req.Model})
+}
+
+// Update changes a custom agent's name, role or model, then makes it real: an
+// idle agent is recycled now, and a busy one is marked to recycle when its turn
+// ends -- the flag create_skill uses -- so the next reply is on the new prompt
+// either way. A change that is not live yet simply meets the record on start.
+func (s *Supervisor) Update(id string, p agentapi.AgentPatch) (Record, error) {
+	rec, err := s.roster.Update(id, func(r *Record) error { return applyPatch(r, p) })
+	if err != nil {
+		return Record{}, err
+	}
+	if !s.Recycle(id, nil) {
+		s.markStale(id)
+	}
+	return rec, nil
+}
+
+// markStale asks a live agent to recycle itself once its turn ends.
+func (s *Supervisor) markStale(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.agents[id]; ok {
+		l.agent.reload.set()
+	}
+}
+
+// applyPatch lays a patch over a record. Anyone may be renamed; only a custom
+// agent's role and model may change, because the shipped profiles are the
+// product and the boss is the boss.
+func applyPatch(r *Record, p agentapi.AgentPatch) error {
+	if r.Type != agentapi.CustomType && (p.Instructions != nil || p.Model != nil) {
+		return fmt.Errorf("%s is a %s, not a custom agent", r.ID, r.Type)
+	}
+	if p.Name != nil {
+		if strings.TrimSpace(*p.Name) == "" {
+			return errors.New("name: cannot be empty")
+		}
+		r.Name = strings.TrimSpace(*p.Name)
+	}
+	if p.Instructions != nil {
+		if err := validRole(*p.Instructions); err != nil {
+			return err
+		}
+		r.Instructions = *p.Instructions
+	}
+	if p.Model != nil {
+		return patchModel(r, p.Model)
+	}
+	return nil
+}
+
+// patchModel replaces or clears a record's model, keeping the stored key when
+// the patch carries none: the app never sees the key, so it cannot send it back.
+func patchModel(r *Record, m *agentapi.ModelPatch) error {
+	if m.Clear {
+		r.Model = nil
+		return nil
+	}
+	next := m.ModelConfig
+	if next.APIKey == "" && r.Model != nil {
+		next.APIKey = r.Model.APIKey
+	}
+	if err := validModel(&next); err != nil {
+		return err
+	}
+	r.Model = &next
+	return nil
+}
+
+// validRole bounds the role a person writes, at the same budget as the agent's
+// own instructions file, so one cannot crowd the rest of the prompt out.
+func validRole(role string) error {
+	if len(role) > instructionsCap {
+		return fmt.Errorf("instructions: longer than %d bytes", instructionsCap)
+	}
+	return nil
+}
+
+// validModel checks a custom model before it is stored: an endpoint this
+// machine may dial, a model id, a known thinking level, and a key.
+func validModel(m *agentapi.ModelConfig) error {
+	if m == nil {
+		return nil
+	}
+	if m.URL == "" || validSessionURL(m.URL) != nil {
+		return errors.New("model url: not something this machine can dial")
+	}
+	if strings.TrimSpace(m.Model) == "" {
+		return errors.New("model: a model id is required")
+	}
+	if m.Thinking != "" && !slices.Contains(agentapi.ThinkingLevels, m.Thinking) {
+		return fmt.Errorf("model thinking: %q is not low, medium or high", m.Thinking)
+	}
+	if m.APIKey == "" {
+		return errors.New("model: an api key is required")
+	}
+	return nil
 }
 
 // Delete stops an agent and removes it from the roster. With purge, its whole

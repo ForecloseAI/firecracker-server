@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"cracked/internal/agentapi"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -41,6 +44,14 @@ var routeTable = "/proc/net/route"
 type endpoint struct {
 	baseURL string
 	key     string
+	// model and thinking are per agent: a profile's model, or for a custom
+	// agent whatever the person chose, with how much it should reason.
+	model    string
+	thinking string
+	// anthropic says whether the far end is Anthropic itself, direct or via
+	// the broker. Only then do requests carry the betas and context management
+	// the loop relies on; another endpoint that speaks the API gets plain ones.
+	anthropic bool
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
 	err error
@@ -54,16 +65,29 @@ type endpoint struct {
 // names the broker; without that too, the broker is the default gateway.
 func defaultEndpoint() endpoint {
 	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" {
-		return endpoint{}
+		return endpoint{anthropic: true}
 	}
 	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
-		return endpoint{baseURL: base, key: brokerKey}
+		return endpoint{baseURL: base, key: brokerKey, anthropic: true}
 	}
 	gw, err := gatewayIP()
 	if err != nil {
-		return endpoint{err: err}
+		return endpoint{err: err, anthropic: true}
 	}
-	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey}
+	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey, anthropic: true}
+}
+
+// forAgent is this endpoint with the model one agent should call -- or, when
+// the person gave the agent a model of its own, that endpoint instead, on
+// their key. Their endpoint counts as Anthropic only when it is api.anthropic.com.
+func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
+	if own == nil {
+		ep.model = model
+		return ep
+	}
+	u, err := url.Parse(own.URL)
+	return endpoint{baseURL: own.URL, key: own.APIKey, model: own.Model, thinking: own.Thinking,
+		anthropic: err == nil && u.Hostname() == "api.anthropic.com"}
 }
 
 // newClient builds the SDK client for an endpoint. One construction path for

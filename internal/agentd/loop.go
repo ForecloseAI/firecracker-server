@@ -76,7 +76,7 @@ type Agent struct {
 	id     string
 	dir    string
 	client anthropic.Client
-	model  string
+	ep     endpoint
 	system string
 	tools  []anthropic.BetaTool
 	log    *Log
@@ -149,7 +149,8 @@ type inbound struct {
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
 // anywhere else just moves the knot.
-func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
+func New(rec Record, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
+	id := rec.ID
 	log, err := OpenLog(dir, id)
 	if err != nil {
 		return nil, err
@@ -180,10 +181,11 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	if err != nil {
 		return nil, err
 	}
+	ep := endpointOf(team).forAgent(p.Model, rec.Model)
 	a := &Agent{
-		id: id, dir: dir, client: newClient(endpointOf(team)),
-		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
-		tools: tools, log: log, gate: gate, team: team, state: "idle",
+		id: id, dir: dir, client: newClient(ep), ep: ep,
+		system: ComposeSystemPrompt(p, rec, r, stateDirOf(team), skills),
+		tools:  tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,
 	}
 	// Wired after the agent exists, because the gate is built before it and the
@@ -513,18 +515,51 @@ func (a *Agent) systemBlocks() []anthropic.BetaTextBlockParam {
 }
 
 // params builds the request for one turn from a candidate history.
+//
+// Thinking raises the ceiling by its own budget, because the budget has to fit
+// under max_tokens. Temperature is never set: thinking forbids it. Context
+// management and the betas go only to Anthropic itself; an endpoint of the
+// person's own that speaks the API is sent plain requests, and compaction
+// still bounds how long its conversation can grow.
 func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunnerParams {
-	return anthropic.BetaToolRunnerParams{
-		MaxIterations: maxIterations,
-		BetaMessageNewParams: anthropic.BetaMessageNewParams{
-			Model:             anthropic.Model(a.model),
-			MaxTokens:         maxTokens,
-			System:            a.systemBlocks(),
-			Messages:          msgs,
-			ContextManagement: contextManagement(),
-			Betas:             []anthropic.AnthropicBeta{anthropic.AnthropicBetaContextManagement2025_06_27},
-		},
+	p := anthropic.BetaMessageNewParams{
+		Model: anthropic.Model(a.ep.model), MaxTokens: maxTokens,
+		System: a.systemBlocks(), Messages: msgs,
 	}
+	budget := thinkingBudget(a.ep.thinking)
+	if budget > 0 {
+		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
+		p.MaxTokens = maxTokens + budget
+	}
+	if a.ep.anthropic {
+		p.ContextManagement = contextManagement()
+		p.Betas = betasFor(budget > 0)
+	}
+	return anthropic.BetaToolRunnerParams{MaxIterations: maxIterations, BetaMessageNewParams: p}
+}
+
+// thinkingBudget is how many tokens a level buys the model to reason with, or
+// zero for an agent that does not think out loud.
+func thinkingBudget(level string) int64 {
+	switch level {
+	case "low":
+		return 2048
+	case "medium":
+		return 8192
+	case "high":
+		return 16384
+	}
+	return 0
+}
+
+// betasFor is what a request to Anthropic opts into: context editing always,
+// and interleaved thinking when the agent reasons between tool calls.
+func betasFor(thinking bool) []anthropic.AnthropicBeta {
+	betas := []anthropic.AnthropicBeta{anthropic.AnthropicBetaContextManagement2025_06_27}
+	if thinking {
+		betas = append(betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14)
+	}
+	return betas
 }
 
 // contextManagement drops old tool results out of the request once a

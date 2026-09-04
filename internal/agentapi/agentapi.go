@@ -354,12 +354,78 @@ type Task struct {
 }
 
 // Record is one agent's durable identity: who it is, not whether it is running.
+//
+// Instructions and Model are set only for a custom agent, one the person built
+// in the app rather than picked from the gallery. The model carries the
+// person's own key, which is why a Record never leaves the guest: the host sees
+// a Status, whose ModelView has no key.
 type Record struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	CreatedAt time.Time `json:"created_at"`
-	Task      *Task     `json:"task,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Type         string       `json:"type"`
+	CreatedAt    time.Time    `json:"created_at"`
+	Task         *Task        `json:"task,omitempty"`
+	Instructions string       `json:"instructions,omitempty"`
+	Model        *ModelConfig `json:"model,omitempty"`
+}
+
+// CustomType is the profile key of an agent the person built themselves. Any
+// number of them may exist, which is the one way it differs from a gallery type.
+const CustomType = "custom"
+
+// ThinkingLevels are the values ModelConfig.Thinking may take besides "", which
+// is no extended thinking at all.
+var ThinkingLevels = []string{"low", "medium", "high"}
+
+// ModelConfig is a custom agent's own model: an endpoint that speaks the
+// Anthropic API, which the person pays for with their own key. It lives in
+// agents.json on the person's own machine and nowhere else.
+type ModelConfig struct {
+	URL      string `json:"url"`
+	APIKey   string `json:"api_key,omitempty"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking,omitempty"`
+}
+
+// View is the config as anyone outside the guest may see it: everything but
+// the key, and whether there is one.
+func (m *ModelConfig) View() *ModelView {
+	if m == nil {
+		return nil
+	}
+	return &ModelView{URL: m.URL, Model: m.Model, Thinking: m.Thinking, KeySet: m.APIKey != ""}
+}
+
+// ModelView is ModelConfig with the key replaced by whether one is set.
+type ModelView struct {
+	URL      string `json:"url"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking,omitempty"`
+	KeySet   bool   `json:"key_set"`
+}
+
+// CreateAgentReq is the body of POST /agents. Instructions and Model are for a
+// custom agent; a gallery type ignores them.
+type CreateAgentReq struct {
+	Type         string       `json:"type"`
+	Name         string       `json:"name"`
+	Instructions string       `json:"instructions,omitempty"`
+	Model        *ModelConfig `json:"model,omitempty"`
+}
+
+// AgentPatch is the body of PATCH /agents/{id}. A nil field is left alone.
+type AgentPatch struct {
+	Name         *string     `json:"name,omitempty"`
+	Instructions *string     `json:"instructions,omitempty"`
+	Model        *ModelPatch `json:"model,omitempty"`
+}
+
+// ModelPatch replaces a custom agent's model. Clear returns it to the default;
+// otherwise an empty APIKey keeps the stored one, since the app never sees it
+// and so cannot send it back.
+type ModelPatch struct {
+	Clear bool `json:"clear,omitempty"`
+	ModelConfig
 }
 
 // Schedule is a standing instruction to message an agent at a given time.
@@ -381,16 +447,20 @@ type Schedule struct {
 	Enabled   bool      `json:"enabled"`
 }
 
-// Status is one agent as GET /agents reports it: identity plus what it is doing.
+// Status is one agent as GET /agents reports it: identity plus what it is
+// doing. For a custom agent it carries the role the person wrote and a view of
+// its model -- never the key, which stays in the Record on the guest.
 type Status struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	State        string `json:"state"`
-	Live         bool   `json:"live"`
-	Task         *Task  `json:"task,omitempty"`
-	LastEventID  int    `json:"last_event_id"`
-	Conversation int    `json:"conversation_bytes"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Type         string     `json:"type"`
+	State        string     `json:"state"`
+	Live         bool       `json:"live"`
+	Task         *Task      `json:"task,omitempty"`
+	LastEventID  int        `json:"last_event_id"`
+	Conversation int        `json:"conversation_bytes"`
+	Instructions string     `json:"instructions,omitempty"`
+	Model        *ModelView `json:"model,omitempty"`
 }
 
 // Health is GET /health. Ready is constant true rather than a real signal, and

@@ -157,11 +157,14 @@ Do not try to reach the host machine or any other virtual machine.`
 // reaches a running agent on its next start rather than mid-session -- the same
 // refresh-by-eviction rule memory already has, and what keeps the cached prefix
 // stable.
-func ComposeSystemPrompt(p Profile, r roots, stateDir string, skills []Skill) string {
+func ComposeSystemPrompt(p Profile, rec Record, r roots, stateDir string, skills []Skill) string {
 	agentDir := r.own
 	parts := []string{BaseIdentity}
 	if p.Browser {
 		parts = append(parts, BrowserGuidance)
+	}
+	if who := renderIdentity(rec); who != "" {
+		parts = append(parts, who)
 	}
 	if role := strings.TrimSpace(p.Prompt); role != "" {
 		parts = append(parts, role)
@@ -180,6 +183,24 @@ func ComposeSystemPrompt(p Profile, r roots, stateDir string, skills []Skill) st
 		parts = append(parts, "## Your standing instructions\n"+own)
 	}
 	return strings.Join(append(parts, BaseLimits), "\n\n")
+}
+
+// renderIdentity names the agent and, for one the person built, the role they
+// wrote. The name had been missing from the prompt entirely, and a personality
+// with no name is an odd thing; the role sits before the profile's own text so
+// a profile can build on it, and before memory so who is speaking comes before
+// what they know. Empty for a record with nothing in it, which is only a test.
+func renderIdentity(rec Record) string {
+	name := orDefault(rec.Name, rec.ID)
+	if name == "" {
+		return ""
+	}
+	out := "## Who you are\nYour name is " + name + ". The person sees it at the top of " +
+		"the conversation and will say it back to you."
+	if role := strings.TrimSpace(rec.Instructions); role != "" {
+		out += "\n\n## Your role, as the person set it\n" + role
+	}
+	return out
 }
 
 // readCapped reads a file, truncated to a byte budget, or "" when it cannot be

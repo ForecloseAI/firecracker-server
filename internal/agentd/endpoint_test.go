@@ -2,11 +2,14 @@ package agentd
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cracked/internal/agentapi"
 )
 
 // routeFixture is a guest's routing table: the tap's own /30, a default-looking
@@ -67,7 +70,7 @@ func TestNoDefaultRouteIsAnError(t *testing.T) {
 func TestAnEnvCredentialWinsOverTheBroker(t *testing.T) {
 	clearModelEnv(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-x")
-	if ep := defaultEndpoint(); ep != (endpoint{}) {
+	if ep := defaultEndpoint(); ep != (endpoint{anthropic: true}) {
 		t.Fatalf("with a key in the environment the endpoint was %+v", ep)
 	}
 	if line := defaultEndpoint().String(); !strings.Contains(line, "environment") {
@@ -90,6 +93,7 @@ func TestBrokeredModeHonoursABaseURLOverride(t *testing.T) {
 type modelSpy struct {
 	srv                      *httptest.Server
 	path, key, version, beta string
+	reply, lastBody          string
 }
 
 // modelReply is the smallest assistant message the SDK accepts: one text block,
@@ -101,12 +105,14 @@ const modelReply = `{"id":"msg_test","type":"message","role":"assistant","model"
 // fakeModel answers every request with modelReply.
 func fakeModel(t *testing.T) *modelSpy {
 	t.Helper()
-	spy := &modelSpy{}
+	spy := &modelSpy{reply: modelReply}
 	spy.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		spy.lastBody = string(body)
 		spy.path, spy.key = r.URL.Path, r.Header.Get("x-api-key")
 		spy.version, spy.beta = r.Header.Get("anthropic-version"), r.Header.Get("anthropic-beta")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(modelReply))
+		w.Write([]byte(spy.reply))
 	}))
 	t.Cleanup(spy.srv.Close)
 	return spy
@@ -121,7 +127,7 @@ func TestATurnReachesTheModelThroughTheBaseURLSeam(t *testing.T) {
 	clearModelEnv(t)
 	fake := fakeModel(t)
 	t.Setenv("ANTHROPIC_BASE_URL", fake.srv.URL)
-	a, err := New("boss", t.TempDir(), t.TempDir(), testProfile(), nil)
+	a, err := New(Record{ID: "boss", Name: "Boss"}, t.TempDir(), t.TempDir(), testProfile(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,5 +169,67 @@ func assertTurnLogged(t *testing.T, a *Agent) {
 	}
 	if n := len(a.Messages()); n != 2 {
 		t.Errorf("history has %d messages, want the question and the answer", n)
+	}
+}
+
+// The person's own endpoint replaces the machine's for that one agent -- their
+// URL, their key, their model, their thinking level -- and counts as Anthropic
+// only when it actually is.
+func TestAPersonsOwnEndpointReplacesTheMachines(t *testing.T) {
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, anthropic: true}
+	if ep := base.forAgent("claude-sonnet-5", nil); ep.model != "claude-sonnet-5" ||
+		ep.baseURL != base.baseURL || ep.key != brokerKey || !ep.anthropic {
+		t.Fatalf("machine endpoint for a gallery agent: %+v", ep)
+	}
+	own := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own", Model: "m", Thinking: "high"}
+	if ep := base.forAgent("claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
+		ep.model != "m" || ep.thinking != "high" || ep.anthropic {
+		t.Fatalf("own endpoint: %+v", ep)
+	}
+	direct := base.forAgent("x", &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"})
+	if !direct.anthropic {
+		t.Error("api.anthropic.com on the person's own key was not treated as Anthropic")
+	}
+}
+
+// thinkingReply is an assistant message that reasoned first: a signed thinking
+// block, then the text.
+const thinkingReply = `{"id":"msg_t","type":"message","role":"assistant","model":"m",` +
+	`"content":[{"type":"thinking","thinking":"Let me think.","signature":"sig-123"},{"type":"text","text":"hello"}],` +
+	`"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":5}}`
+
+// A thinking block carries a signature the API checks byte for byte on the next
+// request, so it has to survive the round trip through conversation.json and the
+// tail repair a restart runs -- or the agent's next turn is rejected. Two turns
+// through a fake model that reasons, with a restart between them, and the
+// second request read off the wire.
+func TestAThinkingBlockSurvivesARestartIntact(t *testing.T) {
+	clearModelEnv(t)
+	fake := fakeModel(t)
+	fake.reply = thinkingReply
+	rec := Record{ID: "boss", Name: "Boss", Model: &agentapi.ModelConfig{
+		URL: fake.srv.URL, APIKey: "sk-own", Model: "m", Thinking: "low"}}
+	dir, ws := t.TempDir(), t.TempDir()
+	a, err := New(rec, dir, ws, testProfile(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	again, err := New(rec, dir, ws, testProfile(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := again.Turn(context.Background(), "and again"); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	for _, want := range []string{`"signature":"sig-123"`, `"thinking":"Let me think."`, `"budget_tokens":2048`} {
+		if !strings.Contains(fake.lastBody, want) {
+			t.Errorf("the second request lacks %s:\n%s", want, fake.lastBody)
+		}
+	}
+	if fake.key != "sk-own" {
+		t.Errorf("the person's own key was not used: %q", fake.key)
 	}
 }

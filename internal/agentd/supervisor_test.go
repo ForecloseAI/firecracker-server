@@ -195,7 +195,7 @@ func TestRosterSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.EnsureBoss("boss")
-	first.Add("analyst", "Bo")
+	first.Add(Record{Type: "analyst", Name: "Bo"})
 
 	again, err := LoadRoster(dir)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestNoCapacityWhenEverythingIsBusy(t *testing.T) {
 // way. The returned flag reports whether the agent's context was cancelled.
 func liveWithoutGoroutine(t *testing.T, sup *Supervisor, id string) (*Agent, *bool) {
 	t.Helper()
-	a, err := New(id, t.TempDir(), t.TempDir(), testProfile(), sup)
+	a, err := New(Record{ID: id, Name: id}, t.TempDir(), t.TempDir(), testProfile(), sup)
 	if err != nil {
 		t.Fatal(err)
 	}
