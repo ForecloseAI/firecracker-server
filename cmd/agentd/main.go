@@ -66,22 +66,11 @@ func run(once, profile, model, workspace, stateDir, addr string, maxLive int) er
 		return err
 	}
 	defer sup.Close()
-	logEndpoint()
+	log.Printf("agentd: model calls go through %s", sup.ModelRoute())
 	if once != "" {
 		return runOnce(sup, profile, once)
 	}
 	return serve(ctx, sup, addr)
-}
-
-// logEndpoint says at startup how model calls will travel, so a guest with no
-// way to the model is diagnosed from one line rather than one failed turn at a
-// time: without it a daemon with no route boots clean, answers /health with
-// ok:true, accepts messages with 202, and buries the real error in one agent's
-// event log. A line and not a fatal on purpose: Restart=always would turn a
-// config problem into a crash loop that still satisfies the control plane's
-// TCP boot probe, which is strictly harder to diagnose than this.
-func logEndpoint() {
-	log.Printf("agentd: model calls go through %s", agentd.DescribeEndpoint())
 }
 
 // serve runs the HTTP surface until interrupted.

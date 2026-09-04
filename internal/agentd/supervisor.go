@@ -38,8 +38,11 @@ type Supervisor struct {
 	catalog   *Catalog
 	model     string // overrides the profile's model when set, for cheap testing
 	maxLive   int
-	roster    *Roster
-	ctx       context.Context
+	// endpoint is how every agent on this machine reaches the model, decided
+	// once here so the startup line and the agents cannot disagree.
+	endpoint endpoint
+	roster   *Roster
+	ctx      context.Context
 
 	// wg tracks running agent goroutines so shutdown can wait for them.
 	wg sync.WaitGroup
@@ -107,7 +110,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	}
 	s := &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
-		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
+		model: model, maxLive: maxLive, roster: roster, ctx: ctx, endpoint: defaultEndpoint(),
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
 		apps:  newAppsServer(ReadApps(stateDir)),
 		meter: OpenMeter(stateDir), hub: NewInteractions(), schedules: schedules,
@@ -120,6 +123,13 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	go s.runSchedules()
 	return s, nil
 }
+
+// ModelRoute says how model calls travel, for the startup line. Said once at
+// boot so a guest with no way to the model is diagnosed there rather than one
+// failed turn at a time: otherwise a daemon with no route boots clean, answers
+// /health with ok:true, accepts messages with 202, and buries the real error in
+// one agent's event log.
+func (s *Supervisor) ModelRoute() string { return s.endpoint.String() }
 
 // Schedules exposes the machine's schedules, for the HTTP surface and the tools.
 func (s *Supervisor) Schedules() *ScheduleStore { return s.schedules }

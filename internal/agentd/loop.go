@@ -142,9 +142,9 @@ type inbound struct {
 }
 
 // New builds an agent rooted at dir, working in workspace, restoring its
-// conversation and log from disk. The model client comes from defaultEndpoint:
-// a credential in the environment when there is one, otherwise the host's
-// broker on this guest's own gateway.
+// conversation and log from disk. The model client is built for the team's
+// endpoint: a credential in the environment when there is one, otherwise the
+// host's broker on this guest's own gateway.
 //
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
@@ -181,7 +181,7 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 		return nil, err
 	}
 	a := &Agent{
-		id: id, dir: dir, client: newClient(defaultEndpoint()),
+		id: id, dir: dir, client: newClient(endpointOf(team)),
 		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
 		tools: tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,
@@ -203,6 +203,15 @@ func appsOf(team *Supervisor) *appsServer {
 		return nil
 	}
 	return team.Apps()
+}
+
+// endpointOf is the machine's model endpoint, or the process default when this
+// agent has no team -- which is only ever the case in a unit test.
+func endpointOf(team *Supervisor) endpoint {
+	if team == nil {
+		return defaultEndpoint()
+	}
+	return team.endpoint
 }
 
 // hubOf is the machine's interaction hub, or nil when this agent has no team --

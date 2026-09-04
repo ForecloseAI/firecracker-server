@@ -62,7 +62,8 @@ func logged(next http.Handler, bodies bool, auth *Verifier) http.Handler {
 		if bodies {
 			req = captureRequest(r)
 		}
-		lw := &logWriter{ResponseWriter: w, status: http.StatusOK, keep: bodies, user: user, req: r}
+		lw := &logWriter{statusWriter: statusWriter{ResponseWriter: w, code: http.StatusOK},
+			keep: bodies, user: user, req: r}
 		next.ServeHTTP(lw, r)
 		lw.report(start, user, req)
 	})
@@ -83,8 +84,7 @@ func captureRequest(r *http.Request) string {
 
 // logWriter remembers what a handler answered.
 type logWriter struct {
-	http.ResponseWriter
-	status int
+	statusWriter
 	body   bytes.Buffer
 	keep   bool
 	sse    bool
@@ -93,21 +93,16 @@ type logWriter struct {
 	req    *http.Request
 }
 
-// Unwrap lets http.NewResponseController reach the real writer, which is what
-// keeps SSE flushing and deadline clearing working through this wrapper.
-func (w *logWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
 // WriteHeader records the status, and announces a stream as it opens rather
 // than only when it ends -- a stream that stays open for an hour would
 // otherwise be invisible for an hour.
 func (w *logWriter) WriteHeader(code int) {
-	w.status = code
 	w.sse = strings.HasPrefix(w.Header().Get("Content-Type"), "text/event-stream")
 	if w.sse && !w.opened {
 		w.opened = true
 		log.Printf("SSE open  %s %s user=%s", w.req.Method, redact(w.req.URL.RequestURI()), or(w.user))
 	}
-	w.ResponseWriter.WriteHeader(code)
+	w.statusWriter.WriteHeader(code)
 }
 
 // Write copies what is sent, except for a stream, which never ends.
@@ -133,7 +128,7 @@ func (w *logWriter) report(start time.Time, user, req string) {
 		log.Printf("SSE close %s %s %s user=%s", w.req.Method, uri, took, or(user))
 		return
 	}
-	log.Printf("%d %s %s %s user=%s%s%s", w.status, w.req.Method, uri, took, or(user),
+	log.Printf("%d %s %s %s user=%s%s%s", w.code, w.req.Method, uri, took, or(user),
 		field(" req=", req), field(" res=", w.body.String()))
 }
 

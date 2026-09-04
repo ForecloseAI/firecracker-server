@@ -140,16 +140,6 @@ func (g *AppsGateway) route(ticket, remote string) (appsRoute, bool) {
 	return r, true
 }
 
-// Routes is the handler guests reach. Everything that is not a valid ticket
-// from the right address is 404: a broker that distinguished "no such ticket"
-// from "wrong address" would be an oracle for guessing them.
-func (g *AppsGateway) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc(appsGatewayPrefix, g.serve)
-	mux.HandleFunc("/", http.NotFound)
-	return mux
-}
-
 // serve resolves the ticket and, if it names a route this guest may use, hands
 // the request to a proxy built for that one route.
 //
@@ -211,18 +201,6 @@ func (g *AppsGateway) proxyTo(route appsRoute) *httputil.ReverseProxy {
 			http.Error(w, "the app service is not answering", http.StatusBadGateway)
 		},
 	}
-}
-
-// keepHeaders copies only the allowed headers out of a request's set, so what
-// comes back is exactly the allow list and nothing the guest added.
-func keepHeaders(in http.Header, allow []string) http.Header {
-	kept := make(http.Header, len(allow))
-	for _, h := range allow {
-		if v := in.Values(h); len(v) > 0 {
-			kept[http.CanonicalHeaderKey(h)] = v
-		}
-	}
-	return kept
 }
 
 // hideURL renders an error with the upstream taken out of it.

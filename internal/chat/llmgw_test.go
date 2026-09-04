@@ -2,70 +2,17 @@ package chat
 
 import (
 	"bufio"
-	"bytes"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// modelUpstream stands in for the model service and records what arrived.
-type modelUpstream struct {
-	srv         *httptest.Server
-	hits        int
-	path, query string
-	hdr         http.Header
-	body        string
-}
-
-// newModelUpstream answers everything with a bare message object.
-func newModelUpstream(t *testing.T) *modelUpstream {
-	t.Helper()
-	up := &modelUpstream{}
-	up.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		up.hits++
-		up.path, up.query, up.hdr, up.body = r.URL.Path, r.URL.RawQuery, r.Header.Clone(), string(b)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"type":"message"}`))
-	}))
-	t.Cleanup(up.srv.Close)
-	return up
-}
-
-// guestListener is the handler tree a guest sees, with only the model broker.
-func guestListener(t *testing.T, upstream string) http.Handler {
-	t.Helper()
-	h := (&Server{llm: NewLLMGateway("sk-ant-host", upstream)}).GuestRoutes()
-	if h == nil {
-		t.Fatal("no guest routes with a model key set")
-	}
-	return h
-}
-
-// askModel sends one request to the guest listener from a chosen address.
-func askModel(h http.Handler, method, target, from string, hdr map[string]string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, strings.NewReader(`{"model":"claude-sonnet-5"}`))
-	req.RemoteAddr = from + ":51234"
-	for k, v := range hdr {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-// captureLog routes the standard logger into a buffer for one test.
-func captureLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	return &buf
+// modelBroker is the guest listener with only the model broker on it.
+func modelBroker(upstream string) http.Handler {
+	return guestRoutes(nil, NewLLMGateway("sk-ant-host", mustURL(upstream)))
 }
 
 // The happy path. The SDK's own path and query -- ?beta=true included -- must
@@ -73,12 +20,12 @@ func captureLog(t *testing.T) *bytes.Buffer {
 // the SDK depends on must survive: drop anthropic-version or anthropic-beta and
 // every turn fails.
 func TestTheBrokerAddsTheKeyAndKeepsThePath(t *testing.T) {
-	up := newModelUpstream(t)
-	h := guestListener(t, up.srv.URL)
-	rec := askModel(h, http.MethodPost, "/v1/messages?beta=true", "172.16.0.2", map[string]string{
+	up := newUpstream(t)
+	h := modelBroker(up.srv.URL)
+	rec := askGuest(h, http.MethodPost, "/v1/messages?beta=true", "172.16.0.2", map[string]string{
 		"Content-Type": "application/json", "Anthropic-Version": "2023-06-01",
 		"Anthropic-Beta": "context-management-2025-06-27", "X-Api-Key": "brokered"})
-	if rec.Code != http.StatusOK || rec.Body.String() != `{"type":"message"}` {
+	if rec.Code != http.StatusOK || rec.Body.String() != "upstream ok" {
 		t.Fatalf("status %d body %q", rec.Code, rec.Body)
 	}
 	if up.path != "/v1/messages" || up.query != "beta=true" {
@@ -92,20 +39,20 @@ func TestTheBrokerAddsTheKeyAndKeepsThePath(t *testing.T) {
 		t.Errorf("anthropic headers arrived as %q / %q",
 			up.hdr.Get("anthropic-version"), up.hdr.Get("anthropic-beta"))
 	}
-	if up.body != `{"model":"claude-sonnet-5"}` {
+	if up.body != `{"jsonrpc":"2.0"}` {
 		t.Errorf("body arrived as %q", up.body)
 	}
-	if rec := askModel(h, http.MethodPost, "/v1/messages/count_tokens?beta=true", "172.16.0.2", nil); rec.Code != http.StatusOK || up.path != "/v1/messages/count_tokens" {
-		t.Errorf("count_tokens: status %d path %s", rec.Code, up.path)
+	askGuest(h, http.MethodPost, "/v1/messages/count_tokens?beta=true", "172.16.0.2", nil)
+	if up.path != "/v1/messages/count_tokens" {
+		t.Errorf("count_tokens arrived as %s", up.path)
 	}
 }
 
 // A guest is untrusted, so what it sends is replaced rather than edited: its own
 // key, any bearer token, cookies and forwarding headers must not reach the model.
 func TestAGuestCannotSmuggleCredentialsToTheModel(t *testing.T) {
-	up := newModelUpstream(t)
-	h := guestListener(t, up.srv.URL)
-	askModel(h, http.MethodPost, "/v1/messages", "172.16.0.2", map[string]string{
+	up := newUpstream(t)
+	askGuest(modelBroker(up.srv.URL), http.MethodPost, "/v1/messages", "172.16.0.2", map[string]string{
 		"X-Api-Key": "sk-ant-guest", "Authorization": "Bearer stolen", "Proxy-Authorization": "x",
 		"Cookie": "session=1", "X-Forwarded-For": "1.2.3.4"})
 	if up.hdr.Get("x-api-key") != "sk-ant-host" {
@@ -118,21 +65,22 @@ func TestAGuestCannotSmuggleCredentialsToTheModel(t *testing.T) {
 	}
 }
 
-// The gate is the source address. Loopback and anything off the guest range is
-// refused with a 404 before the model is dialled, and refused the same way as
-// an unknown path so nothing about the listener can be probed.
+// The gate is the source address, and it is the guest grid exactly: loopback,
+// other private ranges, the host's own tap address and an off-grid address are
+// all refused with a 404 before the model is dialled -- the same 404 as an
+// unknown path, so nothing about the listener can be probed.
 func TestOnlyAGuestAddressMayUseTheModelBroker(t *testing.T) {
-	up := newModelUpstream(t)
-	h := guestListener(t, up.srv.URL)
-	for _, from := range []string{"127.0.0.1", "10.0.0.5", "172.17.0.2", "192.168.1.2"} {
-		if rec := askModel(h, http.MethodPost, "/v1/messages", from, nil); rec.Code != http.StatusNotFound {
+	up := newUpstream(t)
+	h := modelBroker(up.srv.URL)
+	for _, from := range []string{"127.0.0.1", "10.0.0.5", "172.17.0.2", "192.168.1.2", "172.16.0.1", "172.16.0.3"} {
+		if rec := askGuest(h, http.MethodPost, "/v1/messages", from, nil); rec.Code != http.StatusNotFound {
 			t.Errorf("from %s: status %d", from, rec.Code)
 		}
 	}
 	if up.hits != 0 {
 		t.Fatalf("the model was dialled %d times for refused requests", up.hits)
 	}
-	if rec := askModel(h, http.MethodPost, "/v1/messages", "172.16.4.2", nil); rec.Code != http.StatusOK {
+	if rec := askGuest(h, http.MethodPost, "/v1/messages", "172.16.0.6", nil); rec.Code != http.StatusOK {
 		t.Errorf("slot 1's guest was refused: %d", rec.Code)
 	}
 }
@@ -140,15 +88,15 @@ func TestOnlyAGuestAddressMayUseTheModelBroker(t *testing.T) {
 // The key is lent for turns and nothing wider: only the two message endpoints,
 // and only POST. Everything else the key could reach is 404.
 func TestOnlyTheTwoMessagePathsAreProxied(t *testing.T) {
-	up := newModelUpstream(t)
-	h := guestListener(t, up.srv.URL)
+	up := newUpstream(t)
+	h := modelBroker(up.srv.URL)
 	refused := []struct{ method, path string }{
 		{http.MethodGet, "/v1/messages"}, {http.MethodPost, "/v1/models"},
 		{http.MethodPost, "/v1/complete"}, {http.MethodPost, "/v1/messages/batches"},
 		{http.MethodPost, "/v1/messages/"}, {http.MethodPost, "/v1/files"},
 	}
 	for _, r := range refused {
-		if rec := askModel(h, r.method, r.path, "172.16.0.2", nil); rec.Code != http.StatusNotFound {
+		if rec := askGuest(h, r.method, r.path, "172.16.0.2", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s: status %d", r.method, r.path, rec.Code)
 		}
 	}
@@ -171,10 +119,10 @@ func TestAStreamedResponseIsFlushedAsItArrives(t *testing.T) {
 		<-release
 	}))
 	t.Cleanup(model.Close)
-	guest := guestListener(t, model.URL)
+	broker := modelBroker(model.URL)
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.RemoteAddr = "172.16.0.2:40000"
-		guest.ServeHTTP(w, r)
+		broker.ServeHTTP(w, r)
 	}))
 	t.Cleanup(listener.Close)
 
@@ -191,33 +139,33 @@ func TestAStreamedResponseIsFlushedAsItArrives(t *testing.T) {
 	}
 }
 
-// When the model cannot be reached, neither the guest nor the journal learns
-// the key or where the model lives. The guest gets a plain 502.
-func TestAnUpstreamFailureNamesNeitherKeyNorHost(t *testing.T) {
+// When the model cannot be reached the guest gets a plain 502 that names
+// neither the key nor the upstream. The journal may name the upstream -- it is
+// no secret -- but never the key.
+func TestAnUpstreamFailureNeverNamesTheKey(t *testing.T) {
 	buf := captureLog(t)
-	h := guestListener(t, "http://127.0.0.1:1")
-	rec := askModel(h, http.MethodPost, "/v1/messages", "172.16.0.2", nil)
+	rec := askGuest(modelBroker("http://127.0.0.1:1"), http.MethodPost, "/v1/messages", "172.16.0.2", nil)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d", rec.Code)
 	}
-	for _, leak := range []string{"sk-ant-host", "http://127.0.0.1:1"} {
-		if strings.Contains(rec.Body.String(), leak) || strings.Contains(buf.String(), leak) {
-			t.Errorf("%q leaked: body %q log %q", leak, rec.Body, buf)
-		}
+	if body := rec.Body.String(); strings.Contains(body, "sk-ant-host") || strings.Contains(body, "127.0.0.1") {
+		t.Errorf("the failure told the guest too much: %q", body)
+	}
+	if strings.Contains(buf.String(), "sk-ant-host") {
+		t.Errorf("the key reached the journal: %q", buf)
 	}
 }
 
-// One line per request, saying who, what and how it went -- and never the body,
-// which is the person's own prompt.
-func TestEveryRequestLogsSlotPathStatusButNoBody(t *testing.T) {
+// One line per guest request, saying who, what and how it went -- and never
+// the body, which is the person's own prompt.
+func TestEveryGuestRequestIsLoggedWithoutItsBody(t *testing.T) {
 	buf := captureLog(t)
-	up := newModelUpstream(t)
-	h := guestListener(t, up.srv.URL)
+	up := newUpstream(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("the person's private prompt"))
 	req.RemoteAddr = "172.16.0.2:51234"
-	h.ServeHTTP(httptest.NewRecorder(), req)
+	modelBroker(up.srv.URL).ServeHTTP(httptest.NewRecorder(), req)
 	line := buf.String()
-	for _, want := range []string{"slot 0", "POST /v1/messages", "200"} {
+	for _, want := range []string{"172.16.0.2", "POST /v1/messages", "200"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log %q lacks %q", line, want)
 		}
@@ -227,22 +175,29 @@ func TestEveryRequestLogsSlotPathStatusButNoBody(t *testing.T) {
 	}
 }
 
-// No key, no broker; and each broker is mounted only when it exists, so a
-// listener with just one of them still 404s the other's prefix.
-func TestNoModelKeyMeansNoModelBroker(t *testing.T) {
-	if NewLLMGateway("", "https://api.anthropic.com") != nil {
-		t.Fatal("a broker was built with no key")
+// An apps ticket is half of what lets a request through, so the shared log line
+// must not carry it even though it is in the path.
+func TestTheGuestLogNeverCarriesATicket(t *testing.T) {
+	buf := captureLog(t)
+	askGuest(guestRoutes(NewAppsGateway("k", "0.0.0.0:8092"), nil), http.MethodPost,
+		"/apps/deadbeefcafe/mcp", "172.16.0.2", nil)
+	if line := buf.String(); strings.Contains(line, "deadbeefcafe") || !strings.Contains(line, "/apps/") {
+		t.Errorf("log %q", line)
 	}
-	if (&Server{}).GuestRoutes() != nil {
-		t.Fatal("guest routes exist with nothing to broker")
-	}
-	up := newModelUpstream(t)
-	llmOnly := guestListener(t, up.srv.URL)
-	if rec := askModel(llmOnly, http.MethodPost, "/apps/anything", "172.16.0.2", nil); rec.Code != http.StatusNotFound {
+}
+
+// Each broker is mounted only when it exists, so a listener with just one of
+// them 404s the other's prefix rather than routing it somewhere surprising.
+func TestEachBrokerIsMountedOnlyWhenPresent(t *testing.T) {
+	up := newUpstream(t)
+	if rec := askGuest(modelBroker(up.srv.URL), http.MethodPost, "/apps/anything", "172.16.0.2", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("/apps/ answered %d with no apps broker", rec.Code)
 	}
-	appsOnly := (&Server{gw: NewAppsGateway("k", "0.0.0.0:8092")}).GuestRoutes()
-	if rec := askModel(appsOnly, http.MethodPost, "/v1/messages", "172.16.0.2", nil); rec.Code != http.StatusNotFound {
+	appsOnly := guestRoutes(NewAppsGateway("k", "0.0.0.0:8092"), nil)
+	if rec := askGuest(appsOnly, http.MethodPost, "/v1/messages", "172.16.0.2", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("/v1/ answered %d with no model broker", rec.Code)
+	}
+	if up.hits != 0 {
+		t.Errorf("the model was dialled %d times", up.hits)
 	}
 }

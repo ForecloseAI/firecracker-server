@@ -41,11 +41,8 @@ func run() error {
 	go listen(cfg.Addr, srv.Routes(), "chat")
 	go listen(cfg.VNCAddr, gw.Routes(), "vnc")
 	// The one listener a guest can reach: the connected-apps broker and the
-	// model broker share it. Nil only when there is nothing to broker, which
-	// with the model key required can no longer happen in production.
-	if guest := srv.GuestRoutes(); guest != nil {
-		go listen(cfg.AppsAddr, guest, "guest")
-	}
+	// model broker share it. Always open, because the model key is required.
+	go listen(cfg.AppsAddr, srv.GuestRoutes(), "guest")
 	return waitForSignal()
 }
 

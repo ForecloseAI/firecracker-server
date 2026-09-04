@@ -2,6 +2,7 @@ package hostnet
 
 import (
 	"fmt"
+	"net/netip"
 	"testing"
 )
 
@@ -82,15 +83,15 @@ func TestGuestIsHostPlusOneWithinTheSame24(t *testing.T) {
 func TestSlotOfInvertsSlotAddrs(t *testing.T) {
 	for slot := 0; slot <= 1000; slot++ {
 		host, guest, _ := SlotAddrs(slot)
-		if got, ok := SlotOf(guest); !ok || got != slot {
+		if got, ok := SlotOf(netip.MustParseAddr(guest)); !ok || got != slot {
 			t.Fatalf("SlotOf(%s) = %d, %v; want %d", guest, got, ok, slot)
 		}
-		if _, ok := SlotOf(host); ok {
+		if _, ok := SlotOf(netip.MustParseAddr(host)); ok {
 			t.Fatalf("SlotOf(%s) accepted a host address", host)
 		}
 	}
-	for _, bad := range []string{"172.16.0.3", "172.16.0.0", "10.0.0.2", "172.17.0.2", "::1", "nonsense"} {
-		if _, ok := SlotOf(bad); ok {
+	for _, bad := range []string{"172.16.0.3", "172.16.0.0", "10.0.0.2", "172.17.0.2", "::1"} {
+		if _, ok := SlotOf(netip.MustParseAddr(bad)); ok {
 			t.Errorf("SlotOf(%q) accepted a non-guest", bad)
 		}
 	}

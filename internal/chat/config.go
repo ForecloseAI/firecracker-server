@@ -51,8 +51,9 @@ type Config struct {
 	// every machine on the fleet unable to take a turn.
 	AnthropicKey string
 	// AnthropicUpstream is where brokered model calls go. Scheme and host only;
-	// the guest's own path and query ride through. A test host overrides it.
-	AnthropicUpstream string
+	// the guest's own path and query ride through. Parsed here, once, so the
+	// broker is handed something already known to be sound.
+	AnthropicUpstream *url.URL
 	// ComposioCallback is where a person lands after approving an app. It has to
 	// be a page this service serves, because the browser coming back from a
 	// provider carries no token and a custom scheme is not reliably followed
@@ -77,9 +78,10 @@ func LoadConfig() (Config, error) {
 		ComposioBase:        env("COMPOSIO_BASE_URL", ""),
 		AppsAddr:            env("CHAT_APPS_ADDR", "0.0.0.0:8092"),
 
-		AnthropicKey:      env("ANTHROPIC_API_KEY", ""),
-		AnthropicUpstream: env("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"),
+		AnthropicKey: env("ANTHROPIC_API_KEY", ""),
 	}
+	// A parse failure leaves nil, which validate refuses by name.
+	c.AnthropicUpstream, _ = url.Parse(env("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"))
 	c.ComposioCallback = env("COMPOSIO_CALLBACK_URL", c.Origin+connectedPath)
 	return c, c.validate()
 }
@@ -111,12 +113,8 @@ func (c Config) validate() error {
 }
 
 // validateGuest checks the guest listener and where its model broker forwards.
-//
-// The listener always opens now that the model broker lives on it, so its
-// address is checked unconditionally. env() gives it a default, so the failure
-// this catches is a missing port -- "8092" or a bare host -- which would once
-// have turned connected apps off in silence. A non-numeric port is left to
-// listen(), which fails loudly on its own.
+// The listener always opens, so its address is checked unconditionally; a
+// non-numeric port is left to listen(), which fails loudly on its own.
 func (c Config) validateGuest() error {
 	if _, _, err := net.SplitHostPort(c.AppsAddr); err != nil {
 		return fmt.Errorf("CHAT_APPS_ADDR must be host:port: %w", err)
@@ -130,9 +128,8 @@ func (c Config) validateGuest() error {
 // validUpstream accepts a bare https origin, or plain http on loopback for a
 // test server. The key rides on every request, so anything else in the clear is
 // refused; a path or query would be glued onto the SDK's own, so those are too.
-func validUpstream(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+func validUpstream(u *url.URL) error {
+	if u == nil || u.Host == "" {
 		return errors.New("must be an absolute URL")
 	}
 	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {

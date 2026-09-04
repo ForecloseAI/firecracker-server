@@ -159,11 +159,6 @@ func TestAMalformedBrokerAddressIsRefusedAtStartup(t *testing.T) {
 	if err := bad.validate(); err == nil {
 		t.Fatal("a malformed CHAT_APPS_ADDR was accepted")
 	}
-	good := validConfig()
-	good.ComposioKey, good.SupabasePublishable = "ak_x", "sb_publishable_x"
-	if err := good.validate(); err != nil {
-		t.Fatalf("a good address was refused: %v", err)
-	}
 }
 
 // heldAppsStore answers with one already-minted session, so a push can be

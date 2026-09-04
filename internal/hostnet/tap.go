@@ -27,12 +27,12 @@ func SlotAddrs(slot int) (hostIP, guestIP, mac string) {
 }
 
 // SlotOf is SlotAddrs run backwards for the guest address: which slot a guest
-// at guestIP lives in. False for anything that is not guest-shaped -- a host
-// tap address, a network or broadcast address, or anything outside 172.16/16 --
-// rather than rounding to a neighbour, because the answer names a machine.
-func SlotOf(guestIP string) (int, bool) {
-	addr, err := netip.ParseAddr(guestIP)
-	if err != nil || !addr.Is4() {
+// at addr lives in. False for anything that is not guest-shaped -- a host tap
+// address, a network or broadcast address, or anything outside 172.16/16 --
+// rather than rounding to a neighbour, because the answer names a machine. It
+// is what the host's guest broker uses to decide whether a caller is a guest.
+func SlotOf(addr netip.Addr) (int, bool) {
+	if !addr.Is4() {
 		return 0, false
 	}
 	o := addr.As4()

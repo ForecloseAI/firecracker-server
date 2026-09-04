@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -16,8 +17,9 @@ import (
 )
 
 // brokerPort is where the host lends its model credential, on this guest's own
-// tap gateway. The same port as the connected-apps broker: one hole in the
-// firewall, two things behind it.
+// tap gateway. The same port as the connected-apps broker -- CHAT_APPS_ADDR's
+// default in internal/chat/config.go -- so one hole in the firewall serves both.
+// Stated here rather than imported because the guest cannot depend on chat.
 const brokerPort = "8092"
 
 // brokerKey is what a brokered request presents. The SDK refuses to send a
@@ -44,7 +46,8 @@ type endpoint struct {
 	err error
 }
 
-// defaultEndpoint decides how this process reaches the model.
+// defaultEndpoint decides how this process reaches the model. Decided once,
+// by the supervisor, so the startup line and every agent agree.
 //
 // A credential in the environment wins outright, ANTHROPIC_BASE_URL included,
 // so nothing changes for anyone who has one. Without one, an explicit base URL
@@ -63,27 +66,26 @@ func defaultEndpoint() endpoint {
 	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey}
 }
 
-// newClient builds the SDK client for an endpoint. Environment defaults are
-// dropped for a brokered one, so a stray ANTHROPIC_BASE_URL or a credential
-// file cannot redirect it -- which also drops the SDK's own HTTP client, hence
-// brokerHTTPClient.
+// newClient builds the SDK client for an endpoint. One construction path for
+// both kinds: the transport below is a property of a model call, not of where
+// the key came from, so a hang reproduces the same on a laptop as in a guest.
+// A brokered endpoint also drops the SDK's environment defaults, so a stray
+// ANTHROPIC_BASE_URL or credential file cannot redirect it.
 func newClient(ep endpoint) anthropic.Client {
-	if ep.baseURL == "" {
-		return anthropic.NewClient()
+	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP())}
+	if ep.baseURL != "" {
+		opts = append(opts, option.WithoutEnvironmentDefaults(),
+			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
-	return anthropic.NewClient(
-		option.WithoutEnvironmentDefaults(),
-		option.WithHTTPClient(brokerHTTPClient()),
-		option.WithBaseURL(ep.baseURL),
-		option.WithAPIKey(ep.key),
-	)
+	return anthropic.NewClient(opts...)
 }
 
-// brokerHTTPClient is the SDK's default transport, rebuilt: a response-header
-// timeout so a broker that accepts the connection and never answers fails the
-// turn instead of hanging it. The body is not covered, so a long stream is
-// unaffected.
-func brokerHTTPClient() *http.Client {
+// modelHTTP is the one HTTP client every agent's model calls share, so
+// connections are pooled across agents rather than opened afresh by each. It is
+// the SDK's own default rebuilt: a response-header timeout, so a broker that
+// accepts the connection and never answers fails the turn instead of hanging
+// it. The body is not covered, so a long stream is unaffected.
+var modelHTTP = sync.OnceValue(func() *http.Client {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return &http.Client{Transport: http.DefaultTransport}
@@ -91,7 +93,7 @@ func brokerHTTPClient() *http.Client {
 	t = t.Clone()
 	t.ResponseHeaderTimeout = 10 * time.Minute
 	return &http.Client{Transport: t}
-}
+})
 
 // gatewayIP reads the default gateway out of the kernel's routing table.
 func gatewayIP() (string, error) {
@@ -149,7 +151,3 @@ func (ep endpoint) String() string {
 		return "the broker at " + ep.baseURL
 	}
 }
-
-// DescribeEndpoint is the startup line's half of the decision every agent makes
-// when it is built, so the log and the agents cannot disagree.
-func DescribeEndpoint() string { return defaultEndpoint().String() }

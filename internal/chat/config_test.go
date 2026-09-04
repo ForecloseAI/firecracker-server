@@ -1,16 +1,26 @@
 package chat
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
+
+// mustURL parses a URL a test wrote by hand.
+func mustURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
 
 // validConfig is the smallest environment the service accepts.
 func validConfig() Config {
 	return Config{
 		Origin: "https://chat.example.com", VNCOrigin: "https://vnc.example.com",
 		Token: "t", SupabaseURL: "https://p.supabase.co", AppsAddr: "0.0.0.0:8092",
-		AnthropicKey: "sk-ant-x", AnthropicUpstream: "https://api.anthropic.com",
+		AnthropicKey: "sk-ant-x", AnthropicUpstream: mustURL("https://api.anthropic.com"),
 	}
 }
 
@@ -30,12 +40,13 @@ func TestAnthropicKeyIsRequired(t *testing.T) {
 
 // The key rides on every brokered request, so the upstream must be https --
 // except on loopback, where a test server stands in and there is no wire. A
-// path or query would be glued onto the SDK's own, so those are refused too.
+// path or query would be glued onto the SDK's own, so those are refused too,
+// and so is a value that did not parse at all.
 func TestUpstreamMustBeHTTPSUnlessLoopback(t *testing.T) {
 	for _, ok := range []string{"https://api.anthropic.com", "https://api.anthropic.com/",
 		"http://127.0.0.1:9", "http://localhost:9", "http://[::1]:9"} {
 		c := validConfig()
-		c.AnthropicUpstream = ok
+		c.AnthropicUpstream = mustURL(ok)
 		if err := c.validate(); err != nil {
 			t.Errorf("%s refused: %v", ok, err)
 		}
@@ -43,9 +54,14 @@ func TestUpstreamMustBeHTTPSUnlessLoopback(t *testing.T) {
 	for _, bad := range []string{"http://api.anthropic.com", "https://api.anthropic.com/v1",
 		"https://api.anthropic.com?x=1", "api.anthropic.com", ""} {
 		c := validConfig()
-		c.AnthropicUpstream = bad
+		c.AnthropicUpstream = mustURL(bad)
 		if err := c.validate(); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+	c := validConfig()
+	c.AnthropicUpstream = nil
+	if err := c.validate(); err == nil {
+		t.Error("an unparsable upstream was accepted")
 	}
 }

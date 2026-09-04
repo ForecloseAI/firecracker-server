@@ -70,7 +70,7 @@ func TestAnEnvCredentialWinsOverTheBroker(t *testing.T) {
 	if ep := defaultEndpoint(); ep != (endpoint{}) {
 		t.Fatalf("with a key in the environment the endpoint was %+v", ep)
 	}
-	if line := DescribeEndpoint(); !strings.Contains(line, "environment") {
+	if line := defaultEndpoint().String(); !strings.Contains(line, "environment") {
 		t.Errorf("startup line %q", line)
 	}
 }
