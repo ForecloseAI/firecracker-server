@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,11 +66,14 @@ func (r *Roster) listLocked() []Record {
 	for _, rec := range r.by {
 		out = append(out, *rec)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if (out[i].ID == BossID) != (out[j].ID == BossID) {
-			return out[i].ID == BossID
+	slices.SortFunc(out, func(a, b Record) int {
+		if (a.ID == BossID) != (b.ID == BossID) {
+			if a.ID == BossID {
+				return -1
+			}
+			return 1
 		}
-		return out[i].ID < out[j].ID
+		return strings.Compare(a.ID, b.ID)
 	})
 	return out
 }

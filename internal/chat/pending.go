@@ -44,9 +44,11 @@ const batchUses = 10
 // only the boss's log: a worker's question is never in it, and neither is the
 // decision that ends one.
 func buildPending(r agentapi.Raised) *Pending {
-	p := questionPending(r)
+	var p *Pending
 	if r.Kind == "approval_required" {
 		p = confirmPending(r)
+	} else {
+		p = questionPending(r)
 	}
 	p.Agent, p.Since = r.Agent, r.Since
 	return p

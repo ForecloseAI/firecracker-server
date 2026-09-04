@@ -196,6 +196,10 @@ type Sent struct {
 // PostMessage sends a turn with everything the client attached to it, which is
 // a file the person picked and nothing else. Deliberately not a place to carry
 // the timezone -- see agentapi.Person.TZ for why that is the only writer.
+//
+// No idempotency key, unlike SendMessage: the header exists, but keying on the
+// text collapses a deliberate repeat into silence, and a duplicate message is a
+// far better failure than one that vanishes with no error.
 func (c *Client) PostMessage(agentID string, m Send) (Sent, error) {
 	var out Sent
 	err := c.write(http.MethodPost, "/agents/"+agentID+"/messages", m, &out)

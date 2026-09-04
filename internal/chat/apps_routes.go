@@ -147,7 +147,8 @@ func (s *Server) setAppPolicy(w http.ResponseWriter, r *http.Request, user strin
 		return
 	}
 	var req policyReq
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req) != nil {
+	body := http.MaxBytesReader(w, r.Body, 4<<10) // two short strings; nothing legitimate is larger
+	if json.NewDecoder(body).Decode(&req) != nil {
 		fail(w, http.StatusBadRequest, "that is not a permission this version can set")
 		return
 	}

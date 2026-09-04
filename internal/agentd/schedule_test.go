@@ -914,10 +914,13 @@ func oneOffAt(at time.Time) string {
 
 // lastRunToday is a repeating expression whose window ends today, with the
 // day's only run already due -- so the occurrence coming up is its last.
+// Both halves are read off the same instant: taking the clock from now-1min and
+// the date from now puts them a day apart between 00:00 and 00:01, which turns
+// the last run into one still ahead and retires nothing.
 func lastRunToday() string {
-	now := time.Now().UTC()
-	return "daily at " + now.Add(-time.Minute).Format("15:04") +
-		" until " + now.Format("2006-01-02") + " in UTC"
+	due := time.Now().UTC().Add(-time.Minute)
+	return "daily at " + due.Format("15:04") +
+		" until " + due.Format("2006-01-02") + " in UTC"
 }
 
 // "once in 2h" only means anything at the moment it is written, and Expr is

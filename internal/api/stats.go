@@ -121,12 +121,7 @@ func roster(v *vm.VM) []agentapi.Status {
 func sumUsage(rows []vmStats) agent.Totals {
 	var t agent.Totals
 	for _, row := range rows {
-		t.CostUSD += row.Usage.CostUSD
-		t.InputTokens += row.Usage.InputTokens
-		t.OutputTokens += row.Usage.OutputTokens
-		t.CacheReadTokens += row.Usage.CacheReadTokens
-		t.CacheCreationTokens += row.Usage.CacheCreationTokens
-		t.Turns += row.Usage.Turns
+		t.Add(row.Usage)
 	}
 	return t
 }

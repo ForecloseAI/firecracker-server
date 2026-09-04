@@ -15,7 +15,10 @@ func newTestGate(t *testing.T) *Gate {
 }
 
 // pendingID waits for the gate to register an interaction and returns its id.
-func pendingID(t *testing.T, g *Gate) string { return pendingIDBesides(t, g, "") }
+func pendingID(t *testing.T, g *Gate) string {
+	t.Helper()
+	return pendingIDBesides(t, g, "")
+}
 
 // pendingIDBesides is pendingID for the case where one id is already known, so
 // a test with two open asks can name the other one.

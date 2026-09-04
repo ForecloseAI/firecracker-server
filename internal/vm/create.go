@@ -103,8 +103,11 @@ func fsckWorkspace(path string) error {
 	if err == nil {
 		return nil
 	}
+	// ExitCode is -1 when the process was signalled rather than exited, so the
+	// lower bound is load-bearing: without it an OOM-killed e2fsck reads as a
+	// clean disk and a filesystem nothing checked is attached as the overlay.
 	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() < 4 {
+	if errors.As(err, &ee) && ee.ExitCode() >= 0 && ee.ExitCode() < 4 {
 		return nil
 	}
 	return fmt.Errorf("e2fsck %s: %w", path, err)

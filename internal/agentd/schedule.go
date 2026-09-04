@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,7 +92,7 @@ func (s *ScheduleStore) listLocked() []Schedule {
 	for _, rec := range s.by {
 		out = append(out, *rec)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Schedule) int { return strings.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -321,7 +320,7 @@ func parseBase(f []string, loc *time.Location) (spec, error) {
 		times, err := parseTimes(f[2:])
 		return spec{kind: kindDaily, times: times}, err
 
-	case len(f) >= 4 && f[0] == "every" && f[2] == "at" && dayWords[f[1]] != kindDaily:
+	case len(f) >= 4 && f[0] == "every" && f[2] == "at" && known(dayWords, f[1]):
 		times, err := parseTimes(f[3:])
 		return spec{kind: dayWords[f[1]], times: times}, err
 
@@ -548,9 +547,22 @@ func parseTimes(f []string) ([]clock, error) {
 
 // tidyClocks sorts times and drops repeats, so "daily at 09:00 and 09:00" is one
 // firing rather than two a sweep apart.
+//
+// Sorts a copy. SortFunc and Compact both write through their argument, and a
+// caller that still holds the times the person typed must not find them
+// reordered and truncated under it.
 func tidyClocks(in []clock) []clock {
-	slices.SortFunc(in, func(a, b clock) int { return a.mins() - b.mins() })
-	return slices.Compact(in)
+	out := slices.Clone(in)
+	slices.SortFunc(out, func(a, b clock) int { return a.mins() - b.mins() })
+	return slices.Compact(out)
+}
+
+// known reports whether m has an entry for key, without relying on the zero
+// value being unreachable: dayKind's zero is kindDaily, a real kind, so a plain
+// lookup on a miss reads as a match.
+func known[K comparable, V any](m map[K]V, key K) bool {
+	_, ok := m[key]
+	return ok
 }
 
 // parseMonthDay reads "1st", "15" or "last day", returning 0 for the last day
@@ -785,7 +797,10 @@ func rememberZone(stateDir, tz string) bool {
 // exists to remove; "" resolves to UTC, which is the absence of an answer
 // rather than one.
 func validZone(tz string) error {
-	if _, err := time.LoadLocation(tz); tz == "" || tz == "Local" || err != nil {
+	if tz == "" || tz == "Local" {
+		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
 		return fmt.Errorf("%q is not a timezone such as Asia/Kolkata", tz)
 	}
 	return nil

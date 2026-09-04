@@ -472,21 +472,20 @@ func (a *Agent) load() error {
 	return nil
 }
 
-// save persists the conversation, writing to a temp file and renaming so a
-// crash mid-write cannot leave a half-written history behind.
+// save persists the conversation, atomically so a crash mid-write cannot leave
+// a half-written history behind.
 func (a *Agent) save() error {
 	buf, err := json.Marshal(a.messages)
 	if err != nil {
 		return err
 	}
-	tmp := a.convPath() + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o640); err != nil {
+	if err := writeAtomic(a.convPath(), buf); err != nil {
 		return err
 	}
 	a.mu.Lock()
 	a.convBytes = len(buf)
 	a.mu.Unlock()
-	return os.Rename(tmp, a.convPath())
+	return nil
 }
 
 // systemBlocks renders the system prompt as one cached block.

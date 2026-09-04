@@ -24,6 +24,19 @@ type Totals struct {
 	UnpricedModels []string `json:"unpriced_models,omitempty"`
 }
 
+// Add folds another VM's spend into t.
+//
+// Deliberately numbers only: UnpricedModels names the models one machine could
+// not price, which says nothing once the rows are added together.
+func (t *Totals) Add(u Totals) {
+	t.CostUSD += u.CostUSD
+	t.InputTokens += u.InputTokens
+	t.OutputTokens += u.OutputTokens
+	t.CacheReadTokens += u.CacheReadTokens
+	t.CacheCreationTokens += u.CacheCreationTokens
+	t.Turns += u.Turns
+}
+
 // Accumulator caches each VM's last known spend.
 //
 // It used to rebuild these totals itself, folding an event stream behind a

@@ -27,10 +27,6 @@ type askInput struct {
 // and Edit were the SDK's built-ins and its permission callback saw them only
 // as names.
 func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
-	// One outbox shared by both send tools, so their numbers cannot collide. It
-	// resumes from disk, which is what lets a client group by sequence across a
-	// restart.
-	out := newOutbox(r.own)
 	var all []anthropic.BetaTool
 	for _, build := range []func() ([]anthropic.BetaTool, error){
 		func() ([]anthropic.BetaTool, error) { return fileTools(r, d.reload) },
@@ -45,7 +41,14 @@ func Tools(r roots, d toolDeps, allow []string) ([]anthropic.BetaTool, error) {
 		func() ([]anthropic.BetaTool, error) { return teamTools(d) },
 		func() ([]anthropic.BetaTool, error) { return browserTools(d) },
 		func() ([]anthropic.BetaTool, error) { return scheduleTools(d) },
-		func() ([]anthropic.BetaTool, error) { return sendTools(r, d, out) },
+		func() ([]anthropic.BetaTool, error) {
+			// One outbox shared by both send tools, so their numbers cannot
+			// collide. It resumes from disk, which is what lets a client group by
+			// sequence across a restart -- and it scans that directory, so it is
+			// built here rather than up front, where an earlier builder's failure
+			// would have paid for it anyway.
+			return sendTools(r, d, newOutbox(r.own))
+		},
 		func() ([]anthropic.BetaTool, error) { return appsTools(d) },
 	} {
 		set, err := build()
@@ -157,7 +160,9 @@ func keepAllowed(tools []anthropic.BetaTool, allow []string) []anthropic.BetaToo
 	for _, name := range allow {
 		wanted[name] = true
 	}
-	return slices.DeleteFunc(tools, func(tool anthropic.BetaTool) bool {
+	// DeleteFunc writes through its argument, so it gets a copy: this narrows a
+	// view of the surface and must leave the caller's own slice whole.
+	return slices.DeleteFunc(slices.Clone(tools), func(tool anthropic.BetaTool) bool {
 		return !wanted[tool.Name()]
 	})
 }
