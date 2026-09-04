@@ -35,8 +35,6 @@ func projectMessage(ev agentapi.Event) (Message, bool) {
 		m.Kind, m.Text = kindEvent, teamLine(ev)
 	case "scheduled":
 		m.Kind, m.Text = kindEvent, scheduleLine(ev)
-	case "compaction":
-		m.Kind, m.Text = kindEvent, ev.Message
 	case "attachment":
 		if ev.Attachment == nil {
 			return Message{}, false
@@ -48,6 +46,8 @@ func projectMessage(ev agentapi.Event) (Message, bool) {
 	case "approval_required", "question":
 		return askMessage(m, ev), true
 	default:
+		// Compaction lands here with the rest: it is housekeeping the agent does
+		// to itself, and a line about it would read as the agent talking.
 		return Message{}, false
 	}
 	return m, true
