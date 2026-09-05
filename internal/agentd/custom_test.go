@@ -183,7 +183,7 @@ func TestAgentsCannotHireACustomAgent(t *testing.T) {
 // the ceiling by exactly the budget; reasoning between tool calls needs a beta
 // of its own, which only Anthropic understands.
 func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium"}}
+	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium", summary: summaryOpenRouter}}
 	p := a.params(nil).BetaMessageNewParams
 	if p.MaxTokens != maxTokens+8192 || p.Thinking.OfEnabled == nil || p.Thinking.OfEnabled.BudgetTokens != 8192 {
 		t.Fatalf("thinking request: max_tokens %d thinking %+v", p.MaxTokens, p.Thinking)
@@ -191,7 +191,8 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 	if !slices.Contains(p.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
 		t.Error("interleaved thinking was not asked for")
 	}
-	plain := (&Agent{system: "p", ep: endpoint{model: "m"}}).params(nil).BetaMessageNewParams
+	plain := (&Agent{system: "p", ep: endpoint{model: "m", summary: summaryOpenRouter}}).
+		params(nil).BetaMessageNewParams
 	if plain.MaxTokens != maxTokens || plain.Thinking.OfEnabled != nil ||
 		slices.Contains(plain.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
 		t.Errorf("an agent that does not think got %d tokens, %+v, %v", plain.MaxTokens, plain.Thinking, plain.Betas)
@@ -202,16 +203,14 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 // gets plain requests, and its compaction runs on its own model, since the
 // cheap one may not exist there.
 func TestAPastedEndpointGetsPlainRequests(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com", model: "m", thinking: "low", plain: true, bearer: true}}
+	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com",
+		model: "m", thinking: "low", bearer: true}}
 	p := a.params(nil).BetaMessageNewParams
 	if len(p.Betas) != 0 || p.ContextManagement.Edits != nil {
 		t.Errorf("a pasted endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
 	}
 	if p.Thinking.OfEnabled == nil {
 		t.Error("thinking is not a beta and should still be asked for")
-	}
-	if a.compactModel() != "m" {
-		t.Errorf("compaction on a pasted endpoint uses %q", a.compactModel())
 	}
 }
 
@@ -290,8 +289,5 @@ func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
 	}
 	if p.ContextManagement.Edits == nil {
 		t.Error("the brokered path sends no context management; every tool result is re-billed")
-	}
-	if string(a.compactModel()) != summaryOpenRouter {
-		t.Errorf("brokered compaction uses %q, want the cheap model", a.compactModel())
 	}
 }

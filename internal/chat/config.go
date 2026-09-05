@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"cracked/internal/agentapi"
 	"errors"
 	"fmt"
 	"net"
@@ -82,7 +83,7 @@ func LoadConfig() (Config, error) {
 		OpenRouterKey: env("OPENROUTER_API_KEY", ""),
 	}
 	// A parse failure leaves nil, which validate refuses by name.
-	c.OpenRouterUpstream, _ = url.Parse(env("OPENROUTER_UPSTREAM", "https://openrouter.ai/api"))
+	c.OpenRouterUpstream, _ = url.Parse(env("OPENROUTER_UPSTREAM", agentapi.OpenRouterBase))
 	c.ComposioCallback = env("COMPOSIO_CALLBACK_URL", c.Origin+connectedPath)
 	return c, c.validate()
 }
@@ -131,9 +132,14 @@ func (c Config) validateGuest() error {
 // else in the clear is refused.
 //
 // A path is allowed because OpenRouter's Messages endpoint lives under /api and
-// the proxy joins the two -- /api plus the SDK's /v1/messages is the real URL. A
-// query is not: the guest's own would be concatenated onto it, and the SDK sends
-// ?beta=true on every call, so there is no shape where a second one helps.
+// the proxy joins the two -- /api plus the SDK's /v1/messages is the real URL.
+// But not a path the SDK will append to itself: every OpenRouter doc page prints
+// the base as .../api/v1, so the obvious copy-paste dials /api/v1/v1/messages
+// and 404s the whole fleet on a value that looks right. Refused here by name,
+// where an operator can act on it, rather than an hour later inside a guest.
+//
+// A query is refused outright: the guest's own would be concatenated onto it,
+// and the SDK sends ?beta=true on every call, so no second one can help.
 func validUpstream(u *url.URL) error {
 	if u == nil || u.Host == "" {
 		return errors.New("must be an absolute URL")
@@ -141,15 +147,8 @@ func validUpstream(u *url.URL) error {
 	if u.RawQuery != "" {
 		return errors.New("must not carry a query")
 	}
-	// The SDK appends v1/messages itself, and every OpenRouter doc page shows
-	// the base as .../api/v1 -- so the obvious copy-paste dials /api/v1/v1/
-	// messages and 404s the whole fleet on a value that looks right. The guest
-	// trims this for a pasted URL (modelBase); here it is refused by name,
-	// because an operator can fix a startup error and cannot see a 404 a guest
-	// gets an hour later.
-	if p := strings.TrimRight(u.Path, "/"); strings.HasSuffix(p, "/v1") ||
-		strings.HasSuffix(p, "/v1/messages") {
-		return errors.New("must not end in /v1 or /v1/messages; the SDK appends those")
+	if _, trimmed := agentapi.TrimSDKSuffix(u.Path); trimmed {
+		return errors.New("must not end in a path the SDK appends itself, like /v1")
 	}
 	if u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname())) {
 		return nil

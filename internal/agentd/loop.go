@@ -535,7 +535,7 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
 		p.MaxTokens = maxTokens + budget
 	}
-	if !a.ep.plain {
+	if a.ep.known() {
 		p.ContextManagement = contextManagement()
 		p.Betas = betasFor(budget > 0)
 	}

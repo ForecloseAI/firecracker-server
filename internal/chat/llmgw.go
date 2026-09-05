@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 
+	"cracked/internal/agentapi"
 	"cracked/internal/hostnet"
 )
 
@@ -31,20 +32,11 @@ const llmGatewayPrefix = "/v1/"
 // without checking which of the two endpoints is on the other end.
 var llmForwardedHeaders = []string{"Content-Type", "Accept", "Anthropic-Version", "Anthropic-Beta"}
 
-// llmAppName is what OpenRouter files this traffic under, beside the origin.
-// A constant, not config: it says who we are, which does not vary per machine.
-const llmAppName = "AutoBots"
-
-// llmAllowedPaths is what a guest may call: one endpoint, POST only. Files,
+// llmMessagesPath is all a guest may call, POST only. Files,
 // batches, model listing, generation lookups and everything else the key could
 // reach are refused, so the broker lends the key for turns and nothing wider.
-//
-// count_tokens used to be here. Nothing in this repo has ever called it and
-// OpenRouter does not serve it, so it was an opening kept for a caller that
-// never arrived.
-var llmAllowedPaths = map[string]bool{
-	"/v1/messages": true,
-}
+
+const llmMessagesPath = "/v1/messages"
 
 // LLMGateway lends the host's model credential to guests, one request at a time.
 //
@@ -71,7 +63,7 @@ func NewLLMGateway(key string, upstream *url.URL, origin string) *LLMGateway {
 // serve gates one request on where it came from and what it asks for. Both
 // refusals are the same bare 404, so nothing about the listener can be probed.
 func (g *LLMGateway) serve(w http.ResponseWriter, r *http.Request) {
-	if !fromGuest(r.RemoteAddr) || r.Method != http.MethodPost || !llmAllowedPaths[r.URL.Path] {
+	if !fromGuest(r.RemoteAddr) || r.Method != http.MethodPost || r.URL.Path != llmMessagesPath {
 		http.NotFound(w, r)
 		return
 	}
@@ -103,13 +95,14 @@ func fromGuest(remote string) bool {
 // unit), and when OPENROUTER_UPSTREAM points at a test host, which host failed
 // is the one fact the line is for.
 func llmProxy(key string, upstream *url.URL, origin string) *httputil.ReverseProxy {
+	bearer := "Bearer " + key // fixed for this proxy's life; not per request
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			pr.Out.Header = keepHeaders(pr.Out.Header, llmForwardedHeaders)
-			pr.Out.Header.Set("Authorization", "Bearer "+key)
+			pr.Out.Header.Set("Authorization", bearer)
 			pr.Out.Header.Set("HTTP-Referer", origin)
-			pr.Out.Header.Set("X-Title", llmAppName)
+			pr.Out.Header.Set("X-Title", agentapi.AppName)
 		},
 		FlushInterval: -1, // responses may stream; buffering would stall them
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

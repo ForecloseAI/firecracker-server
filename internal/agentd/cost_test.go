@@ -18,11 +18,10 @@ func usageFrom(t *testing.T, raw string) anthropic.BetaUsage {
 	return u
 }
 
-// Both of these are real usage blocks, captured from OpenRouter on 2026-09-06.
-// They are copied rather than composed because an invented pair got this wrong:
-// the docs say upstream_inference_cost is "0 or null" for non-BYOK requests, and
-// it is neither -- it repeats cost. A fixture written from the docs agreed with
-// the code and both were wrong together.
+// Real usage blocks, captured from OpenRouter on 2026-09-06 and copied verbatim
+// rather than composed. An invented pair got this wrong once: written from the
+// documented semantics, it agreed with code written from the same reading, and
+// the two were wrong together. See reportedCost for what the fields mean.
 const (
 	byokUsage = `{"input_tokens":8,"output_tokens":16,
 		"cache_creation_input_tokens":0,"cache_read_input_tokens":0,
@@ -35,19 +34,16 @@ const (
 		"upstream_inference_prompt_cost":3E-7,"upstream_inference_completions_cost":0.000025}}`
 )
 
-// On BYOK the inference is billed to our own provider account, so cost is only
-// what OpenRouter charged on top -- zero while under the free monthly allowance
-// -- and the bill is the two added. Taking cost alone would report this turn as
-// free, confidently, because a figure was found.
+// Taking cost alone here would report the turn as free, confidently, because a
+// figure was found.
 func TestABYOKTurnIsBilledForBothHalves(t *testing.T) {
 	if got := reportedCost(usageFrom(t, byokUsage)); got != 0.000088 {
 		t.Errorf("reportedCost = %v, want 0.000088", got)
 	}
 }
 
-// And the mirror, which is the one that bites: off BYOK, cost IS the bill and
-// upstream_inference_cost is the same money described a second way. Adding them
-// here -- which the documented semantics invite -- doubles every turn.
+// And the mirror, which is the one that bites: adding the two here -- which the
+// documented semantics invite -- doubles every turn.
 func TestACreditsTurnIsNotDoubleCounted(t *testing.T) {
 	got := reportedCost(usageFrom(t, creditsUsage))
 	if got != 0.0000253 {
@@ -120,26 +116,4 @@ func TestCostIsReadableFromAUsageNestedInAMessage(t *testing.T) {
 	if got := reportedCost(msg.Usage); got != 0.000088 {
 		t.Errorf("reportedCost off a nested usage = %v, want 0.000088", got)
 	}
-}
-
-// Compaction books through the same usageOf, and it is the call the person never
-// sees any output from -- so a cost lost here is spend that /usage cannot
-// account for and nobody would think to look for.
-func TestACompactionSummaryBooksItsCost(t *testing.T) {
-	a := newTestAgent(t)
-	a.team = &Supervisor{meter: OpenMeter(t.TempDir())}
-
-	u := usageFrom(t, `{"input_tokens":4000,"output_tokens":300,
-		"cost":0.01,"is_byok":true,"cost_details":{"upstream_inference_cost":0.19}}`)
-	a.bookUsage(summaryOpenRouter, usageOf(u))
-
-	for _, row := range a.meter().Report().ByModel {
-		if row.Model == summaryOpenRouter {
-			if row.CostUSD != 0.20 {
-				t.Errorf("summary CostUSD = %v, want 0.20", row.CostUSD)
-			}
-			return
-		}
-	}
-	t.Fatal("the summary model is absent from the meter")
 }

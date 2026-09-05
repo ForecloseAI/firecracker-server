@@ -318,7 +318,7 @@ func TestSummarySpendReachesTheMeterAndTheTranscript(t *testing.T) {
 	a := newTestAgent(t)
 	a.team = &Supervisor{meter: OpenMeter(t.TempDir())}
 
-	a.bookUsage(summaryOpenRouter, Usage{InputTokens: 4000, OutputTokens: 300})
+	a.bookUsage(summaryOpenRouter, Usage{InputTokens: 4000, OutputTokens: 300, CostUSD: 0.20})
 
 	rows := a.meter().Report().ByModel
 	found := false
@@ -330,6 +330,11 @@ func TestSummarySpendReachesTheMeterAndTheTranscript(t *testing.T) {
 		if row.InputTokens != 4000 || row.OutputTokens != 300 {
 			t.Errorf("meter booked %d in / %d out, want 4000 / 300",
 				row.InputTokens, row.OutputTokens)
+		}
+		// Its cost too: a summary priced at zero is spend /usage cannot account
+		// for, which is the same hole in money that missing tokens are in volume.
+		if row.CostUSD != 0.20 {
+			t.Errorf("meter booked %v, want the summary's 0.20", row.CostUSD)
 		}
 	}
 	if !found {

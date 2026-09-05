@@ -424,6 +424,38 @@ type Record struct {
 // number of them may exist, which is the one way it differs from a gallery type.
 const CustomType = "custom"
 
+// OpenRouterBase is where model calls go, and AppName is what OpenRouter files
+// them under in its X-Title header. Here rather than in either caller because
+// both reach it: the guest builds a client for a laptop's own key, the host's
+// broker sets the same header on every brokered turn, and the two silently
+// ceasing to agree is the one way the laptop path stops proving anything about
+// the fleet. No "/v1": the SDK appends that itself, and OpenRouter serves the
+// Messages endpoint under /api.
+const (
+	OpenRouterBase = "https://openrouter.ai/api"
+	AppName        = "AutoBots"
+)
+
+// TrimSDKSuffix takes a base URL back to what the SDK expects, and says whether
+// it had to. The SDK appends "v1/messages" itself while every OpenRouter doc
+// page prints the base as .../api/v1, so a URL copied from those docs dials v1
+// twice and 404s with nothing to explain it.
+//
+// One list, two policies: a person pasting a URL into the app gets it repaired,
+// because they will never see a log line, and an operator setting the upstream
+// gets it refused at startup, because they can act on that and cannot see a 404
+// a guest gets an hour later. Keeping the knowledge here is what stops those two
+// drifting apart.
+func TrimSDKSuffix(raw string) (string, bool) {
+	trimmed := strings.TrimRight(raw, "/")
+	for _, suffix := range []string{"/v1/chat/completions", "/v1/messages", "/v1"} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return strings.TrimSuffix(trimmed, suffix), true
+		}
+	}
+	return trimmed, false
+}
+
 // ThinkingBudgets is how many tokens each thinking level buys the model to
 // reason with. "" is no extended thinking at all. One table, so a level is
 // validated and priced from the same place.

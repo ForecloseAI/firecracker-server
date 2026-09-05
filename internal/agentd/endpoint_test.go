@@ -73,19 +73,19 @@ func TestNoDefaultRouteIsAnError(t *testing.T) {
 //
 // The point is that it is the SAME request the fleet makes: same protocol, same
 // betas, same context management. A laptop that quietly ran a weaker request
-// would prove nothing about production, so plain must stay false here even
+// would prove nothing about production, so it must count as known here even
 // though this endpoint is not Anthropic.
 func TestAnOpenRouterKeyWinsOverTheBroker(t *testing.T) {
 	clearModelEnv(t)
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-x")
 	ep := defaultEndpoint()
-	if ep.baseURL != openRouterBase || ep.key != "sk-or-x" || ep.err != nil {
+	if ep.baseURL != agentapi.OpenRouterBase || ep.key != "sk-or-x" || ep.err != nil {
 		t.Fatalf("endpoint = %+v", ep)
 	}
 	if !ep.bearer {
 		t.Error("a direct OpenRouter call must authenticate with a bearer token")
 	}
-	if ep.plain {
+	if !ep.known() {
 		t.Error("the laptop path dropped the betas the fleet sends")
 	}
 	if line := ep.String(); !strings.Contains(line, "own key") {
@@ -210,21 +210,21 @@ func assertTurnLogged(t *testing.T, a *Agent) {
 // URL, their key, their model, their thinking level -- and counts as Anthropic
 // only when it actually is.
 func TestAPersonsOwnEndpointReplacesTheMachines(t *testing.T) {
-	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
 	if ep := base.forAgent("anthropic/claude-sonnet-5", nil); ep.model != "anthropic/claude-sonnet-5" ||
-		ep.baseURL != base.baseURL || ep.key != brokerKey || ep.plain || ep.bearer {
+		ep.baseURL != base.baseURL || ep.key != brokerKey || !ep.known() || ep.bearer {
 		t.Fatalf("machine endpoint for a gallery agent: %+v", ep)
 	}
 	own := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own", Model: "m", Thinking: "high"}
 	if ep := base.forAgent("anthropic/claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
-		ep.model != "m" || ep.thinking != "high" || !ep.plain || !ep.bearer {
+		ep.model != "m" || ep.thinking != "high" || ep.known() || !ep.bearer {
 		t.Fatalf("own endpoint: %+v", ep)
 	}
 	// Anthropic on the person's own key is the path this change promised not to
 	// touch. It carries a key of their own, so a rule keyed on "is this our
 	// placeholder?" would have started sending Anthropic a bearer token.
 	direct := base.forAgent("x", &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"})
-	if direct.plain {
+	if !direct.known() {
 		t.Error("api.anthropic.com on the person's own key was sent a plain request")
 	}
 	if direct.bearer {
@@ -308,8 +308,8 @@ func TestAPastedEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
 	if got := fake.hdr.Get("x-api-key"); got != "sk-or-test" {
 		t.Errorf("x-api-key = %q, want the key alongside the bearer", got)
 	}
-	if r, ti := fake.hdr.Get("HTTP-Referer"), fake.hdr.Get("X-Title"); r != appURL || ti != appName {
-		t.Errorf("attribution = %q / %q, want %q / %q", r, ti, appURL, appName)
+	if r, ti := fake.hdr.Get("HTTP-Referer"), fake.hdr.Get("X-Title"); r != appURL || ti != agentapi.AppName {
+		t.Errorf("attribution = %q / %q, want %q / %q", r, ti, appURL, agentapi.AppName)
 	}
 }
 
@@ -344,8 +344,8 @@ func TestAPastedBaseURLIsTrimmedToWhatTheSDKWants(t *testing.T) {
 		{"https://api.anthropic.com", "https://api.anthropic.com"},
 		{"http://172.16.0.1:8092", "http://172.16.0.1:8092"},
 	} {
-		if got := modelBase(c.raw); got != c.want {
-			t.Errorf("modelBase(%q) = %q, want %q", c.raw, got, c.want)
+		if got, _ := agentapi.TrimSDKSuffix(c.raw); got != c.want {
+			t.Errorf("TrimSDKSuffix(%q) = %q, want %q", c.raw, got, c.want)
 		}
 	}
 	ep := endpoint{}.forAgent("x", &agentapi.ModelConfig{
