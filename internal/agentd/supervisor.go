@@ -1,11 +1,13 @@
 package agentd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -157,6 +159,49 @@ func (s *Supervisor) ResolveApproval(apid string, d Decision) bool {
 
 // Meter exposes the machine's running spend, for the HTTP surface.
 func (s *Supervisor) Meter() *Meter { return s.meter }
+
+// AgentUsage is the per-agent spend, cut now on the person's clock and named
+// from the roster: roster order first, then agents that were retired by id,
+// then whatever was spent before agents were told apart.
+func (s *Supervisor) AgentUsage() agentapi.AgentUsageReport {
+	report := s.meter.ByAgent(personNow(s.stateDir))
+	roster := s.roster.List()
+	for i := range report.Agents {
+		nameAgent(&report.Agents[i], roster)
+	}
+	slices.SortStableFunc(report.Agents, func(a, b agentapi.AgentUsage) int {
+		return cmp.Compare(usageRank(a, roster), usageRank(b, roster))
+	})
+	return report
+}
+
+// nameAgent fills in what the roster knows about one usage row.
+func nameAgent(a *agentapi.AgentUsage, roster []Record) {
+	if a.Agent == agentapi.UnattributedAgent {
+		a.Name = "Before per-agent tracking"
+		return
+	}
+	a.Name, a.Retired = a.Agent, true
+	for _, rec := range roster {
+		if rec.ID == a.Agent {
+			a.Name, a.Retired, a.OwnKey = rec.Name, false, rec.Model != nil
+		}
+	}
+}
+
+// usageRank orders usage rows: the roster's own order, then retired agents,
+// then the unattributed carry last.
+func usageRank(a agentapi.AgentUsage, roster []Record) int {
+	for i, rec := range roster {
+		if rec.ID == a.Agent {
+			return i
+		}
+	}
+	if a.Agent == agentapi.UnattributedAgent {
+		return len(roster) + 1
+	}
+	return len(roster)
+}
 
 // Roster exposes the durable roster.
 func (s *Supervisor) Roster() *Roster { return s.roster }

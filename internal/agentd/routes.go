@@ -21,6 +21,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /agents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /agent-types", s.handleTypes)
 	mux.HandleFunc("GET /usage", s.handleUsage)
+	mux.HandleFunc("GET /usage/agents", s.handleAgentUsage)
 	mux.HandleFunc("GET /pending", s.handlePending)
 	mux.HandleFunc("GET /pending/events", s.handlePendingEvents)
 	mux.HandleFunc("POST /approvals/{apid}", s.handleResolve)
@@ -168,6 +169,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		OK: true, Ready: true, Agents: len(statuses),
 		Live: s.sup.LiveCount(), Working: working, SessionState: state,
 	})
+}
+
+// handleAgentUsage reports what each agent has spent today, this week and ever,
+// in tokens, named from the roster.
+func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request) {
+	reply(w, http.StatusOK, s.sup.AgentUsage())
 }
 
 // handleUsage reports what this machine has spent, in tokens, across every

@@ -217,3 +217,31 @@ func TestAForeignEndpointGetsPlainRequests(t *testing.T) {
 		t.Error("compaction on Anthropic left the cheap model")
 	}
 }
+
+// The per-agent view is named from the roster and ordered the way the roster
+// is: live agents first, then agents that were retired, by id, then what was
+// spent before agents were told apart. A custom agent on its own model is
+// marked, so the host can say its price is an estimate rather than the bill.
+func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	maya := custom(t, sup, "x", ownModel())
+	m := sup.Meter()
+	m.Record(agentapi.UnattributedAgent, "claude-sonnet-5", sonnet(4, 4))
+	m.Record("gone", "claude-sonnet-5", sonnet(1, 1))
+	m.Record(maya.ID, "claude-sonnet-5", sonnet(2, 2))
+	m.Record(BossID, "claude-sonnet-5", sonnet(3, 3))
+	got := sup.AgentUsage().Agents
+	var ids []string
+	for _, a := range got {
+		ids = append(ids, a.Agent)
+	}
+	if want := []string{BossID, maya.ID, "gone", agentapi.UnattributedAgent}; !slices.Equal(ids, want) {
+		t.Fatalf("order %v, want %v", ids, want)
+	}
+	if got[0].Name != "Boss" || got[1].Name != "Maya" || !got[1].OwnKey || got[0].OwnKey {
+		t.Errorf("live rows: %+v %+v", got[0], got[1])
+	}
+	if !got[2].Retired || got[2].Name != "gone" || got[3].Retired || got[3].Name != "Before per-agent tracking" {
+		t.Errorf("retired and pre-split rows: %+v %+v", got[2], got[3])
+	}
+}

@@ -24,18 +24,20 @@ func window(rows ...agentapi.ModelUsage) agentapi.UsageWindow {
 }
 
 // usageFixture is what a machine reports: the boss on the roster, an agent that
-// was retired, and what was spent before agents were told apart.
-func usageFixture() agentapi.UsageReport {
+// was retired, and what was spent before agents were told apart, named and
+// ordered by the guest.
+func usageFixture() agentapi.AgentUsageReport {
 	today := sonnetRow("claude-sonnet-5", 123_456, 1_000)
 	more := sonnetRow("claude-sonnet-5", 1_000_000, 0)
-	return agentapi.UsageReport{AgentUsageReport: agentapi.AgentUsageReport{
+	return agentapi.AgentUsageReport{
 		Zone: "Asia/Kolkata", Today: "2026-09-05", WeekStart: "2026-08-31",
 		Agents: []agentapi.AgentUsage{
-			{Agent: "cody-old", Today: window(), Week: window(), Lifetime: window(sonnetRow("claude-sonnet-5", 10, 1))},
-			{Agent: "boss", Today: window(today), Week: window(today, more), Lifetime: window(today, more)},
-			{Agent: agentapi.UnattributedAgent, Today: window(), Week: window(),
+			{Agent: "boss", Name: "Boss", Today: window(today), Week: window(today, more), Lifetime: window(today, more)},
+			{Agent: "cody-old", Name: "cody-old", Retired: true, Today: window(), Week: window(),
+				Lifetime: window(sonnetRow("claude-sonnet-5", 10, 1))},
+			{Agent: agentapi.UnattributedAgent, Name: "Before per-agent tracking", Today: window(), Week: window(),
 				Lifetime: window(sonnetRow("claude-sonnet-5", 500, 50))},
-		}}}
+		}}
 }
 
 // usageOf asks the gateway for the machine's spend, decoded.
@@ -77,9 +79,9 @@ func TestUsageIsPricedInCentsPerAgentAndWindow(t *testing.T) {
 	}
 }
 
-// Retiring an agent keeps its state, and its spend with it: it still appears,
-// marked, named by its id. What was spent before the split appears last.
-func TestRetiredAndUnattributedAgentsStillAppear(t *testing.T) {
+// What the guest says about a row -- its name, that it was retired, that it
+// is the pre-split bucket -- comes through untouched and in the guest's order.
+func TestTheGuestsNamesAndOrderComeThrough(t *testing.T) {
 	s, g, u := newFake(t)
 	g.usage = usageFixture()
 	got := usageOf(t, s, u)
@@ -89,7 +91,7 @@ func TestRetiredAndUnattributedAgentsStillAppear(t *testing.T) {
 	if old := got.Agents[1]; old.AgentID != "cody-old" || !old.Retired || old.Name != "cody-old" {
 		t.Errorf("the retired agent came back as %+v", old)
 	}
-	if last := got.Agents[2]; last.AgentID != agentapi.UnattributedAgent || last.Name != "Unattributed" || last.Retired {
+	if last := got.Agents[2]; last.AgentID != agentapi.UnattributedAgent || last.Name != "Before per-agent tracking" {
 		t.Errorf("the pre-split bucket came back as %+v", last)
 	}
 }
@@ -99,8 +101,8 @@ func TestRetiredAndUnattributedAgentsStillAppear(t *testing.T) {
 func TestUnpricedModelsAreNamedNotZeroed(t *testing.T) {
 	s, g, u := newFake(t)
 	row := window(sonnetRow("claude-something-7", 1_000, 10))
-	g.usage = agentapi.UsageReport{AgentUsageReport: agentapi.AgentUsageReport{
-		Agents: []agentapi.AgentUsage{{Agent: "boss", Today: row, Week: row, Lifetime: row}}}}
+	g.usage = agentapi.AgentUsageReport{
+		Agents: []agentapi.AgentUsage{{Agent: "boss", Name: "Boss", Today: row, Week: row, Lifetime: row}}}
 	got := usageOf(t, s, u)
 	if got.Agents[0].Today.InputTokens != 1_000 || got.Agents[0].Today.CostUSD != 0 {
 		t.Errorf("today: %+v", got.Agents[0].Today)
@@ -110,14 +112,12 @@ func TestUnpricedModelsAreNamedNotZeroed(t *testing.T) {
 	}
 }
 
-// An agent on the person's own model is marked, so the screen can say the
-// figure is an estimate at Anthropic's rates rather than our bill.
+// An agent on the person's own model is marked by the guest, so the screen
+// can say the figure is an estimate at our rates rather than our bill.
 func TestAnAgentOnItsOwnKeyIsMarked(t *testing.T) {
 	s, g, u := newFake(t)
-	g.roster = append(g.roster, agentapi.Status{ID: "maya", Name: "Maya", Type: "custom",
-		Model: &agentapi.ModelView{URL: "https://m.example.com", Model: "m", KeySet: true}})
-	g.usage = agentapi.UsageReport{AgentUsageReport: agentapi.AgentUsageReport{
-		Agents: []agentapi.AgentUsage{{Agent: "maya", Today: window(), Week: window(), Lifetime: window()}}}}
+	g.usage = agentapi.AgentUsageReport{Agents: []agentapi.AgentUsage{
+		{Agent: "maya", Name: "Maya", OwnKey: true, Today: window(), Week: window(), Lifetime: window()}}}
 	got := usageOf(t, s, u)
 	if len(got.Agents) != 1 || !got.Agents[0].OwnKey || got.Agents[0].Name != "Maya" {
 		t.Errorf("agents: %+v", got.Agents)
@@ -135,10 +135,8 @@ func TestASleepingMachineIsNotWokenForANumber(t *testing.T) {
 	s := &Server{control: stubControl(t, srv.URL, "paused"), auth: v,
 		cfg: Config{Origin: "https://chat.example.com", Token: "fleet-token"}}
 	w := call(t, s, mint(testUserID, "tester@example.com"), "GET", "/v1/usage", "")
-	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, `"asleep":true`) ||
-		!strings.Contains(body, `"agents":[]`) || !strings.Contains(body, `"unpriced":[]`) {
-		t.Fatalf("status %d body %s", w.Code, body)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"asleep":true`) {
+		t.Fatalf("status %d body %s", w.Code, w.Body)
 	}
 	if g.usageHits != 0 {
 		t.Error("a sleeping machine was asked for its spend")

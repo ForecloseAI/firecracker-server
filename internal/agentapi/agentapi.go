@@ -323,17 +323,16 @@ type ModelUsage struct {
 
 // UsageReport is GET /usage: what this daemon has spent across every agent it
 // runs, in tokens. No dollar figure -- the host owns the price table, so rates
-// can change without rebuilding a guest image. The machine-wide totals come
-// first and never change shape; the per-agent view rides alongside them.
+// can change without rebuilding a guest image.
 type UsageReport struct {
 	ByModel        []ModelUsage `json:"by_model"`
 	Turns          int64        `json:"turns"`
 	LastDurationMS int64        `json:"last_duration_ms,omitempty"`
 	LastActivity   time.Time    `json:"last_activity,omitzero"`
-	AgentUsageReport
 }
 
-// UnattributedAgent labels spend recorded before usage was split by agent.
+// UnattributedAgent is the agent id spend recorded before usage was split by
+// agent is carried under: real money with no one to credit it to.
 const UnattributedAgent = "unattributed"
 
 // UsageWindow is spend inside one span of the person's calendar. ByModel is
@@ -343,17 +342,25 @@ type UsageWindow struct {
 	Turns   int64        `json:"turns"`
 }
 
-// AgentUsage is one agent's spend today, this calendar week, and ever.
+// AgentUsage is one agent's spend today, this calendar week, and ever, named
+// from the roster. Retired means the agent is gone but its spend is not; OwnKey
+// means it runs on the person's own model now, so the host's price is an
+// estimate rather than its bill.
 type AgentUsage struct {
 	Agent    string      `json:"agent"`
+	Name     string      `json:"name"`
+	Retired  bool        `json:"retired"`
+	OwnKey   bool        `json:"own_key"`
 	Today    UsageWindow `json:"today"`
 	Week     UsageWindow `json:"week"`
 	Lifetime UsageWindow `json:"lifetime"`
 }
 
-// AgentUsageReport is the per-agent view, dated on the person's own clock: the
-// day and the Monday the windows were cut at, so a reader can say what "today"
-// meant when the report was made.
+// AgentUsageReport is GET /usage/agents: the per-agent view, dated on the
+// person's own clock -- the day and the Monday the windows were cut at, so a
+// reader can say what "today" meant when the report was made. Its own route,
+// because GET /usage is polled every few seconds by a dashboard that never
+// looks at this, and these windows are only ever wanted by a person.
 type AgentUsageReport struct {
 	Zone      string       `json:"zone,omitempty"`
 	Today     string       `json:"today,omitempty"`

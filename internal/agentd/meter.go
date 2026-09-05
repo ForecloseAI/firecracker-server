@@ -1,6 +1,7 @@
 package agentd
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -46,39 +47,29 @@ type Meter struct {
 	path string
 	now  func() time.Time
 
-	mu    sync.Mutex
-	rows  map[rowKey]*usageRow
-	turns map[turnKey]*turnRow
-	// legacy is what a version-1 file had recorded: per model, for the whole
-	// machine, with no agent to credit. Reported as the unattributed agent,
-	// lifetime only, so an upgrade never makes a bill smaller.
-	legacy      []agentapi.ModelUsage
-	legacyTurns int64
-	state       meterState
+	mu   sync.Mutex
+	rows map[rowKey]*usageRow
+	// folded is the day the retention fold last ran on. The cutoff moves once
+	// a day, so the scan is worth doing that often and no more.
+	folded string
+	state  meterState
 }
 
 // rowKey names one agent's spend on one model on one day. An empty day is the
-// carry row: everything older than meterKeepDays, folded together.
+// carry row: everything older than meterKeepDays, folded together. An empty
+// model is the agent's turns for that day, which belong to no one model.
 type rowKey struct{ agent, model, day string }
 
-// turnKey names one agent's turns on one day, since a turn has no one model.
-type turnKey struct{ agent, day string }
-
-// usageRow is one rowKey's tokens. Calls counts assistant messages, which is
-// what the version-1 file called turns and what ModelUsage.Turns still means.
+// usageRow is one rowKey's count. Calls is assistant messages, which is what
+// the version-1 file called turns and what ModelUsage.Turns still means; Turns
+// is set only on the model-less rows that count turns ended.
 type usageRow struct {
 	Agent string `json:"agent"`
-	Model string `json:"model"`
+	Model string `json:"model,omitempty"`
 	Day   string `json:"day,omitempty"`
 	agentapi.Usage
-	Calls int64 `json:"calls"`
-}
-
-// turnRow is one turnKey's count of turns that ended.
-type turnRow struct {
-	Agent string `json:"agent"`
-	Day   string `json:"day,omitempty"`
-	Turns int64  `json:"turns"`
+	Calls int64 `json:"calls,omitempty"`
+	Turns int64 `json:"turns,omitempty"`
 }
 
 // meterState is the part of a report that is neither per-model nor per-agent.
@@ -94,14 +85,10 @@ type meterFileV1 struct {
 	meterState
 }
 
-// meterFileV2 is what is persisted now. Turns is a list where version 1 had a
-// number under the same key, which is why the version is probed first.
+// meterFileV2 is what is persisted now.
 type meterFileV2 struct {
-	Version     int                   `json:"version"`
-	Rows        []usageRow            `json:"rows"`
-	Turns       []turnRow             `json:"turns"`
-	Legacy      []agentapi.ModelUsage `json:"legacy,omitempty"`
-	LegacyTurns int64                 `json:"legacy_turns,omitempty"`
+	Version int        `json:"version"`
+	Rows    []usageRow `json:"rows"`
 	meterState
 }
 
@@ -111,8 +98,8 @@ type meterFileV2 struct {
 // total is a reporting gap, and refusing to boot over one would turn it into
 // an outage. A version-1 file is not corrupt: it is carried over whole.
 func OpenMeter(dir string) *Meter {
-	m := &Meter{path: filepath.Join(dir, meterFile), now: func() time.Time { return personNow(dir) },
-		rows: map[rowKey]*usageRow{}, turns: map[turnKey]*turnRow{}}
+	m := &Meter{path: filepath.Join(dir, meterFile), rows: map[rowKey]*usageRow{},
+		now: func() time.Time { return personNow(dir) }}
 	buf, err := os.ReadFile(m.path)
 	if err != nil {
 		return m
@@ -122,7 +109,11 @@ func OpenMeter(dir string) *Meter {
 		log.Printf("agentd: usage total unreadable, starting from zero: %v", err)
 		return m
 	}
-	m.load(f)
+	for i := range f.Rows {
+		row := f.Rows[i]
+		m.rows[rowKey{row.Agent, row.Model, row.Day}] = &row
+	}
+	m.state = f.meterState
 	m.foldLocked(m.now())
 	return m
 }
@@ -148,23 +139,17 @@ func readMeterFile(buf []byte) (meterFileV2, error) {
 	return meterFileV2{}, fmt.Errorf("usage file version %d is newer than this daemon", probe.Version)
 }
 
-// migrateV1 keeps a version-1 total as the unattributed lifetime carry.
+// migrateV1 keeps a version-1 total as the carry rows of an agent nobody was:
+// the spend is real and the bill must not shrink, but there is no one to
+// credit it to.
 func migrateV1(v1 meterFileV1) meterFileV2 {
-	return meterFileV2{Version: meterVersion, Legacy: v1.ByModel, LegacyTurns: v1.Turns,
-		meterState: v1.meterState}
-}
-
-// load takes a decoded file into the maps.
-func (m *Meter) load(f meterFileV2) {
-	for i := range f.Rows {
-		row := f.Rows[i]
-		m.rows[rowKey{row.Agent, row.Model, row.Day}] = &row
+	f := meterFileV2{Version: meterVersion, meterState: v1.meterState,
+		Rows: []usageRow{{Agent: agentapi.UnattributedAgent, Turns: v1.Turns}}}
+	for _, row := range v1.ByModel {
+		f.Rows = append(f.Rows, usageRow{Agent: agentapi.UnattributedAgent, Model: row.Model,
+			Usage: row.Usage, Calls: row.Turns})
 	}
-	for i := range f.Turns {
-		t := f.Turns[i]
-		m.turns[turnKey{t.Agent, t.Day}] = &t
-	}
-	m.legacy, m.legacyTurns, m.state = f.Legacy, f.LegacyTurns, f.meterState
+	return f
 }
 
 // Record adds one assistant message's usage to an agent's row for today.
@@ -174,13 +159,14 @@ func (m *Meter) Record(agent, model string, u agentapi.Usage) {
 	if m == nil {
 		return
 	}
+	now := m.now()
 	m.mu.Lock()
-	row := m.rowLocked(agent, model, dateOf(m.now()))
+	row := m.rowLocked(agent, model, dateOf(now))
 	addUsage(&row.Usage, u)
 	row.Calls++
 	m.state.LastActivity = time.Now().UTC()
 	m.mu.Unlock()
-	m.save()
+	m.save(now)
 }
 
 // FinishTurn records that one agent's turn ended, which is what "turns" counts.
@@ -193,17 +179,12 @@ func (m *Meter) FinishTurn(agent string, d time.Duration) {
 	if m == nil {
 		return
 	}
+	now := m.now()
 	m.mu.Lock()
-	k := turnKey{agent, dateOf(m.now())}
-	t, ok := m.turns[k]
-	if !ok {
-		t = &turnRow{Agent: agent, Day: k.day}
-		m.turns[k] = t
-	}
-	t.Turns++
+	m.rowLocked(agent, "", dateOf(now)).Turns++
 	m.state.LastDurationMS = d.Milliseconds()
 	m.mu.Unlock()
-	m.save()
+	m.save(now)
 }
 
 // rowLocked finds or starts one row. Caller holds m.mu.
@@ -218,8 +199,13 @@ func (m *Meter) rowLocked(agent, model, day string) *usageRow {
 }
 
 // foldLocked moves rows older than the retention into each agent's lifetime
-// carry, so the file cannot grow without bound. Caller holds m.mu.
+// carry, so the file cannot grow without bound. Once a day. Caller holds m.mu.
 func (m *Meter) foldLocked(now time.Time) {
+	today := dateOf(now)
+	if today == m.folded {
+		return
+	}
+	m.folded = today
 	cutoff := dateOf(now.AddDate(0, 0, -meterKeepDays))
 	for k, row := range m.rows {
 		if k.day == "" || k.day >= cutoff {
@@ -227,27 +213,9 @@ func (m *Meter) foldLocked(now time.Time) {
 		}
 		carry := m.rowLocked(k.agent, k.model, "")
 		addUsage(&carry.Usage, row.Usage)
-		carry.Calls += row.Calls
+		carry.Calls, carry.Turns = carry.Calls+row.Calls, carry.Turns+row.Turns
 		delete(m.rows, k)
 	}
-	for k, t := range m.turns {
-		if k.day == "" || k.day >= cutoff {
-			continue
-		}
-		m.carryTurnsLocked(k.agent, t.Turns)
-		delete(m.turns, k)
-	}
-}
-
-// carryTurnsLocked adds old turns to an agent's carry row. Caller holds m.mu.
-func (m *Meter) carryTurnsLocked(agent string, n int64) {
-	k := turnKey{agent, ""}
-	t, ok := m.turns[k]
-	if !ok {
-		t = &turnRow{Agent: agent}
-		m.turns[k] = t
-	}
-	t.Turns += n
 }
 
 // addUsage folds one usage block into a running one.
@@ -260,54 +228,33 @@ func addUsage(into *agentapi.Usage, u agentapi.Usage) {
 	into.ClearedToolUses += u.ClearedToolUses
 }
 
-// Report is the current total: the machine-wide view the host's dashboard has
-// always read, exactly as before the split, plus the per-agent windows.
+// Report is the machine-wide total the host's dashboard has always read:
+// every row summed by model, and every turn ever ended, exactly as before the
+// split. The per-agent view is ByAgent, on its own route, because this one is
+// polled every few seconds and the windows are only ever wanted by a person.
 func (m *Meter) Report() agentapi.UsageReport {
 	if m == nil {
 		return agentapi.UsageReport{}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return agentapi.UsageReport{
-		ByModel: m.byModelLocked(), Turns: m.totalTurnsLocked(),
-		LastDurationMS: m.state.LastDurationMS, LastActivity: m.state.LastActivity,
-		AgentUsageReport: m.byAgentLocked(m.now()),
-	}
-}
-
-// byModelLocked sums every row into one per model, the legacy total included,
-// so the figure a version-1 file reported is unchanged. Caller holds m.mu.
-func (m *Meter) byModelLocked() []agentapi.ModelUsage {
 	byModel := map[string]*agentapi.ModelUsage{}
-	for i := range m.legacy {
-		row := m.legacy[i]
-		byModel[row.Model] = &row
+	var turns int64
+	for _, row := range m.rows {
+		turns += row.Turns
+		if row.Model != "" {
+			addModel(byModel, row)
+		}
 	}
-	for k, row := range m.rows {
-		modelRow(byModel, k.model).add(row)
-	}
-	return sortedModels(byModel)
+	return agentapi.UsageReport{ByModel: sortedModels(byModel), Turns: turns,
+		LastDurationMS: m.state.LastDurationMS, LastActivity: m.state.LastActivity}
 }
 
-// totalTurnsLocked is every turn ever ended on this machine. Caller holds m.mu.
-func (m *Meter) totalTurnsLocked() int64 {
-	n := m.legacyTurns
-	for _, t := range m.turns {
-		n += t.Turns
-	}
-	return n
-}
-
-// ByAgent is the per-agent view cut at a moment on the person's clock.
+// ByAgent cuts three windows per agent at a moment on the person's clock:
+// today, the calendar week from Monday, and everything.
 func (m *Meter) ByAgent(now time.Time) agentapi.AgentUsageReport {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.byAgentLocked(now)
-}
-
-// byAgentLocked cuts three windows per agent: today, the calendar week from
-// Monday, and everything. Caller holds m.mu.
-func (m *Meter) byAgentLocked(now time.Time) agentapi.AgentUsageReport {
 	today, week := dateOf(now), dateOf(mondayOf(now))
 	out := agentapi.AgentUsageReport{Zone: now.Location().String(), Today: today, WeekStart: week,
 		Agents: []agentapi.AgentUsage{}}
@@ -315,11 +262,6 @@ func (m *Meter) byAgentLocked(now time.Time) agentapi.AgentUsageReport {
 		out.Agents = append(out.Agents, agentapi.AgentUsage{Agent: agent,
 			Today: m.windowLocked(agent, today, today), Week: m.windowLocked(agent, week, today),
 			Lifetime: m.windowLocked(agent, "", today)})
-	}
-	if len(m.legacy) > 0 || m.legacyTurns > 0 {
-		out.Agents = append(out.Agents, agentapi.AgentUsage{Agent: agentapi.UnattributedAgent,
-			Today: emptyWindow(), Week: emptyWindow(),
-			Lifetime: agentapi.UsageWindow{ByModel: slices.Clone(m.legacy), Turns: m.legacyTurns}})
 	}
 	return out
 }
@@ -330,9 +272,6 @@ func (m *Meter) agentsLocked() []string {
 	for k := range m.rows {
 		seen[k.agent] = true
 	}
-	for k := range m.turns {
-		seen[k.agent] = true
-	}
 	out := make([]string, 0, len(seen))
 	for agent := range seen {
 		out = append(out, agent)
@@ -341,23 +280,23 @@ func (m *Meter) agentsLocked() []string {
 	return out
 }
 
-// windowLocked sums one agent's rows between two days inclusive, by model. An
-// empty from means the lifetime, which is the only window the carry rows join.
-// Caller holds m.mu.
+// windowLocked sums one agent's rows between two days inclusive: tokens by
+// model, turns from the model-less rows. An empty from means the lifetime,
+// which is the only window the carry rows join. Caller holds m.mu.
 func (m *Meter) windowLocked(agent, from, to string) agentapi.UsageWindow {
 	byModel := map[string]*agentapi.ModelUsage{}
+	var turns int64
 	for k, row := range m.rows {
-		if k.agent == agent && inWindow(k.day, from, to) {
-			modelRow(byModel, k.model).add(row)
+		if k.agent != agent || !inWindow(k.day, from, to) {
+			continue
+		}
+		if k.model == "" {
+			turns += row.Turns
+		} else {
+			addModel(byModel, row)
 		}
 	}
-	w := agentapi.UsageWindow{ByModel: sortedModels(byModel)}
-	for k, t := range m.turns {
-		if k.agent == agent && inWindow(k.day, from, to) {
-			w.Turns += t.Turns
-		}
-	}
-	return w
+	return agentapi.UsageWindow{ByModel: sortedModels(byModel), Turns: turns}
 }
 
 // inWindow says whether a row's day falls in [from, to]. Dates are ISO
@@ -369,28 +308,15 @@ func inWindow(day, from, to string) bool {
 	return day != "" && from <= day && day <= to
 }
 
-// emptyWindow is a window with nothing in it and a list, not null, in it.
-func emptyWindow() agentapi.UsageWindow {
-	return agentapi.UsageWindow{ByModel: []agentapi.ModelUsage{}}
-}
-
-// modelSum is a ModelUsage being accumulated.
-type modelSum agentapi.ModelUsage
-
-// add folds one row into the sum; a row's calls are what Turns has always meant.
-func (s *modelSum) add(row *usageRow) {
-	addUsage(&s.Usage, row.Usage)
-	s.Turns += row.Calls
-}
-
-// modelRow finds or starts the sum for one model.
-func modelRow(byModel map[string]*agentapi.ModelUsage, model string) *modelSum {
-	row, ok := byModel[model]
+// addModel folds one row into its model's running sum, starting it if needed.
+func addModel(byModel map[string]*agentapi.ModelUsage, row *usageRow) {
+	sum, ok := byModel[row.Model]
 	if !ok {
-		row = &agentapi.ModelUsage{Model: model}
-		byModel[model] = row
+		sum = &agentapi.ModelUsage{Model: row.Model}
+		byModel[row.Model] = sum
 	}
-	return (*modelSum)(row)
+	addUsage(&sum.Usage, row.Usage)
+	sum.Turns += row.Calls
 }
 
 // sortedModels copies per-model sums out in a stable order, never as nil.
@@ -399,7 +325,7 @@ func sortedModels(byModel map[string]*agentapi.ModelUsage) []agentapi.ModelUsage
 	for _, row := range byModel {
 		out = append(out, *row)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	slices.SortFunc(out, func(a, b agentapi.ModelUsage) int { return cmp.Compare(a.Model, b.Model) })
 	return out
 }
 
@@ -416,9 +342,9 @@ func dateOf(t time.Time) string { return t.Format("2006-01-02") }
 // save persists the total. Written on every change rather than periodically:
 // this is the billing record, and a crash between a turn and a flush would lose
 // money that was really spent, silently.
-func (m *Meter) save() {
+func (m *Meter) save(now time.Time) {
 	m.mu.Lock()
-	m.foldLocked(m.now())
+	m.foldLocked(now)
 	buf, err := json.Marshal(m.fileLocked())
 	m.mu.Unlock()
 	if err != nil {
@@ -430,28 +356,17 @@ func (m *Meter) save() {
 	}
 }
 
-// fileLocked is the file as it will be written, rows in a stable order.
-// Caller holds m.mu.
+// fileLocked is the file as it will be written, rows in a stable order so the
+// file diffs cleanly. Caller holds m.mu.
 func (m *Meter) fileLocked() meterFileV2 {
-	f := meterFileV2{Version: meterVersion, Rows: make([]usageRow, 0, len(m.rows)),
-		Turns: make([]turnRow, 0, len(m.turns)), Legacy: m.legacy, LegacyTurns: m.legacyTurns,
-		meterState: m.state}
+	f := meterFileV2{Version: meterVersion, Rows: make([]usageRow, 0, len(m.rows)), meterState: m.state}
 	for _, row := range m.rows {
 		f.Rows = append(f.Rows, *row)
 	}
-	for _, t := range m.turns {
-		f.Turns = append(f.Turns, *t)
-	}
-	sort.Slice(f.Rows, func(i, j int) bool { return rowLess(f.Rows[i], f.Rows[j]) })
-	sort.Slice(f.Turns, func(i, j int) bool {
-		return f.Turns[i].Agent+f.Turns[i].Day < f.Turns[j].Agent+f.Turns[j].Day
+	slices.SortFunc(f.Rows, func(a, b usageRow) int {
+		return cmp.Or(cmp.Compare(a.Agent, b.Agent), cmp.Compare(a.Model, b.Model), cmp.Compare(a.Day, b.Day))
 	})
 	return f
-}
-
-// rowLess orders rows by agent, model, day.
-func rowLess(a, b usageRow) bool {
-	return a.Agent+"\x00"+a.Model+"\x00"+a.Day < b.Agent+"\x00"+b.Model+"\x00"+b.Day
 }
 
 // writeAtomic replaces a file via a temp file and a rename, so a crash mid-write

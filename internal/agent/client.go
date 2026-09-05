@@ -61,6 +61,14 @@ func (c *Client) Usage() (agentapi.UsageReport, error) {
 	return r, err
 }
 
+// AgentUsage is what each agent on the machine has spent today, this week and
+// ever, in tokens, named from the roster.
+func (c *Client) AgentUsage() (agentapi.AgentUsageReport, error) {
+	var r agentapi.AgentUsageReport
+	err := c.get("/usage/agents", &r)
+	return r, err
+}
+
 // Agents lists the roster. This is the call that makes every other one
 // possible: there is no implicit "the agent" any more, so a caller that wants
 // to reach all of them has to ask which exist.

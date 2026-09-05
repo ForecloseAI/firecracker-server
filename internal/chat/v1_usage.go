@@ -2,10 +2,8 @@ package chat
 
 import (
 	"errors"
-	"log"
 	"math"
 	"net/http"
-	"slices"
 	"sort"
 
 	"cracked/internal/agent"
@@ -23,9 +21,9 @@ type usageWindow struct {
 	Turns            int64   `json:"turns"`
 }
 
-// agentUsage is one agent's three windows, named for the roster. Retired means
-// the agent is gone but its spend is not; OwnKey means it ran on the person's
-// own model, so the cost is an estimate at Anthropic's rates, not our bill.
+// agentUsage is one agent's three windows, as the guest named it. Retired
+// means the agent is gone but its spend is not; OwnKey means it runs on the
+// person's own model now, so the figure is an estimate at our rates.
 type agentUsage struct {
 	AgentID  string      `json:"agentId"`
 	Name     string      `json:"name"`
@@ -75,17 +73,12 @@ func (s *Server) getUsage(w http.ResponseWriter, r *http.Request, user string) {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	cl := s.clientFor(r.Context(), user, view)
-	report, err := cl.Usage()
+	report, err := s.clientFor(r.Context(), user, view).AgentUsage()
 	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	roster, err := cl.Agents()
-	if err != nil {
-		log.Printf("chat: usage for %s has no names: %v", machine, err)
-	}
-	writeJSON(w, http.StatusOK, projectUsage(report, roster))
+	writeJSON(w, http.StatusOK, projectUsage(report))
 }
 
 // asleepUsage is the answer for a machine that is not running.
@@ -93,12 +86,14 @@ func asleepUsage() usageResponse {
 	return usageResponse{Asleep: true, Agents: []agentUsage{}, Unpriced: []string{}}
 }
 
-// projectUsage prices a machine's report and names its agents from the roster.
-func projectUsage(r agentapi.UsageReport, roster []agentapi.Status) usageResponse {
+// projectUsage prices a machine's report, in the order the guest gave it.
+func projectUsage(r agentapi.AgentUsageReport) usageResponse {
 	unpriced := map[string]bool{}
 	out := usageResponse{Zone: r.Zone, WeekStart: r.WeekStart, Agents: []agentUsage{}}
-	for _, a := range orderAgents(r.Agents, roster) {
-		row := agentRow(a, roster, unpriced)
+	for _, a := range r.Agents {
+		row := agentUsage{AgentID: a.Agent, Name: a.Name, Retired: a.Retired, OwnKey: a.OwnKey,
+			Today: projectWindow(a.Today, unpriced), Week: projectWindow(a.Week, unpriced),
+			Lifetime: projectWindow(a.Lifetime, unpriced)}
 		addWindow(&out.Totals.Today, row.Today)
 		addWindow(&out.Totals.Week, row.Week)
 		addWindow(&out.Totals.Lifetime, row.Lifetime)
@@ -112,68 +107,16 @@ func projectUsage(r agentapi.UsageReport, roster []agentapi.Status) usageRespons
 	return out
 }
 
-// orderAgents puts the roster's agents first in roster order, then retired
-// ones by id, then what was spent before agents were told apart.
-func orderAgents(in []agentapi.AgentUsage, roster []agentapi.Status) []agentapi.AgentUsage {
-	byID := map[string]agentapi.AgentUsage{}
-	for _, a := range in {
-		byID[a.Agent] = a
-	}
-	var out []agentapi.AgentUsage
-	for _, st := range roster {
-		if a, ok := byID[st.ID]; ok {
-			out = append(out, a)
-			delete(byID, st.ID)
-		}
-	}
-	rest := make([]agentapi.AgentUsage, 0, len(byID))
-	for _, a := range byID {
-		rest = append(rest, a)
-	}
-	sort.Slice(rest, func(i, j int) bool { return rest[i].Agent < rest[j].Agent })
-	i := slices.IndexFunc(rest, isUnattributed)
-	if i >= 0 {
-		rest = append(slices.Delete(slices.Clone(rest), i, i+1), rest[i])
-	}
-	return append(out, rest...)
-}
-
-// isUnattributed picks out the legacy bucket, which orderAgents puts last.
-func isUnattributed(a agentapi.AgentUsage) bool { return a.Agent == agentapi.UnattributedAgent }
-
-// agentRow prices one agent's windows and names it.
-func agentRow(a agentapi.AgentUsage, roster []agentapi.Status, unpriced map[string]bool) agentUsage {
-	row := agentUsage{AgentID: a.Agent, Name: a.Agent, Retired: true,
-		Today: projectWindow(a.Today, unpriced), Week: projectWindow(a.Week, unpriced),
-		Lifetime: projectWindow(a.Lifetime, unpriced)}
-	if a.Agent == agentapi.UnattributedAgent {
-		row.Name, row.Retired = "Unattributed", false
-		return row
-	}
-	if st, ok := find(roster, a.Agent); ok {
-		row.Name, row.Retired, row.OwnKey = st.Name, false, st.Model != nil
-	}
-	return row
-}
-
-// projectWindow sums a window's tokens and prices them per model, rounding to
-// cents. A model the table does not know is named rather than counted as free.
+// projectWindow prices one window with the same table and the same warnings
+// the dashboard's totals use, rounding to the cent a screen shows.
 func projectWindow(w agentapi.UsageWindow, unpriced map[string]bool) usageWindow {
-	var out usageWindow
-	var usd float64
-	for _, row := range w.ByModel {
-		out.InputTokens += row.InputTokens
-		out.OutputTokens += row.OutputTokens
-		out.CacheReadTokens += row.CacheReadInputTokens
-		out.CacheWriteTokens += row.CacheCreationInputTokens
-		cost, ok := agent.PriceUsage(row.Model, row.Usage)
-		if !ok {
-			unpriced[row.Model] = true
-		}
-		usd += cost
+	t := agent.Price(agentapi.UsageReport{ByModel: w.ByModel, Turns: w.Turns})
+	for _, model := range t.UnpricedModels {
+		unpriced[model] = true
 	}
-	out.CostUSD, out.Turns = cents(usd), w.Turns
-	return out
+	return usageWindow{CostUSD: cents(t.CostUSD), InputTokens: t.InputTokens,
+		OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
+		CacheWriteTokens: t.CacheCreationTokens, Turns: t.Turns}
 }
 
 // addWindow folds one window into a running total.

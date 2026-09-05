@@ -51,14 +51,15 @@ func TestTurnsCountTurnsNotAssistantMessages(t *testing.T) {
 		m.Record("boss", "claude-sonnet-5", sonnet(10, 2))
 	}
 	m.FinishTurn("boss", time.Second)
-	if got := m.Report().Turns; got != 1 {
-		t.Errorf("turns = %d after six messages in one turn, want 1", got)
+	got := m.Report()
+	if got.Turns != 1 {
+		t.Errorf("turns = %d after six messages in one turn, want 1", got.Turns)
 	}
-	if got := m.Report().Agents[0].Lifetime.Turns; got != 1 {
-		t.Errorf("the agent's own turns = %d, want 1", got)
+	if own := m.ByAgent(m.now()).Agents[0].Lifetime.Turns; own != 1 {
+		t.Errorf("the agent's own turns = %d, want 1", own)
 	}
-	if got := m.Report().ByModel[0].InputTokens; got != 60 {
-		t.Errorf("input tokens = %d, want all six messages counted", got)
+	if got.ByModel[0].InputTokens != 60 {
+		t.Errorf("input tokens = %d, want all six messages counted", got.ByModel[0].InputTokens)
 	}
 }
 
@@ -136,9 +137,11 @@ func TestAV1MeterFileMigratesWithoutLosingTheTotal(t *testing.T) {
 		got.ByModel[0].InputTokens != 100 || got.ByModel[0].Turns != 6 {
 		t.Fatalf("the machine total changed on upgrade: %+v", got)
 	}
-	if len(got.Agents) != 1 || got.Agents[0].Agent != agentapi.UnattributedAgent ||
-		got.Agents[0].Lifetime.ByModel[0].InputTokens != 100 || len(got.Agents[0].Today.ByModel) != 0 {
-		t.Fatalf("the old total is not the unattributed lifetime: %+v", got.Agents)
+	agents := m.ByAgent(at).Agents
+	if len(agents) != 1 || agents[0].Agent != agentapi.UnattributedAgent ||
+		agents[0].Lifetime.ByModel[0].InputTokens != 100 || agents[0].Lifetime.Turns != 5 ||
+		len(agents[0].Today.ByModel) != 0 {
+		t.Fatalf("the old total is not the unattributed lifetime: %+v", agents)
 	}
 	m.Record("boss", "claude-sonnet-5", sonnet(100, 20))
 	again := meterAt(t, dir, at)
@@ -146,8 +149,8 @@ func TestAV1MeterFileMigratesWithoutLosingTheTotal(t *testing.T) {
 		t.Errorf("after one turn and a reopen the total is %d, want 200", n)
 	}
 	buf, _ := os.ReadFile(filepath.Join(dir, meterFile))
-	if !strings.Contains(string(buf), `"version":2`) || strings.Count(string(buf), `"legacy"`) != 1 {
-		t.Errorf("the file was not rewritten as version 2 with one legacy block: %s", buf)
+	if !strings.Contains(string(buf), `"version":2`) || !strings.Contains(string(buf), `"agent":"unattributed"`) {
+		t.Errorf("the file was not rewritten as version 2 carrying the old total: %s", buf)
 	}
 }
 
@@ -159,7 +162,7 @@ func TestSpendIsBucketedByAgentAndLocalDay(t *testing.T) {
 	m := meterAt(t, t.TempDir(), at)
 	m.Record("boss", "claude-sonnet-5", sonnet(100, 10))
 	m.Record("cody", "claude-sonnet-5", sonnet(50, 5))
-	r := m.Report()
+	r := m.ByAgent(at)
 	if r.Today != "2026-09-01" || r.Zone != "IST" {
 		t.Fatalf("the day was cut on the wrong clock: today=%s zone=%s", r.Today, r.Zone)
 	}
@@ -167,8 +170,8 @@ func TestSpendIsBucketedByAgentAndLocalDay(t *testing.T) {
 		r.Agents[0].Today.ByModel[0].InputTokens != 100 || r.Agents[1].Today.ByModel[0].InputTokens != 50 {
 		t.Fatalf("per-agent windows: %+v", r.Agents)
 	}
-	if r.ByModel[0].InputTokens != 150 {
-		t.Errorf("the machine total is %d, want both agents", r.ByModel[0].InputTokens)
+	if total := m.Report().ByModel[0].InputTokens; total != 150 {
+		t.Errorf("the machine total is %d, want both agents", total)
 	}
 }
 
@@ -208,14 +211,14 @@ func TestRowsOlderThanTheRetentionFoldIntoLifetime(t *testing.T) {
 	old := meterAt(t, dir, time.Date(2025, 1, 1, 12, 0, 0, 0, ist))
 	old.Record("boss", "m", sonnet(7, 1))
 	old.FinishTurn("boss", time.Second)
-	m := meterAt(t, dir, time.Date(2026, 9, 5, 12, 0, 0, 0, ist))
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, ist)
+	m := meterAt(t, dir, now)
 	for k := range m.rows {
 		if k.day == "2025-01-01" {
 			t.Fatal("a row past the retention kept its day")
 		}
 	}
-	r := m.Report()
-	boss := r.Agents[0]
+	r, boss := m.Report(), m.ByAgent(now).Agents[0]
 	if r.ByModel[0].InputTokens != 7 || r.Turns != 1 || boss.Lifetime.ByModel[0].InputTokens != 7 || boss.Lifetime.Turns != 1 {
 		t.Fatalf("folding lost tokens or turns: total=%+v lifetime=%+v", r.ByModel, boss.Lifetime)
 	}
@@ -253,15 +256,15 @@ func TestReportIsUnchangedByTheSplit(t *testing.T) {
 // The app maps a null list to nothing at all, so an agent with no spend this
 // week -- and a machine with no agents -- must still send lists.
 func TestUsageWindowsNeverEncodeNull(t *testing.T) {
-	m := meterAt(t, t.TempDir(), time.Date(2026, 9, 5, 12, 0, 0, 0, ist))
-	buf, _ := json.Marshal(m.Report())
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, ist)
+	m := meterAt(t, t.TempDir(), now)
+	buf, _ := json.Marshal(m.ByAgent(now))
 	if !strings.Contains(string(buf), `"agents":[]`) {
 		t.Errorf("an empty meter encoded %s", buf)
 	}
 	m.now = func() time.Time { return time.Date(2026, 8, 1, 12, 0, 0, 0, ist) }
 	m.Record("boss", "m", sonnet(1, 1))
-	m.now = func() time.Time { return time.Date(2026, 9, 5, 12, 0, 0, 0, ist) }
-	buf, _ = json.Marshal(m.Report())
+	buf, _ = json.Marshal(m.ByAgent(now))
 	if !strings.Contains(string(buf), `"today":{"by_model":[],"turns":0}`) {
 		t.Errorf("an empty window encoded as %s", buf)
 	}

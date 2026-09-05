@@ -26,14 +26,14 @@ type fakeGuest struct {
 	resolveStatus int // non-zero to make the next resolve fail with this code
 
 	sched         []agentapi.Schedule
-	usage         agentapi.UsageReport    // what the machine says it has spent
-	usageHits     int                     // how often it was asked
-	created       agentapi.CreateAgentReq // the last create the gateway forwarded
-	createStatus  int                     // non-zero to refuse the next create with this code
-	createMessage string                  // and this message
-	patched       agentapi.AgentPatch     // the last patch the gateway forwarded
-	person        agentapi.Person         // the last profile the gateway forwarded
-	body          string                  // the raw JSON of the last message, as it came off the wire
+	usage         agentapi.AgentUsageReport // what the machine says each agent has spent
+	usageHits     int                       // how often it was asked
+	created       agentapi.CreateAgentReq   // the last create the gateway forwarded
+	createStatus  int                       // non-zero to refuse the next create with this code
+	createMessage string                    // and this message
+	patched       agentapi.AgentPatch       // the last patch the gateway forwarded
+	person        agentapi.Person           // the last profile the gateway forwarded
+	body          string                    // the raw JSON of the last message, as it came off the wire
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -84,7 +84,7 @@ func (g *fakeGuest) routes() http.Handler {
 	mux.HandleFunc("GET /schedules", g.schedules)
 	mux.HandleFunc("DELETE /schedules/{id}", g.dropSchedule)
 	mux.HandleFunc("PUT /person", g.putPerson)
-	mux.HandleFunc("GET /usage", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /usage/agents", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		g.usageHits++
