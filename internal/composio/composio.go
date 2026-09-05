@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -240,7 +241,8 @@ func (c *Client) Connections(ctx context.Context, userID string) ([]Connection, 
 			return nil, err
 		}
 		for _, it := range page.Items {
-			out = append(out, Connection{ID: it.ID, Toolkit: it.Toolkit.Slug, Status: it.Status})
+			out = append(out, Connection{
+				ID: it.ID, Toolkit: slugOf(it.Toolkit.Slug), Status: it.Status})
 		}
 		if page.NextCursor == "" {
 			break
@@ -270,6 +272,23 @@ func (c *Client) Disconnect(ctx context.Context, id string) error {
 	return c.send(ctx, http.MethodDelete, "/connected_accounts/"+url.PathEscape(id), nil, nil)
 }
 
+// slugOf is how every identifier from the provider enters this package.
+//
+// Lowercase, because a slug is compared for EQUALITY in several places that have
+// nothing to do with each other: a person's stored permissions are keyed by it,
+// the capability walk checks each row's parent against it, and the browse screen
+// counts apps per category by it. Those comparisons were written at different
+// times against different endpoints, and the provider does not promise the three
+// agree on casing -- connectionFor in the chat package already hedges with
+// EqualFold, which is the same worry solved one call site at a time.
+//
+// Solving it here instead means the rule is "identifiers are lowercase" and
+// every consumer can use ==. The provider's own slugs are lowercase today, so
+// this normally changes nothing; it is the day one endpoint starts shouting that
+// it earns itself, and that day would otherwise turn a standing refusal into a
+// card somebody can say yes to.
+func slugOf(s string) string { return strings.ToLower(s) }
+
 // Category is one of the provider's own groupings for an app -- "productivity",
 // "crm", "developer-tools".
 //
@@ -292,11 +311,6 @@ type Toolkit struct {
 	Logo        string
 	Description string
 	Categories  []Category
-	// Tools is how many actions the app exposes. Carried because it is the only
-	// cheap estimate of what classifying this app will cost -- one row per tool
-	// in the map a machine is pushed -- and the caller that budgets that push
-	// would otherwise have to fetch the tools to find out.
-	Tools int
 	// NoAuth marks an app that needs no account at all. There is nothing for a
 	// person to authorise, so a Connect button on one is a button that does
 	// nothing they can see.
@@ -344,26 +358,20 @@ type toolkitResp struct {
 		Logo        string     `json:"logo"`
 		Description string     `json:"description"`
 		Categories  []Category `json:"categories"`
-		Tools       int        `json:"tools_count"`
 	} `json:"meta"`
 }
 
 // toolkit is one row in this package's own vocabulary.
 func (r toolkitResp) toolkit() Toolkit {
+	groups := make([]Category, 0, len(r.Meta.Categories))
+	for _, group := range r.Meta.Categories {
+		groups = append(groups, Category{ID: slugOf(group.ID), Name: group.Name})
+	}
 	return Toolkit{
-		Slug: r.Slug, Name: r.Name, Logo: r.Meta.Logo, Description: r.Meta.Description,
-		Categories: r.Meta.Categories, Tools: r.Meta.Tools, NoAuth: r.NoAuth,
+		Slug: slugOf(r.Slug), Name: r.Name, Logo: r.Meta.Logo,
+		Description: r.Meta.Description, Categories: groups, NoAuth: r.NoAuth,
 		ManagedAuth: len(r.ManagedSchemes) > 0, Deprecated: r.Deprecated != nil,
 	}
-}
-
-// Toolkit fetches one app's public metadata.
-func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
-	var out toolkitResp
-	if err := c.send(ctx, http.MethodGet, "/toolkits/"+url.PathEscape(slug), nil, &out); err != nil {
-		return Toolkit{}, err
-	}
-	return out.toolkit(), nil
 }
 
 // toolkitsResp is one page of GET /toolkits.
@@ -435,6 +443,9 @@ func (c *Client) Categories(ctx context.Context) ([]Category, error) {
 	}
 	if err := c.send(ctx, http.MethodGet, "/toolkits/categories", nil, &out); err != nil {
 		return nil, err
+	}
+	for i, group := range out.Items {
+		out.Items[i].ID = slugOf(group.ID)
 	}
 	return out.Items, nil
 }
@@ -528,6 +539,7 @@ const (
 // ones somebody switched off included, which then raise a card they can say yes
 // to. Paging costs a round trip per five hundred actions and removes the cliff.
 func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
+	slug = slugOf(slug)
 	held := map[string]string{}
 	cursor, seen, total := "", 0, 0
 	for range toolPages {
@@ -539,7 +551,14 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 		if err := c.send(ctx, http.MethodGet, "/tools?"+q.Encode(), nil, &out); err != nil {
 			return nil, err
 		}
-		seen, total = seen+len(out.Items), out.Total
+		seen += len(out.Items)
+		// The FIRST count that arrives, not the last. The provider is not
+		// obliged to repeat it on every page, and an omitted one decodes as
+		// zero -- which would silently satisfy the check below and lose the only
+		// signal that an app's actions came back short.
+		if total == 0 {
+			total = out.Total
+		}
 		if err := collect(held, out.Items, slug); err != nil {
 			return nil, err
 		}
@@ -562,7 +581,7 @@ func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]stri
 // collect classifies one page of rows into the map being built.
 func collect(held map[string]string, rows []toolRow, slug string) error {
 	for _, it := range rows {
-		if it.Toolkit.Slug != "" && it.Toolkit.Slug != slug {
+		if got := slugOf(it.Toolkit.Slug); got != "" && got != slug {
 			// A row that NAMES another app, never one that names nothing. The
 			// trap being caught is a filter coming back ignored, and the rows
 			// that arrive then carry their real parents -- so an absent or
@@ -577,7 +596,7 @@ func collect(held map[string]string, rows []toolRow, slug string) error {
 			// would cache them as a complete answer for an app whose real tools
 			// never arrived.
 			return fmt.Errorf("composio: asked %s for its tools and got %s; "+
-				"the toolkit filter is being ignored", slug, it.Toolkit.Slug)
+				"the toolkit filter is being ignored", slug, got)
 		}
 		if it.Deprecated {
 			continue

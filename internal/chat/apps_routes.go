@@ -367,10 +367,16 @@ func (s *Server) browseApps(w http.ResponseWriter, r *http.Request, user string)
 		return
 	}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	group := r.URL.Query().Get("category")
+	// Lowercased for the same reason the provider's own ids are: this one is
+	// typed into a URL by whoever is calling, and everything it is matched
+	// against is already folded.
+	group := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
 	from := cursorOf(r)
-	kits, next := held.browse(query, group, from, browsePage)
-	out := Catalog{Groups: held.groups, Apps: projectApps(kits, mine), NextCursor: markCursor(next)}
+	kits, next, more := held.browse(query, group, from, browsePage)
+	out := Catalog{Groups: held.headings(), Apps: projectApps(kits, mine)}
+	if more {
+		out.NextCursor = strconv.Itoa(next)
+	}
 	// Only on the screen as it first opens. Once somebody has searched or picked
 	// a heading they are looking at one list, and previews of other headings
 	// underneath it are furniture in the way of the answer.
@@ -406,14 +412,6 @@ func cursorOf(r *http.Request) int {
 		return 0
 	}
 	return from
-}
-
-// markCursor renders where the next page starts, or nothing when there is none.
-func markCursor(from int) string {
-	if from == 0 {
-		return ""
-	}
-	return strconv.Itoa(from)
 }
 
 // owns reports whether a connection id is one of this person's.

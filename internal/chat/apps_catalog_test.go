@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,15 +158,57 @@ func TestAFailedFetchStillLeavesTheAppOnTheList(t *testing.T) {
 	if slack := bySlug(got, "slack"); slack.Name != "Slack" {
 		t.Errorf("the unreadable app is %+v, want it named after its own slug", slack)
 	}
-	// Nothing was cached, so the next open tries again and gets the real copy.
+
+	// A failed walk is held on a short cooldown rather than retried per request.
+	// Without it a provider having a bad ten minutes means every Apps screen,
+	// every browse and every connect attempt runs its own walk of up to twenty
+	// pages -- and connectApp reaches this BEFORE the per-person mint limiter.
 	fail = false
 	calls.Store(0)
+	c.toolkits(context.Background())
+	if calls.Load() != 0 {
+		t.Error("a failed walk was retried on the very next request")
+	}
+
+	// Nothing was CACHED though, so once the cooldown is up the next reader gets
+	// the real copy rather than an hour of slug-named placeholders.
+	c.mu.Lock()
+	c.cooldown = time.Now().Add(-time.Second)
+	c.mu.Unlock()
 	got = c.toolkits(context.Background())
 	if calls.Load() == 0 {
 		t.Fatal("a failed walk was cached for an hour")
 	}
 	if slack := bySlug(got, "slack"); slack.Logo == "" {
 		t.Errorf("the retry did not pick up the real copy: %+v", slack)
+	}
+}
+
+// A catalogue that answers with apps and offers none of them is treated as no
+// catalogue at all.
+//
+// Two of the three filters fail open -- a missing no_auth or deprecated decodes
+// as false and the app stays -- but managed auth fails CLOSED. If the list
+// endpoint stops carrying composio_managed_auth_schemes, every app reads as
+// unconnectable. Cached, that is a dead feature for an hour fleet-wide: a blank
+// Apps screen, an empty browse, and connectApp refusing every slug including the
+// featured six, because their fallback only fires when there is NO catalogue.
+func TestACatalogueThatOffersNothingIsTreatedAsUnread(t *testing.T) {
+	var held []composio.Toolkit
+	for _, kit := range kits(featured...) {
+		kit.ManagedAuth = false // the field the provider stopped sending
+		held = append(held, kit)
+	}
+	c, _ := catalogOf(held)
+
+	if got := c.current(context.Background()); got != nil {
+		t.Fatalf("a catalogue offering nothing was kept: %+v", got)
+	}
+	// Which is what keeps the featured six reachable: the connect route's outage
+	// fallback is reached only when current() answers with nothing.
+	got := c.toolkits(context.Background())
+	if len(got) != len(featured) {
+		t.Errorf("the Apps screen went blank: %d rows", len(got))
 	}
 }
 
@@ -190,6 +233,48 @@ func TestSlugsFallBackToAReadableName(t *testing.T) {
 	} {
 		if got := labelFor(slug); got != want {
 			t.Errorf("labelFor(%q) = %q, want %q", slug, got, want)
+		}
+	}
+}
+
+// One reader walks the catalogue; the rest wait for it.
+//
+// Without this, the moment the hour lapses every request in flight starts its
+// own walk of the whole thing -- up to twenty provider requests of five hundred
+// rows each, all producing the same answer -- and a user-facing connect POST
+// sits behind one of them.
+func TestOnlyOneReaderWalksTheCatalogue(t *testing.T) {
+	var walks atomic.Int64
+	release := make(chan struct{})
+	c := &appCatalog{
+		fetch: func(context.Context) ([]composio.Toolkit, error) {
+			walks.Add(1)
+			<-release // hold the walk open while the others pile up
+			return kits(featured...), nil
+		},
+		groupings: func(context.Context) ([]composio.Category, error) { return nil, nil },
+	}
+
+	var wg sync.WaitGroup
+	got := make([]*catalogue, 16)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i] = c.current(context.Background())
+		}()
+	}
+	// Let them all reach the cache before the walk finishes.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if n := walks.Load(); n != 1 {
+		t.Errorf("%d readers each walked the whole catalogue", n)
+	}
+	for i, held := range got {
+		if held == nil || len(held.rows) != len(featured) {
+			t.Fatalf("reader %d got %+v, want the answer the winner produced", i, held)
 		}
 	}
 }

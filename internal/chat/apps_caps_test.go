@@ -188,7 +188,21 @@ func TestAnAppThatDidNotAnswerContributesNoCapabilities(t *testing.T) {
 		t.Errorf("an outage's answer is good for %v, longer than the short clock", d)
 	}
 
+	// What IS remembered is that the app could not be read, and only for the
+	// short clock. An app the provider can never answer for -- one somebody holds
+	// a connection to after it was withdrawn -- would otherwise be re-fetched by
+	// every push forever, and one in the featured floor would do that to every
+	// machine on the fleet.
 	down = false
+	calls.Store(0)
+	if got, _ = a.resolved(context.Background(), connected, nil); calls.Load() != 0 {
+		t.Error("a failure was re-attempted straight away rather than held on its cooldown")
+	}
+	if _, ok := got["slack_GET"]; ok {
+		t.Error("a remembered failure was read back as an answer")
+	}
+
+	expireCaps(a, "slack")
 	calls.Store(0)
 	got, until = a.resolved(context.Background(), connected, nil)
 	if calls.Load() == 0 {
@@ -199,11 +213,21 @@ func TestAnAppThatDidNotAnswerContributesNoCapabilities(t *testing.T) {
 	}
 	// The other half of the same clock: a WHOLE answer is kept for the hour. Only
 	// pinning the short one would pass with both clocks set to five minutes, which
-	// re-fans-out across six apps twelve times an hour forever.
+	// re-fans-out across every connected app twelve times an hour forever.
 	if d := time.Until(until); d < appCapsTTL-time.Second {
 		t.Errorf("a complete answer is good for only %v, so every machine "+
 			"re-fetches far more often than the provider ships", d)
 	}
+}
+
+// expireCaps ages one app's cached entry out, so a test can reach the far side
+// of a clock without waiting for it.
+func expireCaps(a *appCaps, app string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	held := a.held[app]
+	held.expires = time.Now().Add(-time.Second)
+	a.held[app] = held
 }
 
 // The whole point of resolving host-side: the guest is handed one flat answer
@@ -318,5 +342,28 @@ func TestARefusalSurvivesTheCeilingAndAReadGivesWay(t *testing.T) {
 	if len(got) != appsActionCap {
 		t.Errorf("pushed %d of %d, so the reads gave way further than they had to",
 			len(got), appsActionCap)
+	}
+}
+
+// A person's saved refusal has to reach the app they saved it against, whatever
+// casing the provider reports that app's connection under.
+//
+// The permissions screen only accepts lowercase slugs, so stored keys are always
+// lowercase. The resolve set used to be the hard-coded lowercase featured list;
+// it is now whatever GET /connected_accounts says, and connectionFor already
+// hedges on that casing with EqualFold. A miss here does not error -- it drops
+// the entry from the push, and the guest reads absence as ask, so an action
+// somebody switched off becomes a card they can say yes to.
+func TestASavedRefusalSurvivesTheProvidersCasing(t *testing.T) {
+	a, _ := stubCaps(func(app string) (map[string]string, error) {
+		return map[string]string{app + "_DROP": composio.CapDelete}, nil
+	})
+	// What appsIn would hand over if the provider shouted the slug. It cannot,
+	// because composio folds it on the way in -- this pins that it stays folded.
+	got, _ := a.resolved(context.Background(), appsIn([]composio.Connection{
+		{ID: "ca_1", Toolkit: "gmail", Status: composio.StatusActive}}),
+		map[string]map[string]string{"gmail": {composio.CapDelete: agentapi.ActionNever}})
+	if got["gmail_DROP"] != agentapi.ActionNever {
+		t.Errorf("gmail_DROP is %q, so a refusal they saved became a card", got["gmail_DROP"])
 	}
 }

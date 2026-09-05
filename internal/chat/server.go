@@ -48,6 +48,8 @@ type Server struct {
 	appsGen uint64
 	// connects is when each person last minted connect links, which is what
 	// bounds the one route here that can leave permanent state at the provider.
+	// Made on first use rather than here, so a Server built by hand cannot turn
+	// the guard into a panic; see mayConnect.
 	connects map[string][]time.Time
 }
 
@@ -55,7 +57,6 @@ type Server struct {
 func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server {
 	s := &Server{cfg: cfg, control: control, caps: caps, auth: auth,
 		bridges: map[string]*Bridge{}, appsClaims: map[string]appsClaim{},
-		connects: map[string][]time.Time{},
 		composio: composio.New(cfg.ComposioKey, cfg.ComposioBase)}
 	// Only alongside a provider. A store with nothing to remember would be a
 	// live database dependency bought for nothing.

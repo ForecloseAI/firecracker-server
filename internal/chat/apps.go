@@ -18,7 +18,20 @@ import (
 // appsMintTimeout bounds minting a session and pushing it. Generous, because it
 // crosses the internet, but bounded: a stuck provider must not leave a goroutine
 // and a claim standing for the life of the process.
-const appsMintTimeout = 20 * time.Second
+//
+// It was twenty seconds when the work inside it was six parallel single-page
+// fetches. It is now a paged walk of one person's connections, then a fan-out
+// over their own apps, each of which is itself a paged walk -- and the client
+// allows fifteen seconds PER REQUEST, so two sequential pages already exceed the
+// old budget on their own. A deadline that a large app trips on every attempt is
+// not a guard, it is the five-hundred-tool cliff moved somewhere less obvious:
+// nothing is cached, the app is absent from every push, and its actions ask
+// forever, the ones somebody switched off included.
+//
+// The cost of the extra time is that a goroutine which dies without reporting
+// leaves the machine claimed for longer. That is bounded, self-clearing, and far
+// cheaper than the answer never arriving.
+const appsMintTimeout = 45 * time.Second
 
 // appsRetryAfter is how long a failed mint or push is remembered.
 //
@@ -178,10 +191,14 @@ func (s *Server) appsToResolve(ctx context.Context, user string) ([]string, stri
 	if err != nil {
 		log.Printf("chat: could not read connections for %s, resolving the "+
 			"featured apps instead: %v", user, err)
-		// No mark: a guess must not be remembered as the set this machine was
-		// answered about, or the first route to see the real one would take it
-		// for a change and drop a ticket over nothing.
-		return featured, "", false
+		// Cloned, and no mark. The clone is because the sibling path below
+		// APPENDS to what it returns, so handing out the package-level slice
+		// makes one careless caller away from writing into `featured` for the
+		// life of the process. The absent mark is because a guess must not be
+		// remembered as the set this machine was answered about, or the first
+		// route to see the real one would take it for a change and re-push over
+		// nothing.
+		return slices.Clone(featured), "", false
 	}
 	return withFeatured(appsIn(held)), appsMark(held), true
 }
@@ -335,6 +352,17 @@ type appsClaim struct {
 // running for weeks must not keep an entry per machine it has ever served.
 const appsClaimCap = 256
 
+// spentClaim reports a claim nothing is waiting on any more, which is the one
+// eviction preferred over any other: a failure whose cooldown has run out, or a
+// pushed answer whose deadline has passed. Both are due another push anyway, so
+// dropping them costs nothing at all.
+func spentClaim(held appsClaim) bool {
+	if held.pushed {
+		return time.Now().After(held.expires)
+	}
+	return time.Since(held.failed) >= appsRetryAfter
+}
+
 // claimApps takes responsibility for pushing to a machine, reporting whether
 // this caller is the one that got it.
 //
@@ -359,7 +387,9 @@ func (s *Server) claimApps(machine string) (uint64, bool) {
 	if !held.pushed && time.Since(held.failed) < appsRetryAfter {
 		return 0, false
 	}
-	s.evictClaimsLocked()
+	// Spent means a claim nothing is waiting on: a failure past its cooldown, or
+	// a pushed answer past its deadline. Caller holds s.mu.
+	evictTo(s.appsClaims, appsClaimCap, spentClaim)
 	s.appsGen++
 	s.appsClaims[machine] = appsClaim{
 		pushed: true, expires: time.Now().Add(appsMintTimeout), gen: s.appsGen}
@@ -406,6 +436,10 @@ func (s *Server) doneApps(machine string, gen uint64, done pushed) {
 		delete(s.appsClaims, machine)
 		return
 	}
+	// Always an overwrite of this machine's own entry, never a new one -- the
+	// generation check above already returned for an entry that is missing or
+	// somebody else's. So this cannot grow the table past its cap, which is why
+	// it needs no eviction of its own.
 	s.appsClaims[machine] = appsClaim{pushed: true, expires: done.until,
 		apps: done.apps, known: done.known, gen: gen}
 }
@@ -427,39 +461,33 @@ func (s *Server) doneApps(machine string, gen uint64, done pushed) {
 // already crossing the internet land afterwards and latch the older set.
 func (s *Server) noteApps(machine, mark string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	held, ok := s.appsClaims[machine]
-	if ok {
-		// Left on the claim whatever state it is in, so a reading taken while a
-		// push is in flight survives it. doneApps is what acts on that one; the
-		// check below can only speak for a push that has already landed.
-		held.seen, held.sawSeen = mark, true
-		s.appsClaims[machine] = held
+	if !ok {
+		return
 	}
-	stale := ok && held.pushed && held.known && held.apps != mark
-	s.mu.Unlock()
-	if !stale {
+	// Left on the claim whatever state it is in, so a reading taken while a push
+	// is in flight survives it. doneApps is what acts on that one; the check
+	// below can only speak for a push that has already landed.
+	held.seen, held.sawSeen = mark, true
+	s.appsClaims[machine] = held
+	if !held.pushed || !held.known || held.apps == mark {
 		return
 	}
 	log.Printf("chat: %s was answered about %q and now holds %q; pushing again",
 		machine, held.apps, mark)
-	// dueApps and NOT forgetApps: the ticket stays. Nothing about who this
-	// machine is or which session is theirs has changed -- only which apps the
-	// answer covers -- and dropping the route would leave the guest dialling a
-	// ticket the broker now refuses, in the middle of the very retry the person
-	// just connected an app for. Register rotates it on the next push.
-	s.dueApps(machine)
-}
-
-// evictClaimsLocked keeps the table bounded. Caller holds s.mu. Which entry goes
-// is not worth choosing: the cap is far above any live fleet, so an eviction
-// costs one redundant push and nothing else.
-func (s *Server) evictClaimsLocked() {
-	for machine := range s.appsClaims {
-		if len(s.appsClaims) < appsClaimCap {
-			return
-		}
-		delete(s.appsClaims, machine)
-	}
+	// Under the SAME lock the staleness was decided under. Deciding here and
+	// deleting after an unlock would let the claim change in between: it can
+	// expire, a fresh push can take it, and the delete then lands on that one --
+	// which frees a machine whose push is in flight, so a second push starts and
+	// the two race on Register, each revoking the other's ticket.
+	//
+	// The claim only and never the ticket. Nothing about who this machine is or
+	// which session is theirs has changed -- only which apps the answer covers --
+	// and dropping the route would leave the guest dialling something the broker
+	// refuses, in the middle of the very retry the person connected an app for.
+	// Register rotates it on the next push.
+	delete(s.appsClaims, machine)
 }
 
 // failApps releases the claim behind a cooldown, so an outage costs one attempt
@@ -468,21 +496,36 @@ func (s *Server) evictClaimsLocked() {
 func (s *Server) failApps(machine string, gen uint64) {
 	s.mu.Lock()
 	held, ok := s.appsClaims[machine]
-	mine := ok && held.gen == gen
-	if mine {
+	// SUPERSEDED is the case to stand down for, not "no claim". A newer push has
+	// taken this machine over, and recording a cooldown or dropping the route
+	// would put a live machine out of service on the strength of an older push's
+	// bad luck.
+	//
+	// No claim at all is the opposite and used to be lumped in with it: the entry
+	// was evicted while this push was in flight, so nothing has taken over and
+	// nothing else is going to clean up. Skipping the cooldown there is how one
+	// outage becomes a full mint attempt per request -- the exact storm
+	// appsRetryAfter exists to stop, on the path that opens every agent's thread
+	// at once -- and it leaves a route the guest was never told about.
+	superseded := ok && held.gen != gen
+	if !superseded {
 		s.appsClaims[machine] = appsClaim{failed: time.Now(), gen: gen}
 	}
 	s.mu.Unlock()
-	// Both halves only for this push's own claim. A slow failure landing after
-	// somebody else took over would otherwise put a live machine on a cooldown
-	// and drop the ticket the newer push had just registered for it.
-	if mine && s.gw != nil {
+	if !superseded && s.gw != nil {
 		s.gw.Forget(machine)
 	}
 }
 
 // dueApps brings a machine up for another push, leaving what it is holding
 // alone.
+//
+// Unconditional, and the callers are why: a person changed a setting or
+// disconnected an account, so whatever any push is currently carrying answers
+// the old question. A claim taken since is answering it too -- it read the same
+// stored row -- and dropping it is what makes the change take effect rather than
+// wait out the hour. The generation check in doneApps is what stops the push
+// that was in flight from quietly latching its stale answer afterwards.
 //
 // The claim and the ticket are separate things and only some callers want both
 // gone. A machine whose ANSWER has gone stale still has the right session and

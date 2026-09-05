@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -192,25 +194,31 @@ func TestDisconnectToleratesAnEmptyBody(t *testing.T) {
 }
 
 // A toolkit's copy comes from the provider, so nothing about an app is written
-// down here to go stale.
-func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
-	var gotPath string
+// down here to go stale -- and every identifier it carries arrives lowercase,
+// because several unrelated places compare slugs and category ids for equality.
+func TestToolkitCopyAndIdentifiersComeFromTheProvider(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Write([]byte(`{"slug":"gmail","name":"Gmail","meta":{
-			"logo":"https://logos.composio.dev/api/gmail","description":"Google's email service"}}`))
+		if r.URL.Path != "/toolkits" {
+			t.Errorf("asked for %q", r.URL.Path)
+		}
+		// Shouted on purpose: the provider's own slugs are lowercase today, and
+		// this pins what happens the day one endpoint stops agreeing.
+		w.Write([]byte(`{"items":[{"slug":"GMail","name":"Gmail",
+			"composio_managed_auth_schemes":["oauth2"],
+			"meta":{"logo":"https://logos.composio.dev/api/gmail",
+				"description":"Google's email service",
+				"categories":[{"id":"Productivity","name":"Productivity"}]}}]}`))
 	}))
 	defer srv.Close()
 
-	got, err := New("k", srv.URL).Toolkit(context.Background(), "gmail")
+	got, err := New("k", srv.URL).Toolkits(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/toolkits/gmail" {
-		t.Errorf("asked for %q", gotPath)
-	}
-	want := Toolkit{Slug: "gmail", Name: "Gmail",
-		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service"}
+	want := []Toolkit{{Slug: "gmail", Name: "Gmail",
+		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service",
+		Categories:  []Category{{ID: "productivity", Name: "Productivity"}},
+		ManagedAuth: true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v", got)
 	}
@@ -559,9 +567,8 @@ func TestTheCatalogueIsWalkedToItsEnd(t *testing.T) {
 	if len(got) != 2 || got[0].Slug != "gmail" || got[1].Slug != "jira" {
 		t.Fatalf("got %+v, want both pages in the order they arrived", got)
 	}
-	if got[0].Tools != 102 || len(got[0].Categories) != 1 ||
-		got[0].Categories[0].ID != "productivity" {
-		t.Errorf("the grouping and the size did not survive the decode: %+v", got[0])
+	if len(got[0].Categories) != 1 || got[0].Categories[0].ID != "productivity" {
+		t.Errorf("the grouping did not survive the decode: %+v", got[0])
 	}
 	if len(queries) != 2 || !strings.Contains(queries[0], "sort_by=usage") {
 		t.Errorf("queries were %q", queries)
@@ -612,17 +619,17 @@ func TestOnlyAnAppWeCanActuallyPutSomebodyThroughIsConnectable(t *testing.T) {
 // marks one is the field being there at all.
 func TestAWithdrawnAppIsRecognisedByTheBlockBeingPresent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"slug":"oldapp","name":"Old App",
+		w.Write([]byte(`{"items":[{"slug":"oldapp","name":"Old App",
 			"composio_managed_auth_schemes":["oauth2"],
-			"deprecated":{"version":"20250905_00"}}`))
+			"deprecated":{"version":"20250905_00"}}]}`))
 	}))
 	defer srv.Close()
-	got, err := New("k", srv.URL).Toolkit(context.Background(), "oldapp")
+	got, err := New("k", srv.URL).Toolkits(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Deprecated || got.Connectable() {
-		t.Errorf("got %+v, which is still on offer", got)
+	if !got[0].Deprecated || got[0].Connectable() {
+		t.Errorf("got %+v, which is still on offer", got[0])
 	}
 }
 
@@ -720,6 +727,55 @@ func TestARowThatNamesNoToolkitIsNotTakenForAnIgnoredFilter(t *testing.T) {
 	got, err := New("k", srv.URL).Capabilities(context.Background(), "gmail")
 	if err != nil {
 		t.Fatalf("a page with no parent named on its rows was refused: %v", err)
+	}
+	if got["GMAIL_FETCH_EMAILS"] != CapRead {
+		t.Errorf("got %v", got)
+	}
+}
+
+// A short walk is noticed even when only the first page carries the count.
+//
+// That log line is the only signal that an app's actions came back incomplete,
+// and incomplete means actions the person switched off are missing from the
+// pushed answer -- where absence reads as ask. Taking the last page's count
+// would silence it, because an omitted total_items decodes as zero.
+func TestAShortWalkIsNoticedFromTheFirstPagesCount(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			w.Write([]byte(`{"items":[{"slug":"BIG_ONE","tags":["readOnlyHint"],
+				"toolkit":{"slug":"big"}}],"next_cursor":"p2","total_items":900}`))
+			return
+		}
+		// No total_items at all, which decodes as zero.
+		w.Write([]byte(`{"items":[{"slug":"BIG_TWO","tags":["readOnlyHint"],
+			"toolkit":{"slug":"big"}}]}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New("k", srv.URL).Capabilities(context.Background(), "big"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "900") {
+		t.Errorf("nothing said about a walk that found 2 of 900: %q", logged.String())
+	}
+}
+
+// The row check is about a row naming ANOTHER app, and casing is not that.
+// Refusing on it would cost the app its whole answer forever, on the five-minute
+// clock, fleet-wide -- which is the failure this guard exists to avoid.
+func TestARowThatNamesTheSameAppInAnotherCasingIsNotAMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"slug":"GMAIL_FETCH_EMAILS","tags":["readOnlyHint"],
+			"toolkit":{"slug":"GMail"}}]}`))
+	}))
+	defer srv.Close()
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "GMail")
+	if err != nil {
+		t.Fatalf("a canonical-casing echo was taken for an ignored filter: %v", err)
 	}
 	if got["GMAIL_FETCH_EMAILS"] != CapRead {
 		t.Errorf("got %v", got)

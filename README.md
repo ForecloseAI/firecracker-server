@@ -474,7 +474,16 @@ for, and the only apps written down anywhere in this repository.
 few, then `?q=`, `?category=` and `?cursor=` over the whole thing.
 
 The catalogue is walked once an hour for the whole fleet and answered from
-memory, so browsing costs no round trip per keystroke. Three kinds of app are
+memory, so browsing costs no round trip per keystroke. One reader does the walk
+and the rest wait on it, and a failed walk is held on a short cooldown — without
+either, the hour lapsing means every request in flight starts its own twenty-page
+walk, and an outage means every request retries one.
+
+A reading that answers with apps but offers none of them is treated as no
+reading at all. Two of the three filters fail open, but managed auth fails
+closed: if the list endpoint stops carrying it, everything reads as
+unconnectable, and caching that would be a dead feature for an hour fleet-wide
+with even the featured six refused. Three kinds of app are
 dropped from it, because all three end as a Connect button that cannot work:
 one with nothing to authorise, one whose credentials a project has to bring
 itself, and one being withdrawn.
@@ -556,6 +565,12 @@ single page, on the reasoning that a short answer is worse than none — true
 while the six apps on offer topped out at 305 tools, and false now that anybody
 can connect anything: refusing leaves the app absent from every pushed answer,
 so its actions ask forever, the ones somebody switched off included.
+
+An app the provider cannot answer for is remembered as unreadable for the same
+five minutes, rather than re-fetched by every push: somebody holding a
+connection to a withdrawn app would otherwise put their machines in a permanent
+five-minute re-push loop, and an app in the featured floor would do that to the
+whole fleet.
 
 Resolved over the apps a person has **connected**, in any status, plus the
 featured few as a floor. An action in an app nobody has connected cannot run

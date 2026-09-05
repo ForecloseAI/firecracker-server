@@ -88,28 +88,37 @@ func (s *Server) mayConnect(user string) bool {
 		s.connects[user] = held
 		return false
 	}
-	s.evictConnectsLocked()
+	evictTo(s.connects, connectRateCap, func(at []time.Time) bool {
+		return len(at) == 0 || now.Sub(at[len(at)-1]) >= connectWindow
+	})
 	s.connects[user] = append(held, now)
 	return true
 }
 
-// evictConnectsLocked keeps the table bounded. Caller holds s.mu. Which row goes
-// is not worth choosing: an eviction costs somebody a forgotten attempt or two,
-// and the cap is far above a live fleet.
-func (s *Server) evictConnectsLocked() {
-	now := time.Now()
-	for user, held := range s.connects {
-		if len(s.connects) < connectRateCap {
+// evictTo keeps a bounded table under its cap, ahead of one more insert.
+//
+// Three tables in this package wanted the same thing and each had written it
+// out: the app claims, the capability cache and the connect limiter. All three
+// wanted spent entries dropped first -- they are free to lose -- and none of
+// them cared which of the live ones went after that, because every cap here sits
+// far above a real fleet and an eviction costs one redundant round trip.
+//
+// `spent` is the only thing they disagreed about, so it is the argument. The cap
+// is checked BEFORE each delete rather than after, so the table is left with room
+// for the caller's insert rather than exactly at its limit.
+func evictTo[K comparable, V any](held map[K]V, cap int, spent func(V) bool) {
+	for key, value := range held {
+		if len(held) < cap {
 			return
 		}
-		if len(held) == 0 || now.Sub(held[len(held)-1]) >= connectWindow {
-			delete(s.connects, user)
+		if spent(value) {
+			delete(held, key)
 		}
 	}
-	for user := range s.connects {
-		if len(s.connects) < connectRateCap {
+	for key := range held {
+		if len(held) < cap {
 			return
 		}
-		delete(s.connects, user)
+		delete(held, key)
 	}
 }

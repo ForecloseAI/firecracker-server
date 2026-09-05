@@ -73,6 +73,17 @@ type appCaps struct {
 }
 
 // capsEntry is one app's actions and when they go stale.
+//
+// A nil caps is a remembered FAILURE, not an app with nothing in it. Keeping
+// those is the difference between one attempt per app per cooldown and one per
+// push: a person holding a connection to an app the provider has withdrawn can
+// never have it read, and without this every machine of theirs re-fans-out over
+// all their apps every five minutes forever, rotating its ticket each time. An
+// app in the featured floor going the same way would do that to the whole fleet.
+//
+// It is not the "partial answer" this cache refuses to keep. What is cached is
+// that the app could not be read, on the short clock, so its actions go on
+// asking -- the safe direction -- without the retry storm behind it.
 type capsEntry struct {
 	caps    map[string]string
 	expires time.Time
@@ -111,8 +122,8 @@ func (a *appCaps) resolved(ctx context.Context, apps []string,
 	// instead, and a card is something somebody can say yes to. One pass over a
 	// map would decide which by iteration order, differently on every push.
 	for _, want := range []string{agentapi.ActionNever, agentapi.ActionAuto} {
-		if a.fill(out, apps, held, policy, want) {
-			return out, until
+		if fill(out, apps, held, policy, want) {
+			break
 		}
 	}
 	return out, until
@@ -120,7 +131,11 @@ func (a *appCaps) resolved(ctx context.Context, apps []string,
 
 // fill adds every action resolving to one answer, reporting whether the ceiling
 // stopped it short.
-func (a *appCaps) fill(out map[string]string, apps []string,
+//
+// A function and not a method: it reads none of the cache's state, and hanging
+// it off *appCaps would suggest it takes part in the locking discipline that
+// cache genuinely needs.
+func fill(out map[string]string, apps []string,
 	held map[string]map[string]string, policy map[string]map[string]string, want string) bool {
 	for _, app := range apps {
 		for slug, capability := range held[app] {
@@ -223,7 +238,7 @@ func (a *appCaps) capabilities(ctx context.Context,
 // five-minute loop forever.
 func (a *appCaps) appCapabilities(ctx context.Context, app string) (map[string]string, time.Time, bool) {
 	if held, ok := a.fresh(app); ok {
-		return held.caps, held.expires, true
+		return held.caps, held.expires, held.caps != nil
 	}
 	got, err := a.fetch(ctx, app)
 	if err != nil {
@@ -231,10 +246,10 @@ func (a *appCaps) appCapabilities(ctx context.Context, app string) (map[string]s
 		// outage from one toolkit that outgrew a decode limit -- and the second
 		// is the one that never heals on its own.
 		log.Printf("chat: %s did not answer: %v", app, err)
-		return nil, time.Time{}, false
+		return nil, a.keep(app, nil, appsRetry), false
 	}
 	ourView(got)
-	return got, a.keep(app, got), true
+	return got, a.keep(app, got, appCapsTTL), true
 }
 
 // fresh returns one app's cached actions while they are still good. The bool is
@@ -246,36 +261,24 @@ func (a *appCaps) fresh(app string) (capsEntry, bool) {
 	return held, ok && time.Now().Before(held.expires)
 }
 
-// keep stores one app's actions and starts its clock, reporting when it runs out.
-func (a *appCaps) keep(app string, caps map[string]string) time.Time {
+// keep stores one app's answer -- or the fact that it had none -- and starts its
+// clock, reporting when it runs out.
+func (a *appCaps) keep(app string, caps map[string]string, ttl time.Duration) time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.evictLocked()
-	expires := time.Now().Add(appCapsTTL)
+	if a.held == nil {
+		// Made here rather than required of the caller, for the reason mayConnect
+		// says: a cache that panics when somebody builds it without one field is
+		// a trap every test has to know about, and this one would fire inside a
+		// detached goroutine on a cold miss.
+		a.held = map[string]capsEntry{}
+	}
+	evictTo(a.held, appCapsCap, func(held capsEntry) bool {
+		return time.Now().After(held.expires)
+	})
+	expires := time.Now().Add(ttl)
 	a.held[app] = capsEntry{caps: caps, expires: expires}
 	return expires
-}
-
-// evictLocked keeps the table bounded. Caller holds a.mu. Expired entries go
-// first because they are free to lose; past that, which one goes is not worth
-// choosing -- the cap is far above what a fleet reaches, so an eviction costs one
-// re-fetch and nothing else.
-func (a *appCaps) evictLocked() {
-	now := time.Now()
-	for app, held := range a.held {
-		if len(a.held) < appCapsCap {
-			return
-		}
-		if now.After(held.expires) {
-			delete(a.held, app)
-		}
-	}
-	for app := range a.held {
-		if len(a.held) < appCapsCap {
-			return
-		}
-		delete(a.held, app)
-	}
 }
 
 // earlier is the sooner of two deadlines. time.Time is not ordered, so min does

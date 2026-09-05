@@ -188,7 +188,7 @@ func TestHeadingsAreRebuiltFromTheAppsWhenTheProviderWillNotList(t *testing.T) {
 	if len(held.groups) != 1 || held.groups[0].Name != "Productivity" {
 		t.Errorf("headings are %+v, want them rebuilt from the apps", held.groups)
 	}
-	if len(held.kits) != 1 {
+	if len(held.rows) != 1 {
 		t.Error("the apps went missing with the headings")
 	}
 }

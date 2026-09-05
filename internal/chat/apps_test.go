@@ -701,3 +701,64 @@ func TestAPushThatOutlivedItsClaimDoesNotDisturbTheNextOne(t *testing.T) {
 		t.Error("a late failure dropped the ticket the newer push had just registered")
 	}
 }
+
+// A push that failed after its claim was EVICTED still earns a cooldown and
+// still gives its ticket back.
+//
+// Standing down belongs to the superseded case, where another push has taken the
+// machine over and is going to clean up after itself. An evicted claim has
+// nobody behind it: skipping the cooldown there turns one outage into a full
+// mint attempt per request, on the path that opens every agent's thread at once,
+// and leaves a broker route the guest was never told about.
+func TestAFailureWhoseClaimWasEvictedStillEarnsItsCooldown(t *testing.T) {
+	machine := machineFor(testUserID)
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	if _, err := gw.Register(machine, "127.0.0.1", "127.0.0.1",
+		"https://backend.composio.dev/mcp/sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{gw: gw, appsClaims: map[string]appsClaim{}}
+	gen := claimed(t, s, machine)
+
+	// The table filled up and this machine's in-flight claim was the one dropped.
+	s.mu.Lock()
+	delete(s.appsClaims, machine)
+	s.mu.Unlock()
+	s.failApps(machine, gen)
+
+	if _, ok := s.claimApps(machine); ok {
+		t.Error("a failure with no claim behind it was retried at once, so an " +
+			"outage costs one full mint per request")
+	}
+	gw.mu.Lock()
+	routes := len(gw.routes)
+	gw.mu.Unlock()
+	if routes != 0 {
+		t.Error("the half-registered route outlived the push that made it")
+	}
+}
+
+// noteApps decides and acts under one lock acquisition.
+//
+// Deciding, unlocking, then deleting lets the claim change in between: it can
+// expire, a fresh push can take it, and the delete lands on THAT one -- freeing
+// a machine whose push is in flight, so a second starts and the two race on
+// Register, each revoking the other's ticket.
+func TestNoteAppsDoesNotReleaseAClaimTakenSinceItLooked(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	s.doneApps(machine, claimed(t, s, machine),
+		pushed{until: time.Now().Add(appCapsTTL), apps: "gmail", known: true})
+
+	// The stale reading releases the claim, and the next push takes it.
+	s.noteApps(machine, "gmail,notion")
+	gen := claimed(t, s, machine)
+
+	// A second reading of the same new set must leave that push alone: it is
+	// already answering the question this one would ask.
+	s.noteApps(machine, "gmail,notion")
+	if held, ok := s.appsClaims[machine]; !ok || held.gen != gen {
+		t.Error("an in-flight push was released, so a second one starts and the " +
+			"two race on the machine's ticket")
+	}
+}
