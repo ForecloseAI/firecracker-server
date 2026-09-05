@@ -743,7 +743,7 @@ func usageOf(u anthropic.BetaUsage) Usage {
 // spending real tokens that /usage cannot account for.
 func (a *Agent) bookUsage(model string, used Usage) {
 	a.log.Append(Event{Type: "usage", Model: model, Usage: &used})
-	a.meter().Record(model, used)
+	a.meter().Record(a.id, model, used)
 }
 
 // meter is the machine's spend counter, or nil when this agent has no team --
@@ -776,7 +776,7 @@ func (a *Agent) finish(started time.Time, err error) {
 		IsError:    err != nil,
 		DurationMS: took.Milliseconds(),
 	})
-	a.meter().FinishTurn(took)
+	a.meter().FinishTurn(a.id, took)
 	a.setState("idle")
 }
 

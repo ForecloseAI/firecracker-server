@@ -136,7 +136,11 @@ Cost and token counts are lifetime totals **for the workspace**, not for this
 boot: the guest keeps its running total on the overlay, which survives `DELETE`
 without `?purge=true`. The host reads it from the daemon's `GET /usage` and
 applies the price table, so nothing is counted twice and rates can change
-without rebuilding a guest image. `?purge=true` resets both.
+without rebuilding a guest image. `?purge=true` resets both. The daemon also
+splits the same total by agent and by day on the person's own clock; the app's
+Settings screen reads that through `GET /v1/usage` as today, this week and
+lifetime per agent, priced on the host. The machine-wide figure here is
+unchanged by the split.
 
 Destructive buttons need two clicks rather than opening a native dialog, so the
 page stays drivable by browser automation.

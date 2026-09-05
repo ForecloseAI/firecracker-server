@@ -323,12 +323,42 @@ type ModelUsage struct {
 
 // UsageReport is GET /usage: what this daemon has spent across every agent it
 // runs, in tokens. No dollar figure -- the host owns the price table, so rates
-// can change without rebuilding a guest image.
+// can change without rebuilding a guest image. The machine-wide totals come
+// first and never change shape; the per-agent view rides alongside them.
 type UsageReport struct {
 	ByModel        []ModelUsage `json:"by_model"`
 	Turns          int64        `json:"turns"`
 	LastDurationMS int64        `json:"last_duration_ms,omitempty"`
 	LastActivity   time.Time    `json:"last_activity,omitzero"`
+	AgentUsageReport
+}
+
+// UnattributedAgent labels spend recorded before usage was split by agent.
+const UnattributedAgent = "unattributed"
+
+// UsageWindow is spend inside one span of the person's calendar. ByModel is
+// never nil: the app maps a null list to nothing at all.
+type UsageWindow struct {
+	ByModel []ModelUsage `json:"by_model"`
+	Turns   int64        `json:"turns"`
+}
+
+// AgentUsage is one agent's spend today, this calendar week, and ever.
+type AgentUsage struct {
+	Agent    string      `json:"agent"`
+	Today    UsageWindow `json:"today"`
+	Week     UsageWindow `json:"week"`
+	Lifetime UsageWindow `json:"lifetime"`
+}
+
+// AgentUsageReport is the per-agent view, dated on the person's own clock: the
+// day and the Monday the windows were cut at, so a reader can say what "today"
+// meant when the report was made.
+type AgentUsageReport struct {
+	Zone      string       `json:"zone,omitempty"`
+	Today     string       `json:"today,omitempty"`
+	WeekStart string       `json:"week_start,omitempty"`
+	Agents    []AgentUsage `json:"agents"`
 }
 
 // Profile is one kind of agent: its role prompt, its model, and what it may do.

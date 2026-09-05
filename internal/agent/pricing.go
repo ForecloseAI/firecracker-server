@@ -71,6 +71,17 @@ func costOf(model string, u agentapi.Usage) (float64, bool) {
 		perToken(u.CacheReadInputTokens, r.in*cacheReadMultiple), true
 }
 
+// PriceUsage is what one model's tokens cost, or zero and false for a model
+// the table does not know. The miss is logged once: zero is exactly what a
+// free turn looks like, and a caller that forgot to check would show one.
+func PriceUsage(model string, u agentapi.Usage) (float64, bool) {
+	cost, ok := costOf(model, u)
+	if !ok {
+		warnUnpriced(model)
+	}
+	return cost, ok
+}
+
 // warned remembers which unpriced models have already been reported, so an
 // unknown id costs one log line rather than one per dashboard poll.
 var warned sync.Map

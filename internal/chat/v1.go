@@ -37,6 +37,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/threads/{id}/files/{name}", s.apiGuard(s.getAttachment))
 	mux.HandleFunc("GET /v1/schedules", s.apiGuard(s.listSchedules))
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.apiGuard(s.cancelSchedule))
+	mux.HandleFunc("GET /v1/usage", s.apiGuard(s.getUsage))
 	mux.HandleFunc("GET /v1/profile", s.apiGuard(s.getProfile))
 	mux.HandleFunc("PUT /v1/profile", s.apiGuard(s.putProfile))
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
