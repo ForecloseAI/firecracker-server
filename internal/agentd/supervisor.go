@@ -184,7 +184,7 @@ func nameAgent(a *agentapi.AgentUsage, roster []Record) {
 	a.Name, a.Retired = a.Agent, true
 	for _, rec := range roster {
 		if rec.ID == a.Agent {
-			a.Name, a.Retired, a.OwnKey = rec.Name, false, rec.Model != nil
+			a.Name, a.Retired = rec.Name, false
 		}
 	}
 }
@@ -484,9 +484,6 @@ func patchModel(r *Record, m *agentapi.ModelPatch) {
 		return
 	}
 	next := m.ModelConfig
-	if next.APIKey == "" && r.Model != nil {
-		next.APIKey = r.Model.APIKey
-	}
 	r.Model = &next
 }
 
@@ -518,23 +515,22 @@ func validName(name string) error {
 	return nil
 }
 
-// validModel checks a custom model before it is stored: an endpoint this
-// machine may dial, a model id, a known thinking level, and a key.
+// validModel checks a custom model before it is stored: a model id and a known
+// thinking level, which is all there is left to get wrong.
+//
+// The id itself is not checked against anything. It goes to OpenRouter's whole
+// catalogue, which this machine has no list of, so a name that does not exist
+// there fails the agent's first turn with the gateway's own words rather than
+// being refused here in ours.
 func validModel(m *agentapi.ModelConfig) error {
 	if m == nil {
 		return nil
-	}
-	if m.URL == "" || validSessionURL(m.URL) != nil {
-		return errors.New("model url: not something this machine can dial")
 	}
 	if strings.TrimSpace(m.Model) == "" {
 		return errors.New("model: a model id is required")
 	}
 	if _, ok := agentapi.ThinkingBudgets[m.Thinking]; m.Thinking != "" && !ok {
 		return fmt.Errorf("model thinking: %q is not low, medium or high", m.Thinking)
-	}
-	if m.APIKey == "" {
-		return errors.New("model: an api key is required")
 	}
 	return nil
 }
