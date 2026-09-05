@@ -23,8 +23,8 @@ func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 	// reads, so it is not in the rendered profile -- but the app has no other way
 	// to learn it, and without it a reinstall or a second device shows "Not set"
 	// beside a machine that is on a perfectly good clock.
-	reply(w, http.StatusOK, agentapi.Person{
-		Notes: body, Onboarded: body != "", TZ: readZoneFile(s.sup.stateDir)})
+	reply(w, http.StatusOK, agentapi.Person{Notes: body, Onboarded: body != "",
+		TZ: readZoneFile(s.sup.stateDir), Country: readCountryFile(s.sup.stateDir)})
 }
 
 // handlePutPerson replaces the profile with what onboarding collected.
@@ -44,6 +44,10 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if p.Country != "" && !validCountry.MatchString(p.Country) {
+		fail(w, http.StatusBadRequest, "bad_request", "country must be a two-letter ISO code", "person")
+		return
+	}
 	// A body carrying only a zone changes only the zone, because WritePerson
 	// replaces the file and the settings screen's zone-only save would otherwise
 	// answer "I moved to Berlin" by forgetting who they are.
@@ -52,7 +56,7 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// existing, so skipping the write for someone who picked a country and
 	// skipped the questions would leave them un-onboarded and asked again on
 	// every launch. Nothing to protect means nothing to skip.
-	wrote := !onlyZone(p) || ReadPerson(s.sup.stateDir) == ""
+	wrote := !onlyMachineState(p) || ReadPerson(s.sup.stateDir) == ""
 	if wrote {
 		if err := WritePerson(s.sup.stateDir, p); err != nil {
 			fail(w, http.StatusInternalServerError, "write_failed", err.Error(), "person")
@@ -64,6 +68,7 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// writer, and going through the supervisor is what moves the guest's own TZ
 	// and any existing clock schedules with it.
 	moved := s.sup.RememberZone(p.TZ)
+	placed := rememberCountry(s.sup.stateDir, p.Country)
 	// Every running agent composed its prompt at start, so none of them can see
 	// this yet. Evicting is what makes onboarding take effect now rather than
 	// whenever an agent happens to be recycled.
@@ -72,20 +77,21 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 	// country already chosen writes nothing and moves nothing, and throwing away
 	// the machine's warm agents for that would make a no-op the most expensive
 	// thing in the screen.
-	if wrote || moved {
+	if wrote || moved || placed {
 		s.sup.EvictIdle()
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// onlyZone reports whether this profile says nothing except where the person is.
+// onlyMachineState reports whether this profile says nothing except where the
+// person is: a zone, a country, or both, and none of who they are.
 //
 // A GET hands back the whole rendered profile in Notes and nothing in Name or
 // Work, so a client cannot echo back what it read as the fields it came from.
 // The settings screen therefore sends the zone alone, and this is what tells
 // that apart from an onboarding body.
-func onlyZone(p agentapi.Person) bool {
-	return p.TZ != "" && p.Name == "" && p.Work == "" && p.Notes == ""
+func onlyMachineState(p agentapi.Person) bool {
+	return (p.TZ != "" || p.Country != "") && p.Name == "" && p.Work == "" && p.Notes == ""
 }
 
 // handleShot serves a handoff screenshot.

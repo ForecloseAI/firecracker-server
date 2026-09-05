@@ -3,6 +3,7 @@ package agentd
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -81,7 +82,47 @@ func RenderPersonSection(stateDir string) string {
 	if body == "" {
 		return ""
 	}
-	return "## About the person you work for\n\n" + body +
+	return "## About the person you work for\n\n" + body + whereTheyAre(stateDir) +
 		"\nWhen you learn something durable about them, record it with " +
 		"remember_about_person. Passing preferences for one task are not worth keeping."
+}
+
+// whereTheyAre is the line that decides the language: their country when the
+// app sent one, or, for a machine onboarded before it did, their clock, which
+// is the nearest thing to a region it knows.
+func whereTheyAre(stateDir string) string {
+	if code := readCountryFile(stateDir); code != "" {
+		return "- Country: " + code + " (ISO code). Write to them in the language most " +
+			"commonly spoken there, unless they have asked for another.\n"
+	}
+	if tz := readZoneFile(stateDir); tz != "" {
+		return "- Their clock is " + tz + ".\n"
+	}
+	return ""
+}
+
+// countryPath is where the person's country is remembered: machine state
+// beside the zone, not part of the rendered profile, for the same reason -- a
+// zone-only save must not blank it, and the app has to read it back.
+func countryPath(stateDir string) string { return filepath.Join(stateDir, "country") }
+
+// validCountry is an ISO 3166-1 alpha-2 code, the key of the app's country list.
+var validCountry = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// rememberCountry stores a code, reporting whether it changed. A bad code is
+// ignored rather than stored; the HTTP handler refuses it by name.
+func rememberCountry(stateDir, code string) bool {
+	if code == readCountryFile(stateDir) || !validCountry.MatchString(code) {
+		return false
+	}
+	return os.WriteFile(countryPath(stateDir), []byte(code), 0o640) == nil
+}
+
+// readCountryFile returns the stored code, or "" when there is not one yet.
+func readCountryFile(stateDir string) string {
+	buf, err := os.ReadFile(countryPath(stateDir))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(buf))
 }

@@ -304,6 +304,11 @@ type Person struct {
 	// still reports it: the app has no other way to find out which country it
 	// should be showing, and guessing from the device is what this replaced.
 	TZ string `json:"tz,omitempty"`
+	// Country is where they live, as an ISO 3166-1 alpha-2 code: what the
+	// app's own country list is keyed on. Machine state beside the zone, kept
+	// out of the rendered profile for the same reason and rendered into the
+	// prompt as the line that decides which language an agent writes in.
+	Country string `json:"country,omitempty"`
 }
 
 // EventsPage is the body of GET /agents/{id}/events?poll=1.

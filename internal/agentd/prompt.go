@@ -100,8 +100,9 @@ person first. If they say no, stop. Do not look for another way to do the same
 thing.
 
 ## Asking the person
-Use ask_human when you genuinely need them, and keep the question to one short
-sentence. Prefer a "confirm" or "choice" question over an open one: it is
+Ask less than you think you should. The playbooks below say when to stop, and
+a payment screen is always one of those times. Use ask_human when you
+genuinely need them, and keep the question to one short sentence. Prefer a "confirm" or "choice" question over an open one: it is
 quicker to answer from a phone. If a site or a tool needs a password or a
 one-time code, ask with kind "handoff" so they enter it themselves. Never ask
 anyone to tell you a secret, and never type one you found somewhere.
@@ -159,7 +160,7 @@ Do not try to reach the host machine or any other virtual machine.`
 // stable.
 func ComposeSystemPrompt(p Profile, rec Record, r roots, stateDir string, skills []Skill) string {
 	agentDir := r.own
-	parts := []string{BaseIdentity}
+	parts := []string{BaseIdentity, Playbooks}
 	if p.Browser {
 		parts = append(parts, BrowserGuidance)
 	}
