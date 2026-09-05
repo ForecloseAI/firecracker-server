@@ -70,7 +70,7 @@ func TestNoDefaultRouteIsAnError(t *testing.T) {
 func TestAnEnvCredentialWinsOverTheBroker(t *testing.T) {
 	clearModelEnv(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-x")
-	if ep := defaultEndpoint(); ep != (endpoint{anthropic: true}) {
+	if ep := defaultEndpoint(); ep != (endpoint{}) {
 		t.Fatalf("with a key in the environment the endpoint was %+v", ep)
 	}
 	if line := defaultEndpoint().String(); !strings.Contains(line, "environment") {
@@ -176,19 +176,19 @@ func assertTurnLogged(t *testing.T, a *Agent) {
 // URL, their key, their model, their thinking level -- and counts as Anthropic
 // only when it actually is.
 func TestAPersonsOwnEndpointReplacesTheMachines(t *testing.T) {
-	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, anthropic: true}
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
 	if ep := base.forAgent("claude-sonnet-5", nil); ep.model != "claude-sonnet-5" ||
-		ep.baseURL != base.baseURL || ep.key != brokerKey || !ep.anthropic {
+		ep.baseURL != base.baseURL || ep.key != brokerKey || ep.foreign {
 		t.Fatalf("machine endpoint for a gallery agent: %+v", ep)
 	}
 	own := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own", Model: "m", Thinking: "high"}
 	if ep := base.forAgent("claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
-		ep.model != "m" || ep.thinking != "high" || ep.anthropic {
+		ep.model != "m" || ep.thinking != "high" || !ep.foreign {
 		t.Fatalf("own endpoint: %+v", ep)
 	}
 	direct := base.forAgent("x", &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"})
-	if !direct.anthropic {
-		t.Error("api.anthropic.com on the person's own key was not treated as Anthropic")
+	if direct.foreign {
+		t.Error("api.anthropic.com on the person's own key was treated as foreign")
 	}
 }
 

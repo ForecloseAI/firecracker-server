@@ -373,13 +373,15 @@ type Record struct {
 // number of them may exist, which is the one way it differs from a gallery type.
 const CustomType = "custom"
 
-// ThinkingLevels are the values ModelConfig.Thinking may take besides "", which
-// is no extended thinking at all.
-var ThinkingLevels = []string{"low", "medium", "high"}
+// ThinkingBudgets is how many tokens each thinking level buys the model to
+// reason with. "" is no extended thinking at all. One table, so a level is
+// validated and priced from the same place.
+var ThinkingBudgets = map[string]int64{"low": 2048, "medium": 8192, "high": 16384}
 
 // ModelConfig is a custom agent's own model: an endpoint that speaks the
-// Anthropic API, which the person pays for with their own key. It lives in
-// agents.json on the person's own machine and nowhere else.
+// Anthropic API, which the person pays for with their own key. The key lives
+// in agents.json on the person's own machine and nowhere else: what leaves the
+// guest is a ModelView, and an edit that carries no key keeps the stored one.
 type ModelConfig struct {
 	URL      string `json:"url"`
 	APIKey   string `json:"api_key,omitempty"`
@@ -420,9 +422,8 @@ type AgentPatch struct {
 	Model        *ModelPatch `json:"model,omitempty"`
 }
 
-// ModelPatch replaces a custom agent's model. Clear returns it to the default;
-// otherwise an empty APIKey keeps the stored one, since the app never sees it
-// and so cannot send it back.
+// ModelPatch replaces a custom agent's model, or with Clear returns it to the
+// default.
 type ModelPatch struct {
 	Clear bool `json:"clear,omitempty"`
 	ModelConfig
@@ -447,13 +448,16 @@ type Schedule struct {
 	Enabled   bool      `json:"enabled"`
 }
 
-// Status is one agent as GET /agents reports it: identity plus what it is
-// doing. For a custom agent it carries the role the person wrote and a view of
-// its model -- never the key, which stays in the Record on the guest.
+// Status is one agent as GET /agents reports it: identity, what it is doing,
+// and the two facts of its profile a roster needs, so a reader does not have
+// to fetch the catalog to draw a row. A custom agent's row also carries the
+// role the person wrote and a view of its model.
 type Status struct {
 	ID           string     `json:"id"`
 	Name         string     `json:"name"`
 	Type         string     `json:"type"`
+	Description  string     `json:"description,omitempty"`
+	Browser      bool       `json:"browser"`
 	State        string     `json:"state"`
 	Live         bool       `json:"live"`
 	Task         *Task      `json:"task,omitempty"`

@@ -20,9 +20,6 @@ import (
 // whole result, and a machine with no boss has nobody to ask.
 const BossID = agentapi.BossID
 
-// CustomType is the profile of an agent the person built in the app.
-const CustomType = agentapi.CustomType
-
 // validID is the same shape the control plane already requires of a VM id, so
 // agent ids are safe in a path and in a URL without further escaping.
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -148,14 +145,8 @@ func (r *Roster) Remove(id string) error {
 
 // SetTask records what an agent is working on, or clears it when task is nil.
 func (r *Roster) SetTask(id string, task *Task) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	rec, ok := r.by[id]
-	if !ok {
-		return fmt.Errorf("no agent %s", id)
-	}
-	rec.Task = task
-	return r.saveLocked()
+	_, err := r.Update(id, func(rec *Record) error { rec.Task = task; return nil })
+	return err
 }
 
 // freeIDLocked derives an id from a name, adding a suffix until it is unused.

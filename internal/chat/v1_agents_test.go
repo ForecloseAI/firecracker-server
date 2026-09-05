@@ -25,11 +25,13 @@ type fakeGuest struct {
 	resolved      []resolution
 	resolveStatus int // non-zero to make the next resolve fail with this code
 
-	sched   []agentapi.Schedule
-	created agentapi.CreateAgentReq // the last create the gateway forwarded
-	patched agentapi.AgentPatch     // the last patch the gateway forwarded
-	person  agentapi.Person         // the last profile the gateway forwarded
-	body    string                  // the raw JSON of the last message, as it came off the wire
+	sched         []agentapi.Schedule
+	created       agentapi.CreateAgentReq // the last create the gateway forwarded
+	createStatus  int                     // non-zero to refuse the next create with this code
+	createMessage string                  // and this message
+	patched       agentapi.AgentPatch     // the last patch the gateway forwarded
+	person        agentapi.Person         // the last profile the gateway forwarded
+	body          string                  // the raw JSON of the last message, as it came off the wire
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -115,6 +117,18 @@ func (g *fakeGuest) create(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.created = req
+	if g.createStatus != 0 {
+		w.WriteHeader(g.createStatus)
+		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request", "message": g.createMessage})
+		return
+	}
+	// Mirrors agentd, which is the one authority: a custom agent needs a name
+	// and a role.
+	if req.Type == agentapi.CustomType && (strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Instructions) == "") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request", "message": "name: must be 1 to 40 characters"})
+		return
+	}
 	// Mirrors agentd: an empty name falls back to the lowercase type key.
 	name, id := req.Name, req.Type
 	if name == "" {
@@ -125,6 +139,11 @@ func (g *fakeGuest) create(w http.ResponseWriter, r *http.Request) {
 	}
 	st := agentapi.Status{ID: id, Name: name, Type: req.Type,
 		Instructions: req.Instructions, Model: req.Model.View()}
+	for _, p := range fakeProfiles {
+		if p.Key == req.Type {
+			st.Description, st.Browser = p.Description, p.Browser
+		}
+	}
 	g.roster = append(g.roster, st)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(st)
@@ -140,6 +159,12 @@ func (g *fakeGuest) update(w http.ResponseWriter, r *http.Request) {
 	for i, st := range g.roster {
 		if st.ID != r.PathValue("id") {
 			continue
+		}
+		// Mirrors agentd: only a custom agent's role or model may change.
+		if st.Type != agentapi.CustomType && (patch.Instructions != nil || patch.Model != nil) {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"message": "only a custom agent's instructions or model can change"})
+			return
 		}
 		if patch.Name != nil {
 			st.Name = *patch.Name
@@ -200,7 +225,7 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 // The returned string is that user's access token.
 func newFake(t *testing.T) (*Server, *fakeGuest, string) {
 	t.Helper()
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss"}}}
+	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss", Description: "Runs the team"}}}
 	s, tok := serverOver(t, g)
 	return s, g, tok
 }

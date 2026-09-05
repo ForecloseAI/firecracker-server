@@ -526,30 +526,16 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 		Model: anthropic.Model(a.ep.model), MaxTokens: maxTokens,
 		System: a.systemBlocks(), Messages: msgs,
 	}
-	budget := thinkingBudget(a.ep.thinking)
+	budget := agentapi.ThinkingBudgets[a.ep.thinking]
 	if budget > 0 {
 		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
 		p.MaxTokens = maxTokens + budget
 	}
-	if a.ep.anthropic {
+	if !a.ep.foreign {
 		p.ContextManagement = contextManagement()
 		p.Betas = betasFor(budget > 0)
 	}
 	return anthropic.BetaToolRunnerParams{MaxIterations: maxIterations, BetaMessageNewParams: p}
-}
-
-// thinkingBudget is how many tokens a level buys the model to reason with, or
-// zero for an agent that does not think out loud.
-func thinkingBudget(level string) int64 {
-	switch level {
-	case "low":
-		return 2048
-	case "medium":
-		return 8192
-	case "high":
-		return 16384
-	}
-	return 0
 }
 
 // betasFor is what a request to Anthropic opts into: context editing always,

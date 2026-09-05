@@ -38,12 +38,11 @@ type feedFrame struct {
 // feed tracks what this connection has already told the client, so a tick only
 // sends what moved.
 type feed struct {
-	cursor   map[string]int    // agent id -> last event id forwarded
-	typing   map[string]bool   // agent id -> last typing state sent
-	rows     map[string]string // agent id -> last roster row sent, as JSON
-	pending  map[string]string // approval id -> the ask's message id
-	profiles map[string]agentapi.Profile
-	machine  string
+	cursor  map[string]int    // agent id -> last event id forwarded
+	typing  map[string]bool   // agent id -> last typing state sent
+	rows    map[string]string // agent id -> last roster row sent, as JSON
+	pending map[string]string // approval id -> the ask's message id
+	machine string
 	// handoff mints a fresh capability each time it is called.
 	handoff func() string
 	// guestIP is the address the client was built for, and resolve reports the
@@ -105,8 +104,7 @@ func newFeed(machine string, handoff func() string) *feed {
 	return &feed{
 		cursor: map[string]int{}, typing: map[string]bool{},
 		rows: map[string]string{}, pending: map[string]string{},
-		profiles: map[string]agentapi.Profile{},
-		machine:  machine, handoff: handoff,
+		machine: machine, handoff: handoff,
 	}
 }
 
@@ -165,7 +163,6 @@ func (f *feed) sweep(w io.Writer, cl *agent.Client) {
 	if err != nil {
 		return
 	}
-	f.loadProfiles(cl, roster)
 	f.emitRoster(w, roster)
 	for _, st := range roster {
 		f.emitEvents(w, cl, st)
@@ -173,30 +170,11 @@ func (f *feed) sweep(w io.Writer, cl *agent.Client) {
 	f.emitExpiries(w, cl)
 }
 
-// loadProfiles fetches the catalog the first time a type appears. Without it an
-// agent frame carries no role or capabilities, and since the client UPSERTS on
-// this frame, a blank one would wipe what GET /agents told it.
-func (f *feed) loadProfiles(cl *agent.Client, roster []agentapi.Status) {
-	for _, st := range roster {
-		if _, ok := f.profiles[st.Type]; ok {
-			continue
-		}
-		profiles, err := cl.AgentTypes()
-		if err != nil {
-			return
-		}
-		for _, p := range profiles {
-			f.profiles[p.Key] = p
-		}
-		return
-	}
-}
-
 // emitRoster sends an agent frame for every row that changed, which is also how
 // a newly activated agent announces itself -- the client upserts by id.
 func (f *feed) emitRoster(w io.Writer, roster []agentapi.Status) {
 	for _, st := range roster {
-		row := projectAgent(st, f.profiles[st.Type], f.machine, true)
+		row := projectAgent(st, f.machine, true)
 		buf, err := json.Marshal(row)
 		if err != nil || f.rows[st.ID] == string(buf) {
 			continue

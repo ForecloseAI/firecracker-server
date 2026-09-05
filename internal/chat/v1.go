@@ -6,9 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -307,32 +305,17 @@ func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, user string) 
 
 // createReq is the body of POST /v1/agents: a profile key straight from the
 // gallery, so there is no mapping table to drift -- or, with no templateId, an
-// agent the person is building themselves, from a name and a role.
+// agent the person is building themselves, from a name and a role. The model
+// is the guest's own wire shape, key and all; the key goes to their machine
+// and is never sent back.
 type createReq struct {
-	TemplateID   string     `json:"templateId"`
-	Name         string     `json:"name"`
-	Instructions string     `json:"instructions"`
-	Model        *modelSpec `json:"model"`
+	TemplateID   string                `json:"templateId"`
+	Name         string                `json:"name"`
+	Instructions string                `json:"instructions"`
+	Model        *agentapi.ModelConfig `json:"model"`
 }
 
-// modelSpec is a model of the person's own, as the app sends it. The key is
-// accepted here and forwarded to their machine, and never sent back.
-type modelSpec struct {
-	URL      string `json:"url"`
-	APIKey   string `json:"apiKey"`
-	Model    string `json:"model"`
-	Thinking string `json:"thinking"`
-}
-
-// config is the spec as the guest stores it. Nil stays nil.
-func (m *modelSpec) config() *agentapi.ModelConfig {
-	if m == nil {
-		return nil
-	}
-	return &agentapi.ModelConfig{URL: m.URL, APIKey: m.APIKey, Model: m.Model, Thinking: m.Thinking}
-}
-
-// agentBodyCap bounds a create or update: a role is a page or two of text.
+// agentBodyCap bounds a create or update: the same budget as the guest's.
 const agentBodyCap = 64 << 10
 
 // createAgent activates one kind of agent on the person's machine, or adds one
@@ -354,74 +337,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string
 	s.createCustom(w, cl, req, machineFor(user))
 }
 
-// createCustom adds an agent the person described themselves. Any number may
-// exist, so there is no duplicate check; the id comes from the name.
+// createCustom adds an agent the person described themselves. The guest is the
+// one authority on what a custom agent may be -- name, role, model -- and its
+// refusal comes back to the app as it was said, so the rule lives in one place.
 func (s *Server) createCustom(w http.ResponseWriter, cl *agent.Client, req createReq, machine string) {
-	if msg := invalidCustom(req.Name, req.Instructions, req.Model, true); msg != "" {
-		fail(w, http.StatusBadRequest, msg)
-		return
-	}
-	profile, _, err := lookupType(cl, agentapi.CustomType)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
-		return
-	}
 	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: agentapi.CustomType, Name: req.Name,
-		Instructions: req.Instructions, Model: req.Model.config()})
+		Instructions: req.Instructions, Model: req.Model})
 	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+		relay(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projectAgent(st, profile, machine, true))
+	writeJSON(w, http.StatusOK, projectAgent(st, machine, true))
 }
 
-// invalidCustom says what is wrong with a custom agent's fields, or "". The key
-// is required when a model is being set for the first time and optional on an
-// edit, where an empty one keeps what the machine already holds.
-func invalidCustom(name, instructions string, m *modelSpec, needKey bool) string {
-	if n := len([]rune(strings.TrimSpace(name))); n == 0 || n > 40 {
-		return "name must be 1 to 40 characters"
-	}
-	if n := len([]rune(strings.TrimSpace(instructions))); n == 0 || n > 8000 {
-		return "instructions must be 1 to 8000 characters"
-	}
-	return invalidModel(m, needKey)
-}
-
-// invalidModel says what is wrong with a model spec, or "".
-func invalidModel(m *modelSpec, needKey bool) string {
-	if m == nil {
-		return ""
-	}
-	if m.URL == "" || m.Model == "" || (needKey && m.APIKey == "") {
-		return "model needs url, model and apiKey"
-	}
-	if m.Thinking != "" && !slices.Contains(agentapi.ThinkingLevels, m.Thinking) {
-		return "model thinking must be low, medium or high"
-	}
-	return ""
-}
-
-// patchReq is the body of PATCH /v1/agents/{id}. An absent field is left
-// alone. A model of {"clear": true} goes back to the default model, and an
-// empty apiKey keeps the stored key, which the app never sees.
-type patchReq struct {
-	Name         *string     `json:"name"`
-	Instructions *string     `json:"instructions"`
-	Model        *modelPatch `json:"model"`
-}
-
-// modelPatch is a modelSpec that can also mean "no model of my own".
-type modelPatch struct {
-	Clear bool `json:"clear"`
-	modelSpec
-}
-
-// updateAgent edits a custom agent. A gallery agent may only be renamed: its
-// role is the product's, and the boss is the boss.
+// updateAgent edits a custom agent: PATCH /v1/agents/{id}, with the guest's own
+// patch shape. A gallery agent may only be renamed; the guest says so with a
+// 409, and that is what the app hears.
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, user string) {
-	var req patchReq
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&req) != nil {
+	var patch agentapi.AgentPatch
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&patch) != nil {
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
@@ -429,67 +363,12 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, user string
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	if code, msg := editable(cl, id, req); code != 0 {
-		fail(w, code, msg)
+	st, err := cl.UpdateAgent(r.PathValue("id"), patch)
+	if err != nil {
+		relay(w, err)
 		return
 	}
-	s.finishUpdate(w, cl, id, req, machineFor(user))
-}
-
-// finishUpdate sends the patch and projects the row that comes back.
-func (s *Server) finishUpdate(w http.ResponseWriter, cl *agent.Client, id string, req patchReq, machine string) {
-	patch := agentapi.AgentPatch{Name: req.Name, Instructions: req.Instructions}
-	if req.Model != nil {
-		patch.Model = &agentapi.ModelPatch{Clear: req.Model.Clear, ModelConfig: *req.Model.config()}
-	}
-	st, err := cl.UpdateAgent(id, patch)
-	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	profile, _, _ := lookupType(cl, st.Type) // a failure only costs the description
-	writeJSON(w, http.StatusOK, projectAgent(st, profile, machine, true))
-}
-
-// editable checks a patch against the roster: the agent must exist, only a
-// custom agent's role or model may change, and what is sent must be sound.
-func editable(cl *agent.Client, id string, req patchReq) (int, string) {
-	roster, err := cl.Agents()
-	if err != nil {
-		return http.StatusBadGateway, err.Error()
-	}
-	st, ok := find(roster, id)
-	if !ok {
-		return http.StatusNotFound, "no such agent"
-	}
-	if st.Type != agentapi.CustomType && (req.Instructions != nil || req.Model != nil) {
-		return http.StatusConflict, "only a custom agent's instructions or model can change"
-	}
-	if msg := invalidPatch(st, req); msg != "" {
-		return http.StatusBadRequest, msg
-	}
-	return 0, ""
-}
-
-// invalidPatch validates the fields a patch carries against the row as it is.
-func invalidPatch(st agentapi.Status, req patchReq) string {
-	name, role := st.Name, st.Instructions
-	if role == "" {
-		role = "unchanged" // a gallery agent has none, and is not being given one
-	}
-	if req.Name != nil {
-		name = *req.Name
-	}
-	if req.Instructions != nil {
-		role = *req.Instructions
-	}
-	var m *modelSpec
-	if req.Model != nil && !req.Model.Clear {
-		m = &req.Model.modelSpec
-	}
-	// A key is needed only when there is none stored to keep.
-	return invalidCustom(name, role, m, st.Model == nil || !st.Model.KeySet)
+	writeJSON(w, http.StatusOK, projectAgent(st, machineFor(user), true))
 }
 
 // find is one roster row by id.
@@ -530,10 +409,10 @@ func (s *Server) finishActivate(w http.ResponseWriter, cl *agent.Client,
 	p agentapi.Profile, machine string) {
 	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: p.Key, Name: p.Title})
 	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+		relay(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projectAgent(st, p, machine, true))
+	writeJSON(w, http.StatusOK, projectAgent(st, machine, true))
 }
 
 // lookupType finds one profile and the current roster in one place, since every
@@ -586,12 +465,10 @@ func retirable(cl *agent.Client, id string) (int, string) {
 	if err != nil {
 		return http.StatusBadGateway, err.Error()
 	}
-	for _, st := range roster {
-		if st.ID == id {
-			return 0, ""
-		}
+	if _, ok := find(roster, id); !ok {
+		return http.StatusNotFound, "no such agent"
 	}
-	return http.StatusNotFound, "no such agent"
+	return 0, ""
 }
 
 // sendReqV1 is the body of POST /v1/threads/{id}/messages. File names something
@@ -623,7 +500,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 	}
 	sent, err := cl.PostMessage(r.PathValue("id"), agent.Send{Text: req.Text, File: req.File})
 	if err != nil {
-		sendError(w, err)
+		relay(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, storedMessage(sent, req))
@@ -636,18 +513,28 @@ func storedMessage(sent agent.Sent, req sendReqV1) Message {
 		Time: time.Now().UTC(), From: "me", Text: req.Text, File: req.File}
 }
 
-// sendError passes the guest's own refusal through instead of flattening it.
-// A busy agent is 503 and worth retrying; an unknown one is 404 and is not.
-func sendError(w http.ResponseWriter, err error) {
+// relay passes the guest's own refusal through instead of flattening it into a
+// 502. A 4xx is the guest saying no, and its message is the part a person can
+// act on -- an unknown agent, a role that is too long; a busy agent is 503 and
+// worth retrying. Only a failure to reach the guest is a gateway error.
+func relay(w http.ResponseWriter, err error) {
 	var se *agent.StatusError
-	if errors.As(err, &se) && (se.Code == http.StatusServiceUnavailable || se.Code == http.StatusNotFound) {
-		if se.Code == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", "5")
-		}
-		fail(w, se.Code, "agent unavailable")
+	if !errors.As(err, &se) || !relayable(se.Code) {
+		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	fail(w, http.StatusBadGateway, err.Error())
+	if se.Code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
+	}
+	if se.Message == "" {
+		se.Message = "agent unavailable"
+	}
+	fail(w, se.Code, se.Message)
+}
+
+// relayable says whether a guest status is one the app should see as it is.
+func relayable(code int) bool {
+	return (code >= 400 && code < 500) || code == http.StatusServiceUnavailable
 }
 
 // ensureMachine returns the person's VM, booting it if it does not exist yet.
@@ -694,6 +581,5 @@ func (s *Server) rosterOf(ctx context.Context, user string) ([]Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	profiles, _ := cl.AgentTypes() // display metadata only; a failure just costs labels
-	return projectRoster(roster, profiles, machine, true), nil
+	return projectRoster(roster, machine, true), nil
 }

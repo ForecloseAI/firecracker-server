@@ -163,9 +163,7 @@ func ComposeSystemPrompt(p Profile, rec Record, r roots, stateDir string, skills
 	if p.Browser {
 		parts = append(parts, BrowserGuidance)
 	}
-	if who := renderIdentity(rec); who != "" {
-		parts = append(parts, who)
-	}
+	parts = append(parts, renderIdentity(rec))
 	if role := strings.TrimSpace(p.Prompt); role != "" {
 		parts = append(parts, role)
 	}
@@ -186,19 +184,14 @@ func ComposeSystemPrompt(p Profile, rec Record, r roots, stateDir string, skills
 }
 
 // renderIdentity names the agent and, for one the person built, the role they
-// wrote. The name had been missing from the prompt entirely, and a personality
-// with no name is an odd thing; the role sits before the profile's own text so
-// a profile can build on it, and before memory so who is speaking comes before
-// what they know. Empty for a record with nothing in it, which is only a test.
+// wrote. The role sits before the profile's own text so a profile can build on
+// it, and before memory so who is speaking comes before what they know.
 func renderIdentity(rec Record) string {
-	name := orDefault(rec.Name, rec.ID)
-	if name == "" {
-		return ""
-	}
-	out := "## Who you are\nYour name is " + name + ". The person sees it at the top of " +
-		"the conversation and will say it back to you."
+	out := "## Who you are\nYour name is " + orDefault(rec.Name, rec.ID) + ". The person sees it " +
+		"at the top of the conversation and will say it back to you."
 	if role := strings.TrimSpace(rec.Instructions); role != "" {
-		out += "\n\n## Your role, as the person set it\n" + role
+		out += "\n\n## Your role, as the person set it\n" + role + "\n\nFollow it. Where it is " +
+			"silent, do what a capable and well-organised assistant would do."
 	}
 	return out
 }

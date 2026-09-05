@@ -116,6 +116,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec, err := s.sup.Update(id, patch)
+	if errors.Is(err, errNotCustom) {
+		fail(w, http.StatusConflict, "conflict", err.Error(), "agent")
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "agent")
 		return

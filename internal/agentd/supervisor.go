@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -183,7 +182,9 @@ func (s *Supervisor) List() []Status {
 // history, which is exactly wrong: an evicted agent is the one most likely to
 // have a long one.
 func (s *Supervisor) statusFor(rec Record) Status {
+	p, _ := s.catalog.Get(rec.Type) // an unknown type only costs the description
 	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task,
+		Description: p.Description, Browser: p.Browser,
 		Instructions: rec.Instructions, Model: rec.Model.View()}
 	l, ok := s.liveAgent(rec.ID)
 	if !ok {
@@ -359,93 +360,115 @@ func (s *Supervisor) Create(typeKey, name string) (Record, error) {
 }
 
 // CreateWith adds an agent from a full request: type and name, and for a
-// custom agent the role the person wrote and the model they chose.
+// custom agent the role the person wrote and the model they chose. This is
+// the one place those are checked; the host relays a refusal as it is said.
 func (s *Supervisor) CreateWith(req agentapi.CreateAgentReq) (Record, error) {
 	if _, ok := s.catalog.Get(req.Type); !ok {
 		return Record{}, fmt.Errorf("no profile %q", req.Type)
 	}
-	if err := validRole(req.Instructions); err != nil {
-		return Record{}, err
+	rec := Record{Name: req.Name, Type: req.Type, Instructions: req.Instructions, Model: req.Model}
+	if req.Type == agentapi.CustomType {
+		if err := validCustom(rec); err != nil {
+			return Record{}, err
+		}
 	}
-	if err := validModel(req.Model); err != nil {
-		return Record{}, err
-	}
-	return s.roster.Add(Record{Name: req.Name, Type: req.Type,
-		Instructions: req.Instructions, Model: req.Model})
+	return s.roster.Add(rec)
 }
 
-// Update changes a custom agent's name, role or model, then makes it real: an
-// idle agent is recycled now, and a busy one is marked to recycle when its turn
-// ends -- the flag create_skill uses -- so the next reply is on the new prompt
-// either way. A change that is not live yet simply meets the record on start.
+// Update changes a custom agent's name, role or model, then makes the change
+// real on whatever is running: see refresh.
 func (s *Supervisor) Update(id string, p agentapi.AgentPatch) (Record, error) {
 	rec, err := s.roster.Update(id, func(r *Record) error { return applyPatch(r, p) })
 	if err != nil {
 		return Record{}, err
 	}
-	if !s.Recycle(id, nil) {
-		s.markStale(id)
-	}
+	s.refresh(id)
 	return rec, nil
 }
 
-// markStale asks a live agent to recycle itself once its turn ends.
-func (s *Supervisor) markStale(id string) {
+// refresh gets a live agent onto its new record. Idle, it is stopped now and
+// the next message starts it fresh; mid-turn, it is marked to recycle when the
+// turn ends -- the flag create_skill uses -- so the next reply is on the new
+// prompt either way. One lock hold decides once: a message arriving between
+// two decisions could otherwise start a fresh, already-correct agent and then
+// have it flagged to recycle after its first turn for nothing.
+func (s *Supervisor) refresh(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if l, ok := s.agents[id]; ok {
-		l.agent.reload.set()
+	l, ok := s.agents[id]
+	if !ok {
+		return
 	}
+	if l.agent.quiesce() {
+		s.stopLocked(id)
+		return
+	}
+	l.agent.reload.set()
 }
+
+// errNotCustom is the refusal for editing what only a custom agent has.
+var errNotCustom = errors.New("only a custom agent's instructions or model can change")
 
 // applyPatch lays a patch over a record. Anyone may be renamed; only a custom
 // agent's role and model may change, because the shipped profiles are the
 // product and the boss is the boss.
 func applyPatch(r *Record, p agentapi.AgentPatch) error {
 	if r.Type != agentapi.CustomType && (p.Instructions != nil || p.Model != nil) {
-		return fmt.Errorf("%s is a %s, not a custom agent", r.ID, r.Type)
+		return errNotCustom
 	}
 	if p.Name != nil {
-		if strings.TrimSpace(*p.Name) == "" {
-			return errors.New("name: cannot be empty")
-		}
 		r.Name = strings.TrimSpace(*p.Name)
 	}
 	if p.Instructions != nil {
-		if err := validRole(*p.Instructions); err != nil {
-			return err
-		}
 		r.Instructions = *p.Instructions
 	}
 	if p.Model != nil {
-		return patchModel(r, p.Model)
+		patchModel(r, p.Model)
 	}
-	return nil
+	if r.Type == agentapi.CustomType {
+		return validCustom(*r)
+	}
+	return validName(r.Name)
 }
 
 // patchModel replaces or clears a record's model, keeping the stored key when
-// the patch carries none: the app never sees the key, so it cannot send it back.
-func patchModel(r *Record, m *agentapi.ModelPatch) error {
+// the patch carries none.
+func patchModel(r *Record, m *agentapi.ModelPatch) {
 	if m.Clear {
 		r.Model = nil
-		return nil
+		return
 	}
 	next := m.ModelConfig
 	if next.APIKey == "" && r.Model != nil {
 		next.APIKey = r.Model.APIKey
 	}
-	if err := validModel(&next); err != nil {
-		return err
-	}
 	r.Model = &next
-	return nil
 }
 
-// validRole bounds the role a person writes, at the same budget as the agent's
-// own instructions file, so one cannot crowd the rest of the prompt out.
-func validRole(role string) error {
-	if len(role) > instructionsCap {
-		return fmt.Errorf("instructions: longer than %d bytes", instructionsCap)
+// nameCap and roleCap bound what a person types for an agent: a name that fits
+// a roster row, and a role of a page or two -- well under the prompt budget the
+// agent's own instructions file already has, so one cannot crowd out the rest.
+const (
+	nameCap = 40
+	roleCap = 8000
+)
+
+// validCustom is everything a custom agent must have: a name, a role, and a
+// whole model if it has one at all.
+func validCustom(rec Record) error {
+	if err := validName(rec.Name); err != nil {
+		return err
+	}
+	if n := len([]rune(strings.TrimSpace(rec.Instructions))); n == 0 || n > roleCap {
+		return fmt.Errorf("instructions: must be 1 to %d characters", roleCap)
+	}
+	return validModel(rec.Model)
+}
+
+// validName bounds a name: something, and something that fits a roster row.
+func validName(name string) error {
+	if n := len([]rune(strings.TrimSpace(name))); n == 0 || n > nameCap {
+		return fmt.Errorf("name: must be 1 to %d characters", nameCap)
 	}
 	return nil
 }
@@ -462,7 +485,7 @@ func validModel(m *agentapi.ModelConfig) error {
 	if strings.TrimSpace(m.Model) == "" {
 		return errors.New("model: a model id is required")
 	}
-	if m.Thinking != "" && !slices.Contains(agentapi.ThinkingLevels, m.Thinking) {
+	if _, ok := agentapi.ThinkingBudgets[m.Thinking]; m.Thinking != "" && !ok {
 		return fmt.Errorf("model thinking: %q is not low, medium or high", m.Thinking)
 	}
 	if m.APIKey == "" {

@@ -9,7 +9,7 @@ import (
 
 // mayaBody is a custom agent as the app sends one, model and key included.
 const mayaBody = `{"name":"Maya","instructions":"Plan my trips. Keep it brief.",` +
-	`"model":{"url":"https://models.example.com","apiKey":"sk-own-secret","model":"their-model","thinking":"high"}}`
+	`"model":{"url":"https://models.example.com","api_key":"sk-own-secret","model":"their-model","thinking":"high"}}`
 
 // Building an agent: the gateway forwards what the person wrote to their
 // machine, key included -- and what it sends back to the app has the role, a
@@ -41,21 +41,19 @@ func TestACustomAgentIsBuiltFromWhatThePersonWrote(t *testing.T) {
 	}
 }
 
-// A name and a role are the whole definition; a model is optional but must be
-// whole when given. And the shell itself is not something to pick from the
-// gallery.
-func TestACustomAgentNeedsANameARoleAndAWholeModel(t *testing.T) {
-	s, _, u := newFake(t)
-	for _, body := range []string{
-		`{"name":"","instructions":"x"}`,
-		`{"name":"Maya","instructions":"  "}`,
-		`{"name":"Maya","instructions":"x","model":{"url":"https://m.example.com","model":"m"}}`,
-		`{"name":"Maya","instructions":"x","model":{"url":"https://m.example.com","apiKey":"k","model":"m","thinking":"max"}}`,
-		`{"templateId":"custom"}`,
-	} {
-		if w := call(t, s, u, "POST", "/v1/agents", body); w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status %d", body, w.Code)
-		}
+// The machine is the one authority on what a custom agent may be, and its
+// refusal reaches the app as it was said -- code and message -- rather than
+// as a bad gateway. The shell itself is not something to pick from the
+// gallery either.
+func TestTheMachinesRefusalReachesTheAppAsItWasSaid(t *testing.T) {
+	s, g, u := newFake(t)
+	g.createStatus, g.createMessage = http.StatusBadRequest, "instructions: must be 1 to 8000 characters"
+	w := call(t, s, u, "POST", "/v1/agents", `{"name":"Maya","instructions":""}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "1 to 8000") {
+		t.Errorf("status %d body %s", w.Code, w.Body)
+	}
+	if w := call(t, s, u, "POST", "/v1/agents", `{"templateId":"custom"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("the shell was offered as a template: %d", w.Code)
 	}
 }
 

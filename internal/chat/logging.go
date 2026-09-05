@@ -28,6 +28,7 @@ var secrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(token=)[^&\s"]+`),
 	regexp.MustCompile(`(?i)("password"\s*:\s*)"[^"]*"`),
 	regexp.MustCompile(`(?i)("token"\s*:\s*)"[^"]*"`),
+	regexp.MustCompile(`(?i)("api_key"\s*:\s*)"[^"]*"`),
 }
 
 // redact removes anything that must not be logged.

@@ -124,11 +124,28 @@ func (c *Client) post(path string, body any, idempotencyKey string) error {
 type StatusError struct {
 	Code int
 	Path string
+	// Message is what the guest said, when it said anything: agentd answers a
+	// refusal with {"error", "message", "resource"}, and the message is the
+	// part a person can act on ("instructions: longer than 8000 characters").
+	Message string
 }
 
 // Error renders the refusal.
 func (e *StatusError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("agent %s: %d: %s", e.Path, e.Code, e.Message)
+	}
 	return fmt.Sprintf("agent %s: %d", e.Path, e.Code)
+}
+
+// refusal reads a non-2xx reply into a StatusError, keeping the guest's own
+// message so the gateway can pass it on instead of re-deriving it.
+func refusal(resp *http.Response, path string) *StatusError {
+	var body struct {
+		Message string `json:"message"`
+	}
+	json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body)
+	return &StatusError{Code: resp.StatusCode, Path: path, Message: body.Message}
 }
 
 // write posts a JSON body on the longer timeout and decodes the reply. Used for
@@ -155,8 +172,7 @@ func (c *Client) decode(req *http.Request, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return &StatusError{Code: resp.StatusCode, Path: path}
+		return refusal(resp, path)
 	}
 	if out == nil {
 		return nil
