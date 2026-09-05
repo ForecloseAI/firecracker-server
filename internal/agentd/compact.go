@@ -36,7 +36,7 @@ const (
 
 	// summaryModel is cheap on purpose: this reads the whole prefix, and the
 	// job is condensing text that is already there rather than reasoning.
-	summaryModel = "claude-haiku-4-5"
+	summaryModel = "anthropic/claude-haiku-4.5"
 
 	// summaryMaxTokens bounds the summary. It lands in every later request, so
 	// a summary that rambles is paid for on every turn until the next
@@ -158,10 +158,11 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 	}
 }
 
-// compactModel is the cheap model on Anthropic, or the agent's own model on an
-// endpoint of the person's, where the cheap one may not exist at all.
+// compactModel is the cheap model where we know it exists, or the agent's own
+// on an endpoint we know nothing about, where a summariser id we picked may
+// name nothing at all.
 func (a *Agent) compactModel() anthropic.Model {
-	if a.ep.foreign {
+	if a.ep.plain {
 		return anthropic.Model(a.ep.model)
 	}
 	return summaryModel

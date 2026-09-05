@@ -2,7 +2,9 @@
 Description=Go agent daemon
 # resolvconf.service writes /etc/resolv.conf and /etc/hosts at boot, because
 # Docker bind-mounts both during the build and the image ships them as 0-byte
-# files. Without it api.anthropic.com does not resolve and every turn fails.
+# files. Not for the model -- agentd dials the broker by IP, straight off the
+# route table -- but Chrome, curl, pip and the MCP servers all resolve names,
+# so without it most of what an agent can do stops working.
 After=resolvconf.service network.target
 Requires=resolvconf.service
 

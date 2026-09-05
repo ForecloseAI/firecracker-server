@@ -12,7 +12,7 @@ import (
 // newTestAgent builds an agent with no tools, rooted at a temp dir.
 func newTestAgent(t *testing.T) *Agent {
 	t.Helper()
-	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key-for-offline-tests")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-not-a-real-key-for-offline-tests")
 	a, err := New(Record{ID: "boss", Name: "Boss"}, t.TempDir(), t.TempDir(), testProfile(), nil)
 	if err != nil {
 		t.Fatal(err)

@@ -494,30 +494,52 @@ up acting as another.
 
 ### The model key goes the same way
 
-The same listener lends the Anthropic key. The guest image carries no credential:
+The same listener lends the model key. The guest image carries no credential:
 `agentd` reads its default gateway from `/proc/net/route`, uses
 `http://172.16.<4N+1>:8092` as the SDK's base URL, and presents the placeholder
-key `brokered`. The host accepts `POST /v1/messages` and `/v1/messages/count_tokens`
-from a guest address, keeps only `Content-Type`, `Accept`, `Anthropic-Version` and
-`Anthropic-Beta`, sets the real `x-api-key`, and streams the answer back.
+key `brokered`. The host accepts `POST /v1/messages` from a guest address, keeps
+only `Content-Type`, `Accept`, `Anthropic-Version` and `Anthropic-Beta`, sets the
+real bearer token and says who is calling, and streams the answer back.
 
 ```
-guest                      host                              Anthropic
+guest                      host                              OpenRouter
 agentd ──▶ http://172.16.<4N+1>:8092/v1/messages
                              │  source address must be a guest's
-                             │  drops what the guest sent, adds x-api-key
-                             └──────────────▶ https://api.anthropic.com/v1/messages
+                             │  drops what the guest sent, adds
+                             │  Authorization: Bearer, HTTP-Referer, X-Title
+                             └──────────────▶ https://openrouter.ai/api/v1/messages
+                                                          │  BYOK
+                                                          ▼
+                                              the provider's own account
 ```
+
+Upstream is OpenRouter, which serves the Anthropic Messages API alongside its
+own — so the SDK, the tool runner and the request shape are unchanged, and the
+only differences are the model ids (`anthropic/claude-sonnet-5`, provider
+prefix and all) and a bearer token where Anthropic wanted `x-api-key`. Under
+BYOK the inference bills to our own provider account and OpenRouter charges 5%
+on top, which is why spend is metered from what the response reports rather than
+from a price table: `usage.cost` plus `usage.cost_details.upstream_inference_cost`.
+Reading only the first would report the fee as the whole bill.
 
 No ticket here, on purpose: a ticket routes each guest to a *different* session,
 and every guest goes to the same model with the same key. That also makes it
 boot-order proof — a schedule firing seconds after a guest boots reaches the model
 before the host has said anything to it, and a `cracked-chat` restart forgets
-nothing a guest depends on. `ANTHROPIC_API_KEY` is required on `cracked-chat`
+nothing a guest depends on. `OPENROUTER_API_KEY` is required on `cracked-chat`
 (a `systemctl edit` drop-in) and the service refuses to start without it; a
-developer's laptop with the key in its own environment keeps calling Anthropic
-directly, so nothing changes off the fleet. Rotating the key is now a drop-in
-edit and a restart, not a rootfs rebuild.
+laptop with `OPENROUTER_API_KEY` in its own environment calls OpenRouter directly,
+which is deliberately the same request the fleet makes.
+
+**Rotating the key** is a drop-in edit and a restart of `cracked-chat`, with no
+rootfs rebuild and no VM downtime — guests hold no credential and dial the broker
+per request. **Changing the upstream or the model ids is not a rotation**: the
+profiles and the summariser id are compiled into `agentd`, which ships inside the
+guest image, so that needs a rootfs rebuild and every VM recreated
+(`DELETE /vms/<id>` without `?purge=true`, then `POST /vms` with the same id).
+Between restarting `cracked-chat` and recreating the machines, running guests are
+asking the new upstream for the old model ids, and their turns fail. Keep that
+window short and do it deliberately.
 
 ### What is stored, and where
 
@@ -579,9 +601,14 @@ actions stop and ask, and that every one is on the record.
   must `curl -m 3 http://172.16.0.1:8080/healthz` — the control plane is still
   unreachable. `curl -m 3 http://<gateway>:8092/apps/anything` should answer
   **404**, which is the broker refusing a ticket it did not issue rather than
-  nothing listening, and `curl -m 3 -X POST http://<gateway>:8092/v1/messages`
-  should answer with Anthropic's own `invalid_request_error`, which proves the
-  key was added on the way through.
+  nothing listening. `curl -m 3 -X POST http://<gateway>:8092/v1/messages` reaches
+  the model service, and what comes back is read by elimination rather than by a
+  single expected string: a bare **404** is the gate or the path allow-list
+  refusing it, a **timeout** is the firewall or the listener, a **401** or
+  `authentication_error` means the drop-in holds a key OpenRouter rejects, and a
+  `billing_error` means the key was accepted and the account is out of credits.
+  Anything else is the upstream complaining about the request itself, which is
+  the point: the credential got that far.
 - `MaxVMs` is 5 in `internal/vm/vm.go`. Raise to 6 only after confirming host
   memory headroom at steady state — swap is off, so overcommit means the OOM
   killer reaps a live VM.

@@ -2,7 +2,7 @@
 key: analyst
 title: Analyst
 description: Reads data and documents, works out what they actually say, and quantifies it.
-model: claude-sonnet-5
+model: anthropic/claude-sonnet-5
 browser: false
 tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, list_agents, message_agent
 ---

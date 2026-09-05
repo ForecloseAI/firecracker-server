@@ -40,6 +40,11 @@ const (
 	appName = "AutoBots"
 )
 
+// openRouterBase is where model calls go when this process has a key of its own
+// -- a laptop, not a guest. No "/v1": the SDK appends that itself, and
+// OpenRouter serves the Messages endpoint under /api. See modelBase.
+const openRouterBase = "https://openrouter.ai/api"
+
 // routeTable is the kernel's routing table. The guest's default route is its
 // tap gateway, which is the host, which is where the broker listens. A var so
 // a test can point it at a fixture.
@@ -47,10 +52,9 @@ var routeTable = "/proc/net/route"
 
 // endpoint is where one agent's model calls go and what they present.
 //
-// Empty means the SDK's own environment: a credential in ANTHROPIC_API_KEY or
-// ANTHROPIC_AUTH_TOKEN, and whatever ANTHROPIC_BASE_URL says. That is how a
-// developer's laptop and every offline test run. A guest has none of those --
-// the image ships no credential on purpose -- and dials the host instead.
+// A guest ships no credential on purpose and dials the host's broker. A laptop
+// with OPENROUTER_API_KEY calls OpenRouter directly on it, which is the same
+// request over the same protocol -- so what is proved locally is what runs.
 type endpoint struct {
 	baseURL string
 	key     string
@@ -58,13 +62,23 @@ type endpoint struct {
 	// agent whatever the person chose, with how much it should reason.
 	model    string
 	thinking string
-	// foreign marks an endpoint of the person's own that is not Anthropic
-	// itself -- OpenRouter's Anthropic-compatible surface, typically. Requests
-	// to it are plain: no betas, no context management, since another service
-	// that speaks the API need not honour them. Everything else -- the
-	// environment, the broker, api.anthropic.com on their own key -- is
-	// Anthropic, and the zero value says so.
-	foreign bool
+	// plain marks an endpoint whose capabilities we do not know, which is any
+	// URL the person pasted. Requests to it carry no betas and no context
+	// management, since a service that merely speaks the API need not honour
+	// them. Our own broker is NOT plain: it goes to OpenRouter, which documents
+	// context_management and cache_control as request fields.
+	//
+	// This used to be called foreign and mean "not Anthropic". That stopped
+	// being the distinction the moment the broker's own upstream stopped being
+	// Anthropic; what it has always actually gated is whether we can rely on
+	// the extras, and a pasted URL is where we cannot.
+	plain bool
+	// bearer says to authenticate with Authorization rather than the x-api-key
+	// header alone, and to say who is calling. True where the key is the
+	// caller's own AND the endpoint is not Anthropic itself: OpenRouter wants a
+	// bearer, Anthropic wants the key header, and a brokered request wants
+	// neither because the host sets both on its own key.
+	bearer bool
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
 	err error
@@ -73,12 +87,19 @@ type endpoint struct {
 // defaultEndpoint decides how this process reaches the model. Decided once,
 // by the supervisor, so the startup line and every agent agree.
 //
-// A credential in the environment wins outright, ANTHROPIC_BASE_URL included,
-// so nothing changes for anyone who has one. Without one, an explicit base URL
-// names the broker; without that too, the broker is the default gateway.
+// A key of this process's own wins outright and calls OpenRouter directly:
+// that is a laptop, and it is deliberately the same request the fleet makes.
+// Without one, ANTHROPIC_BASE_URL names a broker explicitly -- which is how the
+// tests point at an httptest server -- and without that, the broker is this
+// guest's default gateway.
+//
+// There is no longer a branch that hands the SDK its own environment. It used
+// to mean "a developer with an Anthropic key calls Anthropic directly", and
+// both halves of that are gone: the key is retired, and the model ids the
+// profiles now ask for are OpenRouter slugs Anthropic would reject.
 func defaultEndpoint() endpoint {
-	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" {
-		return endpoint{}
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		return endpoint{baseURL: openRouterBase, key: key, bearer: true}
 	}
 	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
 		return endpoint{baseURL: base, key: brokerKey}
@@ -91,8 +112,13 @@ func defaultEndpoint() endpoint {
 }
 
 // forAgent is this endpoint with the model one agent should call -- or, when
-// the person gave the agent a model of its own, that endpoint instead, on
-// their key. Theirs is foreign unless it is api.anthropic.com itself.
+// the person gave the agent a model of its own, that endpoint instead, on their
+// key.
+//
+// One question decides both flags: is this Anthropic itself? If not, it is a
+// gateway we know nothing about, so requests go plain and authenticate the way
+// OpenRouter does. If it is, nothing changes from the day this path was written
+// -- their key in the x-api-key header, betas and all.
 func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 	if own == nil {
 		ep.model = model
@@ -100,8 +126,9 @@ func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 	}
 	base := modelBase(own.URL)
 	u, err := url.Parse(base)
+	notAnthropic := err != nil || u.Hostname() != "api.anthropic.com"
 	return endpoint{baseURL: base, key: own.APIKey, model: own.Model, thinking: own.Thinking,
-		foreign: err != nil || u.Hostname() != "api.anthropic.com"}
+		plain: notAnthropic, bearer: notAnthropic}
 }
 
 // modelBase trims a pasted base URL back to what the SDK expects. The SDK
@@ -128,12 +155,12 @@ func newClient(ep endpoint) anthropic.Client {
 		opts = append(opts, option.WithoutEnvironmentDefaults(),
 			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
-	// A gateway of the person's own also gets a bearer credential, which is how
-	// OpenRouter authenticates, and the two headers it attributes traffic by.
-	// Both shapes go rather than one: it is their key and their host, so the
-	// second copy tells nobody new, and a proxy of their own that wanted the key
-	// header keeps working on it.
-	if ep.foreign {
+	// An endpoint carrying a key of our own that is not Anthropic also gets a
+	// bearer credential, which is how OpenRouter authenticates, and the two
+	// headers it attributes traffic by. Both auth shapes go rather than one: it
+	// is the same key to the same host either way, so the second copy tells
+	// nobody new, and a proxy that wanted the key header keeps working on it.
+	if ep.bearer {
 		opts = append(opts, option.WithAuthToken(ep.key),
 			option.WithHeader("HTTP-Referer", appURL), option.WithHeader("X-Title", appName))
 	}
@@ -205,8 +232,8 @@ func (ep endpoint) String() string {
 	switch {
 	case ep.err != nil:
 		return "no broker (" + ep.err.Error() + "); every turn will fail"
-	case ep.baseURL == "":
-		return "the credential in the environment"
+	case ep.bearer:
+		return ep.baseURL + " on this process's own key"
 	default:
 		return "the broker at " + ep.baseURL
 	}

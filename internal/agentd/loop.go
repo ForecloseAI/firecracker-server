@@ -517,10 +517,14 @@ func (a *Agent) systemBlocks() []anthropic.BetaTextBlockParam {
 // params builds the request for one turn from a candidate history.
 //
 // Thinking raises the ceiling by its own budget, because the budget has to fit
-// under max_tokens. Temperature is never set: thinking forbids it. Context
-// management and the betas go only to Anthropic itself; an endpoint of the
-// person's own that speaks the API is sent plain requests, and compaction
-// still bounds how long its conversation can grow.
+// under max_tokens. Temperature is never set: thinking forbids it.
+//
+// Context management and the betas are withheld only from an endpoint we know
+// nothing about -- a URL the person pasted -- which is sent plain requests, and
+// where compaction still bounds how long its conversation can grow. Our own
+// broker gets them: OpenRouter documents context_management as a request field,
+// and without it every tool result in a long history is re-billed uncached on
+// every turn.
 func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunnerParams {
 	p := anthropic.BetaMessageNewParams{
 		Model: anthropic.Model(a.ep.model), MaxTokens: maxTokens,
@@ -531,7 +535,7 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
 		p.MaxTokens = maxTokens + budget
 	}
-	if !a.ep.foreign {
+	if !a.ep.plain {
 		p.ContextManagement = contextManagement()
 		p.Betas = betasFor(budget > 0)
 	}

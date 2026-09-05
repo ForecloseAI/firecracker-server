@@ -12,13 +12,12 @@ import (
 
 // modelBroker is the guest listener with only the model broker on it.
 func modelBroker(upstream string) http.Handler {
-	return guestRoutes(nil, NewLLMGateway("sk-ant-host", mustURL(upstream)))
+	return guestRoutes(nil, NewLLMGateway("sk-or-host", mustURL(upstream), "https://chat.example.com"))
 }
 
 // The happy path. The SDK's own path and query -- ?beta=true included -- must
-// reach the model unchanged, the host key must be added, and the two headers
-// the SDK depends on must survive: drop anthropic-version or anthropic-beta and
-// every turn fails.
+// reach the model unchanged, the host key must be added as the bearer token
+// OpenRouter authenticates with, and the two headers the SDK sends must survive.
 func TestTheBrokerAddsTheKeyAndKeepsThePath(t *testing.T) {
 	up := newUpstream(t)
 	h := modelBroker(up.srv.URL)
@@ -31,8 +30,8 @@ func TestTheBrokerAddsTheKeyAndKeepsThePath(t *testing.T) {
 	if up.path != "/v1/messages" || up.query != "beta=true" {
 		t.Errorf("upstream saw %s?%s", up.path, up.query)
 	}
-	if up.hdr.Get("x-api-key") != "sk-ant-host" {
-		t.Errorf("upstream saw x-api-key %q", up.hdr.Get("x-api-key"))
+	if up.hdr.Get("Authorization") != "Bearer sk-or-host" {
+		t.Errorf("upstream saw Authorization %q, want the host's bearer", up.hdr.Get("Authorization"))
 	}
 	if up.hdr.Get("anthropic-version") != "2023-06-01" ||
 		up.hdr.Get("anthropic-beta") != "context-management-2025-06-27" {
@@ -42,23 +41,57 @@ func TestTheBrokerAddsTheKeyAndKeepsThePath(t *testing.T) {
 	if up.body != `{"jsonrpc":"2.0"}` {
 		t.Errorf("body arrived as %q", up.body)
 	}
-	askGuest(h, http.MethodPost, "/v1/messages/count_tokens?beta=true", "172.16.0.2", nil)
-	if up.path != "/v1/messages/count_tokens" {
-		t.Errorf("count_tokens arrived as %s", up.path)
+}
+
+// OpenRouter files traffic under these two, and the guest cannot set them: it
+// is untrusted, so anything it sent was dropped before the credential went on.
+// Attribution that a guest could forge would attribute nothing.
+func TestTheBrokerSaysWhoIsCalling(t *testing.T) {
+	up := newUpstream(t)
+	askGuest(modelBroker(up.srv.URL), http.MethodPost, "/v1/messages", "172.16.0.2",
+		map[string]string{"HTTP-Referer": "https://evil.example", "X-Title": "NotUs"})
+	if got := up.hdr.Get("HTTP-Referer"); got != "https://chat.example.com" {
+		t.Errorf("HTTP-Referer = %q, want this service's own origin", got)
+	}
+	if got := up.hdr.Get("X-Title"); got != "AutoBots" {
+		t.Errorf("X-Title = %q, want AutoBots", got)
 	}
 }
 
-// A guest is untrusted, so what it sends is replaced rather than edited: its own
-// key, any bearer token, cookies and forwarding headers must not reach the model.
+// The broker lends the key for turns and nothing wider. count_tokens was in the
+// allow list for a caller that never existed, and OpenRouter does not serve it;
+// an opening kept "just in case" is an opening on somebody else's key.
+func TestCountTokensIsNoLongerLent(t *testing.T) {
+	up := newUpstream(t)
+	rec := askGuest(modelBroker(up.srv.URL), http.MethodPost,
+		"/v1/messages/count_tokens?beta=true", "172.16.0.2", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("count_tokens answered %d, want 404", rec.Code)
+	}
+	if up.path != "" {
+		t.Errorf("the request reached the model anyway, at %s", up.path)
+	}
+}
+
+// A guest is untrusted, so what it sends is replaced rather than edited.
+//
+// Authorization is the one that matters now and the one most easily got wrong:
+// it is no longer merely stripped, it is the credential the broker sets. A guest
+// value must be gone and OURS in its place -- an implementation that appended,
+// or that set the header only when absent, would let a guest choose the token.
 func TestAGuestCannotSmuggleCredentialsToTheModel(t *testing.T) {
 	up := newUpstream(t)
 	askGuest(modelBroker(up.srv.URL), http.MethodPost, "/v1/messages", "172.16.0.2", map[string]string{
 		"X-Api-Key": "sk-ant-guest", "Authorization": "Bearer stolen", "Proxy-Authorization": "x",
 		"Cookie": "session=1", "X-Forwarded-For": "1.2.3.4"})
-	if up.hdr.Get("x-api-key") != "sk-ant-host" {
-		t.Errorf("the guest's key reached the model: %q", up.hdr.Get("x-api-key"))
+	if got := up.hdr.Get("Authorization"); got != "Bearer sk-or-host" {
+		t.Errorf("Authorization = %q, want only the host's own bearer", got)
 	}
-	for _, h := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Forwarded-For"} {
+	if len(up.hdr.Values("Authorization")) != 1 {
+		t.Errorf("Authorization arrived %d times; the guest's was appended, not replaced",
+			len(up.hdr.Values("Authorization")))
+	}
+	for _, h := range []string{"X-Api-Key", "Proxy-Authorization", "Cookie", "X-Forwarded-For"} {
 		if v := up.hdr.Get(h); v != "" {
 			t.Errorf("%s reached the model as %q", h, v)
 		}
@@ -148,10 +181,10 @@ func TestAnUpstreamFailureNeverNamesTheKey(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if body := rec.Body.String(); strings.Contains(body, "sk-ant-host") || strings.Contains(body, "127.0.0.1") {
+	if body := rec.Body.String(); strings.Contains(body, "sk-or-host") || strings.Contains(body, "127.0.0.1") {
 		t.Errorf("the failure told the guest too much: %q", body)
 	}
-	if strings.Contains(buf.String(), "sk-ant-host") {
+	if strings.Contains(buf.String(), "sk-or-host") {
 		t.Errorf("the key reached the journal: %q", buf)
 	}
 }

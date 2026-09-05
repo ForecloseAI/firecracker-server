@@ -201,17 +201,17 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 // An endpoint of the person's own speaks the API but not Anthropic's betas: it
 // gets plain requests, and its compaction runs on its own model, since the
 // cheap one may not exist there.
-func TestAForeignEndpointGetsPlainRequests(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com", model: "m", thinking: "low", foreign: true}}
+func TestAPastedEndpointGetsPlainRequests(t *testing.T) {
+	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com", model: "m", thinking: "low", plain: true, bearer: true}}
 	p := a.params(nil).BetaMessageNewParams
 	if len(p.Betas) != 0 || p.ContextManagement.Edits != nil {
-		t.Errorf("a foreign endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
+		t.Errorf("a pasted endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
 	}
 	if p.Thinking.OfEnabled == nil {
 		t.Error("thinking is not a beta and should still be asked for")
 	}
 	if a.compactModel() != "m" {
-		t.Errorf("compaction on a foreign endpoint uses %q", a.compactModel())
+		t.Errorf("compaction on a pasted endpoint uses %q", a.compactModel())
 	}
 	if (&Agent{}).compactModel() != summaryModel {
 		t.Error("compaction on Anthropic left the cheap model")
@@ -243,5 +243,28 @@ func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 	}
 	if !got[2].Retired || got[2].Name != "gone" || got[3].Retired || got[3].Name != "Before per-agent tracking" {
 		t.Errorf("retired and pre-split rows: %+v %+v", got[2], got[3])
+	}
+}
+
+// The counterpart, and the one this cutover could most easily have broken.
+//
+// The broker's upstream is OpenRouter now, so the old rule -- "betas go only to
+// Anthropic" -- would have switched context editing off for the whole fleet.
+// Nothing would have failed: turns would keep working and every tool result in
+// a long history would quietly be re-billed uncached on every turn. OpenRouter
+// documents context_management as a request field, so the fleet keeps it, and
+// this test is what says so out loud.
+func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
+	a := &Agent{system: "p", ep: endpoint{
+		baseURL: "http://172.16.0.1:8092", key: brokerKey, model: "anthropic/claude-sonnet-5"}}
+	p := a.params(nil).BetaMessageNewParams
+	if !slices.Contains(p.Betas, anthropic.AnthropicBetaContextManagement2025_06_27) {
+		t.Errorf("brokered betas = %v, want the context-management beta", p.Betas)
+	}
+	if p.ContextManagement.Edits == nil {
+		t.Error("the brokered path sends no context management; every tool result is re-billed")
+	}
+	if a.compactModel() != summaryModel {
+		t.Errorf("brokered compaction uses %q, want the cheap model", a.compactModel())
 	}
 }

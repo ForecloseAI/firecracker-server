@@ -62,7 +62,7 @@ func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server
 		s.catalog = newAppCatalog(s.composio)
 		s.kinds = newAppCaps(s.composio)
 	}
-	s.llm = NewLLMGateway(cfg.AnthropicKey, cfg.AnthropicUpstream)
+	s.llm = NewLLMGateway(cfg.OpenRouterKey, cfg.OpenRouterUpstream, cfg.Origin)
 	return s
 }
 
