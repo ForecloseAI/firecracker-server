@@ -18,33 +18,58 @@ func usageFrom(t *testing.T, raw string) anthropic.BetaUsage {
 	return u
 }
 
-// The whole reason this function is not one field read.
-//
-// Under BYOK, OpenRouter bills the inference to the person's own provider
-// account and charges only its 5% fee itself. So `cost` is the small number and
-// `cost_details.upstream_inference_cost` is the bill. Reading `cost` alone would
-// report a $2.10 turn as $0.10 -- and report it confidently, with no warning,
-// because a figure was found.
+// Both of these are real usage blocks, captured from OpenRouter on 2026-09-06.
+// They are copied rather than composed because an invented pair got this wrong:
+// the docs say upstream_inference_cost is "0 or null" for non-BYOK requests, and
+// it is neither -- it repeats cost. A fixture written from the docs agreed with
+// the code and both were wrong together.
+const (
+	byokUsage = `{"input_tokens":8,"output_tokens":16,
+		"cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+		"cost":0,"is_byok":true,"cost_details":{"upstream_inference_cost":0.000088,
+		"upstream_inference_prompt_cost":0.000008,"upstream_inference_completions_cost":0.00008}}`
+
+	creditsUsage = `{"input_tokens":1,"output_tokens":10,
+		"cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+		"cost":0.0000253,"is_byok":false,"cost_details":{"upstream_inference_cost":0.0000253,
+		"upstream_inference_prompt_cost":3E-7,"upstream_inference_completions_cost":0.000025}}`
+)
+
+// On BYOK the inference is billed to our own provider account, so cost is only
+// what OpenRouter charged on top -- zero while under the free monthly allowance
+// -- and the bill is the two added. Taking cost alone would report this turn as
+// free, confidently, because a figure was found.
 func TestABYOKTurnIsBilledForBothHalves(t *testing.T) {
-	u := usageFrom(t, `{"input_tokens":100,"output_tokens":20,
-		"cost":0.10,"cost_details":{"upstream_inference_cost":2.00}}`)
-	if got := reportedCost(u); got != 2.10 {
-		t.Errorf("reportedCost = %v, want 2.10 (one of the two terms was dropped)", got)
+	if got := reportedCost(usageFrom(t, byokUsage)); got != 0.000088 {
+		t.Errorf("reportedCost = %v, want 0.000088", got)
 	}
 }
 
-// Not every response has both halves, and each one alone must still be the
-// answer rather than a reason to fall through to the table.
-func TestEitherCostFieldAloneIsStillTheCost(t *testing.T) {
+// And the mirror, which is the one that bites: off BYOK, cost IS the bill and
+// upstream_inference_cost is the same money described a second way. Adding them
+// here -- which the documented semantics invite -- doubles every turn.
+func TestACreditsTurnIsNotDoubleCounted(t *testing.T) {
+	got := reportedCost(usageFrom(t, creditsUsage))
+	if got != 0.0000253 {
+		t.Errorf("reportedCost = %v, want 0.0000253", got)
+	}
+	if got == 0.0000506 {
+		t.Error("cost and upstream_inference_cost were added; they are the same money")
+	}
+}
+
+// Absent fields must not be read as a bill of zero when they are really a bill
+// of nothing-said. Zero is the signal the host falls back to its table on.
+func TestAPartialCostBlockIsStillRead(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		raw  string
 		want float64
 	}{
-		{"openrouter credits, no byok", `{"cost":0.42,"cost_details":{"upstream_inference_cost":0}}`, 0.42},
-		{"upstream only", `{"cost":0,"cost_details":{"upstream_inference_cost":1.25}}`, 1.25},
-		{"null upstream", `{"cost":0.42,"cost_details":{"upstream_inference_cost":null}}`, 0.42},
-		{"no cost_details at all", `{"cost":0.42}`, 0.42},
+		{"byok, no cost_details", `{"cost":0.10,"is_byok":true}`, 0.10},
+		{"byok, null upstream", `{"cost":0.10,"is_byok":true,"cost_details":{"upstream_inference_cost":null}}`, 0.10},
+		{"credits, no cost_details", `{"cost":0.42,"is_byok":false}`, 0.42},
+		{"no is_byok at all", `{"cost":0.42,"cost_details":{"upstream_inference_cost":0.42}}`, 0.42},
 	} {
 		if got := reportedCost(usageFrom(t, c.raw)); got != c.want {
 			t.Errorf("%s: reportedCost = %v, want %v", c.name, got, c.want)
@@ -67,7 +92,7 @@ func TestAnAnthropicResponseReportsNoCost(t *testing.T) {
 // read but never copied across is a silent zero all the way to the bill.
 func TestUsageOfCarriesTheCostOntoTheWire(t *testing.T) {
 	u := usageFrom(t, `{"input_tokens":7,"output_tokens":3,
-		"cost":0.05,"cost_details":{"upstream_inference_cost":0.95}}`)
+		"cost":0.05,"is_byok":true,"cost_details":{"upstream_inference_cost":0.95}}`)
 	got := usageOf(u)
 	if got.CostUSD != 1.00 {
 		t.Errorf("Usage.CostUSD = %v, want 1.00", got.CostUSD)
@@ -87,14 +112,13 @@ func TestUsageOfCarriesTheCostOntoTheWire(t *testing.T) {
 func TestCostIsReadableFromAUsageNestedInAMessage(t *testing.T) {
 	raw := `{"id":"msg_1","type":"message","role":"assistant",
 		"model":"anthropic/claude-haiku-4.5","content":[{"type":"text","text":"hi"}],
-		"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2,
-		"cost":0.10,"cost_details":{"upstream_inference_cost":2.00}}}`
+		"stop_reason":"end_turn","usage":` + byokUsage + `}`
 	var msg anthropic.BetaMessage
 	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
 		t.Fatalf("unmarshal message: %v", err)
 	}
-	if got := reportedCost(msg.Usage); got != 2.10 {
-		t.Errorf("reportedCost off a nested usage = %v, want 2.10", got)
+	if got := reportedCost(msg.Usage); got != 0.000088 {
+		t.Errorf("reportedCost off a nested usage = %v, want 0.000088", got)
 	}
 }
 
@@ -106,7 +130,7 @@ func TestACompactionSummaryBooksItsCost(t *testing.T) {
 	a.team = &Supervisor{meter: OpenMeter(t.TempDir())}
 
 	u := usageFrom(t, `{"input_tokens":4000,"output_tokens":300,
-		"cost":0.01,"cost_details":{"upstream_inference_cost":0.19}}`)
+		"cost":0.01,"is_byok":true,"cost_details":{"upstream_inference_cost":0.19}}`)
 	a.bookUsage(summaryModel, usageOf(u))
 
 	for _, row := range a.meter().Report().ByModel {

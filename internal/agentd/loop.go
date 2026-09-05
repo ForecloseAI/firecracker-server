@@ -737,20 +737,31 @@ func usageOf(u anthropic.BetaUsage) Usage {
 
 // reportedCost is what the endpoint says the call cost, in US dollars.
 //
-// OpenRouter returns two numbers and the bill is their sum. cost is what it
-// charged this account, which under BYOK is only its platform fee, because the
-// inference itself went on the person's own provider key;
-// upstream_inference_cost is what that provider charged, and is absent
-// everywhere else. Reading only the first would under-report a BYOK turn by
-// almost the whole bill, and do it silently.
+// OpenRouter reports two figures and how to combine them depends on is_byok,
+// which is why that flag is read rather than assumed. Both shapes verified
+// against the live API, 2026-09-06:
 //
-// Anthropic returns neither, so this is zero there and the host's price table
-// answers instead. The SDK has no struct member for either field -- they are
-// nobody's idea of the Messages API -- but it keeps the raw block, so they
+//	byok:      cost 0          upstream_inference_cost 0.000053
+//	not byok:  cost 0.0000253  upstream_inference_cost 0.0000253
+//
+// On a BYOK call the inference is billed to our own provider account and cost
+// is only what OpenRouter charged on top -- zero while under the free monthly
+// allowance -- so the bill is the two added. Off BYOK, cost IS the bill and
+// upstream_inference_cost is the same money described a second way; adding
+// them there would double every turn.
+//
+// The docs say upstream_inference_cost is "0 or null" for non-BYOK requests.
+// It is not, which is the whole reason this reads is_byok instead of treating
+// a populated upstream figure as proof of anything.
+//
+// Anthropic returns none of it, so this is zero there and the host's price
+// table answers instead. The SDK has no struct member for these fields -- they
+// are nobody's idea of the Messages API -- but it keeps the raw block, so they
 // survive unmarshalling and can be read back out.
 func reportedCost(u anthropic.BetaUsage) float64 {
 	var r struct {
 		Cost        float64 `json:"cost"`
+		IsBYOK      bool    `json:"is_byok"`
 		CostDetails struct {
 			UpstreamInferenceCost float64 `json:"upstream_inference_cost"`
 		} `json:"cost_details"`
@@ -758,7 +769,10 @@ func reportedCost(u anthropic.BetaUsage) float64 {
 	if err := json.Unmarshal([]byte(u.RawJSON()), &r); err != nil {
 		return 0
 	}
-	return r.Cost + r.CostDetails.UpstreamInferenceCost
+	if r.IsBYOK {
+		return r.Cost + r.CostDetails.UpstreamInferenceCost
+	}
+	return r.Cost
 }
 
 // bookUsage puts one response's tokens in both places that account for spend.
