@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cracked/internal/agentapi"
 )
 
 // The shipped profiles are the product, so their absence or malformation
@@ -59,8 +61,18 @@ func TestMissingCustomDirectoryKeepsBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.List()) != 6 {
-		t.Errorf("got %d profiles, want the 6 built-ins", len(c.List()))
+	if len(c.List()) != 7 {
+		t.Errorf("got %d profiles, want the 7 built-ins", len(c.List()))
+	}
+}
+
+// The custom profile is the shell a person's own role goes into: every tool,
+// the browser, and a role prompt that only points at what they wrote.
+func TestTheCustomProfileIsAShellForThePersonsRole(t *testing.T) {
+	c, _ := LoadCatalog("")
+	p, ok := c.Get(agentapi.CustomType)
+	if !ok || !p.Browser || len(p.Tools) != 0 || p.Model == "" {
+		t.Fatalf("custom profile: %+v, %v", p, ok)
 	}
 }
 

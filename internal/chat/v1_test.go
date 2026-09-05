@@ -29,22 +29,18 @@ func TestAPIGuardAnswers401NotARedirect(t *testing.T) {
 	}
 }
 
-// roster is one machine's agents plus their profiles.
-func roster() ([]agentapi.Status, []agentapi.Profile) {
+// roster is one machine's agents, as the daemon reports them.
+func roster() []agentapi.Status {
 	return []agentapi.Status{
-			{ID: "boss", Name: "Boss", Type: "boss"},
-			{ID: "cody", Name: "Cody", Type: "coder",
-				Task: &agentapi.Task{Title: "Reconciling invoices"}},
-		}, []agentapi.Profile{
-			{Key: "boss", Description: "Runs the team", Browser: true},
-			{Key: "coder", Description: "Writes code", Browser: false},
-		}
+		{ID: "boss", Name: "Boss", Type: "boss", Description: "Runs the team", Browser: true},
+		{ID: "cody", Name: "Cody", Type: "coder", Description: "Writes code",
+			Task: &agentapi.Task{Title: "Reconciling invoices"}},
+	}
 }
 
 // The projection is what the whole roster screen renders from.
 func TestProjectRoster(t *testing.T) {
-	st, profiles := roster()
-	got := projectRoster(st, profiles, "alice-1", true)
+	got := projectRoster(roster(), "alice-1", true)
 	if len(got) != 2 {
 		t.Fatalf("got %d agents", len(got))
 	}
@@ -73,11 +69,11 @@ func TestProjectRoster(t *testing.T) {
 // evicted to save memory, and reporting that as offline would show a healthy
 // roster as dead.
 func TestOnlineIsNotTakenFromLive(t *testing.T) {
-	st, profiles := roster()
+	st := roster()
 	for i := range st {
 		st[i].Live = false
 	}
-	for _, a := range projectRoster(st, profiles, "alice-1", true) {
+	for _, a := range projectRoster(st, "alice-1", true) {
 		if !a.Online {
 			t.Errorf("%s went offline because it held no goroutine", a.ID)
 		}
@@ -113,18 +109,14 @@ func TestUnknownProfileStillGetsAShape(t *testing.T) {
 	}
 }
 
-// stubGuest answers the two calls a roster fetch makes, and counts anything
-// else so a test can prove listing never reaches the agent-starting event route.
+// stubGuest answers the one call a roster fetch makes, and counts anything
+// else so a test can prove listing never reaches the agent-starting event route
+// -- nor, now that a row carries its profile facts, the catalog.
 func stubGuest(t *testing.T, hits *int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
-		st, _ := roster()
-		json.NewEncoder(w).Encode(st)
-	})
-	mux.HandleFunc("GET /agent-types", func(w http.ResponseWriter, r *http.Request) {
-		_, p := roster()
-		json.NewEncoder(w).Encode(p)
+		json.NewEncoder(w).Encode(roster())
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		*hits++ // anything else would mean we took a route that starts agents

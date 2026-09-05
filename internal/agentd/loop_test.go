@@ -13,7 +13,7 @@ import (
 func newTestAgent(t *testing.T) *Agent {
 	t.Helper()
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key-for-offline-tests")
-	a, err := New("boss", t.TempDir(), t.TempDir(), testProfile(), nil)
+	a, err := New(Record{ID: "boss", Name: "Boss"}, t.TempDir(), t.TempDir(), testProfile(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestConversationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := New("boss", a.dir, t.TempDir(), testProfile(), nil)
+	reopened, err := New(Record{ID: "boss", Name: "Boss"}, a.dir, t.TempDir(), testProfile(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -76,7 +76,7 @@ type Agent struct {
 	id     string
 	dir    string
 	client anthropic.Client
-	model  string
+	ep     endpoint
 	system string
 	tools  []anthropic.BetaTool
 	log    *Log
@@ -142,13 +142,15 @@ type inbound struct {
 }
 
 // New builds an agent rooted at dir, working in workspace, restoring its
-// conversation and log from disk. The client reads ANTHROPIC_API_KEY from the
-// environment.
+// conversation and log from disk. The model client is built for the team's
+// endpoint: a credential in the environment when there is one, otherwise the
+// host's broker on this guest's own gateway.
 //
 // The agent owns its log, gate and tools rather than being handed them: the
 // gate records into the log and the tools call the gate, so assembling them
 // anywhere else just moves the knot.
-func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
+func New(rec Record, dir, workspace string, p Profile, team *Supervisor) (*Agent, error) {
+	id := rec.ID
 	log, err := OpenLog(dir, id)
 	if err != nil {
 		return nil, err
@@ -179,10 +181,11 @@ func New(id, dir, workspace string, p Profile, team *Supervisor) (*Agent, error)
 	if err != nil {
 		return nil, err
 	}
+	ep := endpointOf(team).forAgent(p.Model, rec.Model)
 	a := &Agent{
-		id: id, dir: dir, client: anthropic.NewClient(),
-		model: p.Model, system: ComposeSystemPrompt(p, r, stateDirOf(team), skills),
-		tools: tools, log: log, gate: gate, team: team, state: "idle",
+		id: id, dir: dir, client: newClient(ep), ep: ep,
+		system: ComposeSystemPrompt(p, rec, r, stateDirOf(team), skills),
+		tools:  tools, log: log, gate: gate, team: team, state: "idle",
 		inbox: make(chan inbound, inboxDepth), reload: reload,
 	}
 	// Wired after the agent exists, because the gate is built before it and the
@@ -202,6 +205,15 @@ func appsOf(team *Supervisor) *appsServer {
 		return nil
 	}
 	return team.Apps()
+}
+
+// endpointOf is the machine's model endpoint, or the process default when this
+// agent has no team -- which is only ever the case in a unit test.
+func endpointOf(team *Supervisor) endpoint {
+	if team == nil {
+		return defaultEndpoint()
+	}
+	return team.endpoint
 }
 
 // hubOf is the machine's interaction hub, or nil when this agent has no team --
@@ -503,18 +515,37 @@ func (a *Agent) systemBlocks() []anthropic.BetaTextBlockParam {
 }
 
 // params builds the request for one turn from a candidate history.
+//
+// Thinking raises the ceiling by its own budget, because the budget has to fit
+// under max_tokens. Temperature is never set: thinking forbids it. Context
+// management and the betas go only to Anthropic itself; an endpoint of the
+// person's own that speaks the API is sent plain requests, and compaction
+// still bounds how long its conversation can grow.
 func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunnerParams {
-	return anthropic.BetaToolRunnerParams{
-		MaxIterations: maxIterations,
-		BetaMessageNewParams: anthropic.BetaMessageNewParams{
-			Model:             anthropic.Model(a.model),
-			MaxTokens:         maxTokens,
-			System:            a.systemBlocks(),
-			Messages:          msgs,
-			ContextManagement: contextManagement(),
-			Betas:             []anthropic.AnthropicBeta{anthropic.AnthropicBetaContextManagement2025_06_27},
-		},
+	p := anthropic.BetaMessageNewParams{
+		Model: anthropic.Model(a.ep.model), MaxTokens: maxTokens,
+		System: a.systemBlocks(), Messages: msgs,
 	}
+	budget := agentapi.ThinkingBudgets[a.ep.thinking]
+	if budget > 0 {
+		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
+		p.MaxTokens = maxTokens + budget
+	}
+	if !a.ep.foreign {
+		p.ContextManagement = contextManagement()
+		p.Betas = betasFor(budget > 0)
+	}
+	return anthropic.BetaToolRunnerParams{MaxIterations: maxIterations, BetaMessageNewParams: p}
+}
+
+// betasFor is what a request to Anthropic opts into: context editing always,
+// and interleaved thinking when the agent reasons between tool calls.
+func betasFor(thinking bool) []anthropic.AnthropicBeta {
+	betas := []anthropic.AnthropicBeta{anthropic.AnthropicBetaContextManagement2025_06_27}
+	if thinking {
+		betas = append(betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14)
+	}
+	return betas
 }
 
 // contextManagement drops old tool results out of the request once a
@@ -712,7 +743,7 @@ func usageOf(u anthropic.BetaUsage) Usage {
 // spending real tokens that /usage cannot account for.
 func (a *Agent) bookUsage(model string, used Usage) {
 	a.log.Append(Event{Type: "usage", Model: model, Usage: &used})
-	a.meter().Record(model, used)
+	a.meter().Record(a.id, model, used)
 }
 
 // meter is the machine's spend counter, or nil when this agent has no team --
@@ -745,7 +776,7 @@ func (a *Agent) finish(started time.Time, err error) {
 		IsError:    err != nil,
 		DurationMS: took.Milliseconds(),
 	})
-	a.meter().FinishTurn(took)
+	a.meter().FinishTurn(a.id, took)
 	a.setState("idle")
 }
 

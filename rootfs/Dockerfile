@@ -204,20 +204,8 @@ RUN systemctl disable ssh.socket \
  && rm -f /etc/ssh/ssh_host_* \
  && test ! -e /etc/ssh/ssh_host_ed25519_key
 
-# TODO(security): the API key lives in this image, so it is shared by every VM
-# built from it and readable by anything in the guest. The agent browses
-# untrusted pages with it present, so a prompt injection can exfiltrate it, and
-# rotating it means rebuilding the rootfs. Before any public release, replace
-# this with a host token-broker: the agent calls a proxy on its own gateway IP
-# (slot N is 172.16.(4N+1), so derive it from the default route) and the host
-# injects the real key, keeping the guest free of credentials.
-ARG ANTHROPIC_API_KEY=""
-RUN printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > /etc/cracked-agent.env \
- && chmod 0640 /etc/cracked-agent.env \
- && chown root:agent /etc/cracked-agent.env
-
-# The operator's public key for reaching a guest over ssh. Unlike the API key
-# above this is safe to bake: the PRIVATE half never enters a guest, it stays on
+# The operator's public key for reaching a guest over ssh. Safe to bake, unlike
+# a credential would be: the PRIVATE half never enters a guest, it stays on
 # the EC2 host, which is already fully privileged over every VM through the
 # control plane. `docker history` exposing this build arg exposes a public key.
 #

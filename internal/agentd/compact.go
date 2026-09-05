@@ -158,6 +158,15 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 	}
 }
 
+// compactModel is the cheap model on Anthropic, or the agent's own model on an
+// endpoint of the person's, where the cheap one may not exist at all.
+func (a *Agent) compactModel() anthropic.Model {
+	if a.ep.foreign {
+		return anthropic.Model(a.ep.model)
+	}
+	return summaryModel
+}
+
 // callSummary asks the cheap model to condense the prefix.
 //
 // The tokens are booked against the transcript and the meter like any other
@@ -165,7 +174,7 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 // never sees must not be a hole in what /usage reports.
 func callSummary(ctx context.Context, a *Agent, msgs []anthropic.BetaMessageParam) (string, error) {
 	msg, err := a.client.Beta.Messages.New(ctx, anthropic.BetaMessageNewParams{
-		Model:     summaryModel,
+		Model:     a.compactModel(),
 		MaxTokens: summaryMaxTokens,
 		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(
 			anthropic.NewBetaTextBlock(renderForSummary(msgs) + "\n\n" + summaryAsk))},

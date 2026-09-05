@@ -29,6 +29,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agents", s.apiGuard(s.listAgents))
 	mux.HandleFunc("GET /v1/agent-types", s.apiGuard(s.listTypes))
 	mux.HandleFunc("POST /v1/agents", s.apiGuard(s.createAgent))
+	mux.HandleFunc("PATCH /v1/agents/{id}", s.apiGuard(s.updateAgent))
 	mux.HandleFunc("DELETE /v1/agents/{id}", s.apiGuard(s.deleteAgent))
 	mux.HandleFunc("POST /v1/threads/{id}/messages", s.apiGuard(s.sendMessage))
 	mux.HandleFunc("POST /v1/threads/{id}/files", s.apiGuard(s.uploadFile))
@@ -36,6 +37,7 @@ func (s *Server) v1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/threads/{id}/files/{name}", s.apiGuard(s.getAttachment))
 	mux.HandleFunc("GET /v1/schedules", s.apiGuard(s.listSchedules))
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.apiGuard(s.cancelSchedule))
+	mux.HandleFunc("GET /v1/usage", s.apiGuard(s.getUsage))
 	mux.HandleFunc("GET /v1/profile", s.apiGuard(s.getProfile))
 	mux.HandleFunc("PUT /v1/profile", s.apiGuard(s.putProfile))
 	mux.HandleFunc("GET /v1/threads/{id}", s.apiGuard(s.getThread))
@@ -302,16 +304,26 @@ func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, user string) 
 	writeJSON(w, http.StatusOK, projectTemplates(profiles, roster))
 }
 
-// createReq is the body of POST /v1/agents. TemplateId is a profile key
-// straight from the gallery, so there is no mapping table to drift.
+// createReq is the body of POST /v1/agents: a profile key straight from the
+// gallery, so there is no mapping table to drift -- or, with no templateId, an
+// agent the person is building themselves, from a name and a role. The model
+// is the guest's own wire shape, key and all; the key goes to their machine
+// and is never sent back.
 type createReq struct {
-	TemplateID string `json:"templateId"`
+	TemplateID   string                `json:"templateId"`
+	Name         string                `json:"name"`
+	Instructions string                `json:"instructions"`
+	Model        *agentapi.ModelConfig `json:"model"`
 }
 
-// createAgent activates one kind of agent on the person's machine.
+// agentBodyCap bounds a create or update: the same budget as the guest's.
+const agentBodyCap = 64 << 10
+
+// createAgent activates one kind of agent on the person's machine, or adds one
+// they described themselves.
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string) {
 	var req createReq
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req) != nil {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&req) != nil {
 		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
@@ -319,7 +331,55 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request, user string
 	if !ok {
 		return
 	}
-	s.activate(w, cl, req.TemplateID, machineFor(user))
+	if req.TemplateID != "" {
+		s.activate(w, cl, req.TemplateID, machineFor(user))
+		return
+	}
+	s.createCustom(w, cl, req, machineFor(user))
+}
+
+// createCustom adds an agent the person described themselves. The guest is the
+// one authority on what a custom agent may be -- name, role, model -- and its
+// refusal comes back to the app as it was said, so the rule lives in one place.
+func (s *Server) createCustom(w http.ResponseWriter, cl *agent.Client, req createReq, machine string) {
+	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: agentapi.CustomType, Name: req.Name,
+		Instructions: req.Instructions, Model: req.Model})
+	if err != nil {
+		relay(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectAgent(st, machine, true))
+}
+
+// updateAgent edits a custom agent: PATCH /v1/agents/{id}, with the guest's own
+// patch shape. A gallery agent may only be renamed; the guest says so with a
+// 409, and that is what the app hears.
+func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, user string) {
+	var patch agentapi.AgentPatch
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, agentBodyCap)).Decode(&patch) != nil {
+		fail(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	cl, ok := s.guestOf(w, r, user)
+	if !ok {
+		return
+	}
+	st, err := cl.UpdateAgent(r.PathValue("id"), patch)
+	if err != nil {
+		relay(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectAgent(st, machineFor(user), true))
+}
+
+// find is one roster row by id.
+func find(roster []agentapi.Status, id string) (agentapi.Status, bool) {
+	for _, st := range roster {
+		if st.ID == id {
+			return st, true
+		}
+	}
+	return agentapi.Status{}, false
 }
 
 // activate refuses a duplicate, creates, and returns the finished roster row.
@@ -332,7 +392,7 @@ func (s *Server) activate(w http.ResponseWriter, cl *agent.Client, typeKey, mach
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if profile.Key == "" || typeKey == agentapi.BossID {
+	if profile.Key == "" || typeKey == agentapi.BossID || typeKey == agentapi.CustomType {
 		fail(w, http.StatusBadRequest, "unknown templateId")
 		return
 	}
@@ -348,13 +408,12 @@ func (s *Server) activate(w http.ResponseWriter, cl *agent.Client, typeKey, mach
 // finishActivate creates the agent and projects it as the app's roster row.
 func (s *Server) finishActivate(w http.ResponseWriter, cl *agent.Client,
 	p agentapi.Profile, machine string) {
-	rec, err := cl.CreateAgent(p.Key, p.Title)
+	st, err := cl.CreateAgent(agentapi.CreateAgentReq{Type: p.Key, Name: p.Title})
 	if err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
+		relay(w, err)
 		return
 	}
-	st := agentapi.Status{ID: rec.ID, Name: rec.Name, Type: rec.Type}
-	writeJSON(w, http.StatusOK, projectAgent(st, p, machine, true))
+	writeJSON(w, http.StatusOK, projectAgent(st, machine, true))
 }
 
 // lookupType finds one profile and the current roster in one place, since every
@@ -407,12 +466,10 @@ func retirable(cl *agent.Client, id string) (int, string) {
 	if err != nil {
 		return http.StatusBadGateway, err.Error()
 	}
-	for _, st := range roster {
-		if st.ID == id {
-			return 0, ""
-		}
+	if _, ok := find(roster, id); !ok {
+		return http.StatusNotFound, "no such agent"
 	}
-	return http.StatusNotFound, "no such agent"
+	return 0, ""
 }
 
 // sendReqV1 is the body of POST /v1/threads/{id}/messages. File names something
@@ -444,7 +501,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, user string
 	}
 	sent, err := cl.PostMessage(r.PathValue("id"), agent.Send{Text: req.Text, File: req.File})
 	if err != nil {
-		sendError(w, err)
+		relay(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, storedMessage(sent, req))
@@ -457,18 +514,28 @@ func storedMessage(sent agent.Sent, req sendReqV1) Message {
 		Time: time.Now().UTC(), From: "me", Text: req.Text, File: req.File}
 }
 
-// sendError passes the guest's own refusal through instead of flattening it.
-// A busy agent is 503 and worth retrying; an unknown one is 404 and is not.
-func sendError(w http.ResponseWriter, err error) {
+// relay passes the guest's own refusal through instead of flattening it into a
+// 502. A 4xx is the guest saying no, and its message is the part a person can
+// act on -- an unknown agent, a role that is too long; a busy agent is 503 and
+// worth retrying. Only a failure to reach the guest is a gateway error.
+func relay(w http.ResponseWriter, err error) {
 	var se *agent.StatusError
-	if errors.As(err, &se) && (se.Code == http.StatusServiceUnavailable || se.Code == http.StatusNotFound) {
-		if se.Code == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", "5")
-		}
-		fail(w, se.Code, "agent unavailable")
+	if !errors.As(err, &se) || !relayable(se.Code) {
+		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	fail(w, http.StatusBadGateway, err.Error())
+	if se.Code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
+	}
+	if se.Message == "" {
+		se.Message = "agent unavailable"
+	}
+	fail(w, se.Code, se.Message)
+}
+
+// relayable says whether a guest status is one the app should see as it is.
+func relayable(code int) bool {
+	return (code >= 400 && code < 500) || code == http.StatusServiceUnavailable
 }
 
 // ensureMachine returns the person's VM, booting it if it does not exist yet.
@@ -515,6 +582,5 @@ func (s *Server) rosterOf(ctx context.Context, user string) ([]Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	profiles, _ := cl.AgentTypes() // display metadata only; a failure just costs labels
-	return projectRoster(roster, profiles, machine, true), nil
+	return projectRoster(roster, machine, true), nil
 }

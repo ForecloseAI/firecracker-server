@@ -14,10 +14,11 @@ PrivateTmp=yes
 # security-group mistake cannot expose the app or the VNC gateway.
 Environment=CHAT_ADDR=127.0.0.1:8090
 Environment=CHAT_VNC_ADDR=127.0.0.1:8091
-# The third cannot: it is the connected-apps broker, and guests reach it on their
-# own tap address, which changes with every VM. It opens only when COMPOSIO_API_KEY
-# is set, host-setup.sh allows exactly this port from tap+, and every request must
-# carry a ticket pinned to the guest that was issued it.
+# The third cannot: it is the guest broker, and guests reach it on their own tap
+# address, which changes with every VM. host-setup.sh allows exactly this port
+# from tap+. Under /apps/ every request must carry a ticket pinned to the guest
+# it was issued to; under /v1/ the model key is added to any request from a
+# guest address, and the guest image carries no key of its own.
 Environment=CHAT_APPS_ADDR=0.0.0.0:8092
 Environment=CHAT_ORIGIN=https://chat.usetypeo.com
 Environment=CHAT_VNC_ORIGIN=https://vnc.usetypeo.com
@@ -29,9 +30,11 @@ Environment=SUPABASE_URL=https://vpjsckvgqodzsbxuceau.supabase.co
 # it is the same key the app ships with, and row-level security plus the caller's
 # own token are what decide which rows a request may see.
 Environment=SUPABASE_PUBLISHABLE_KEY=sb_publishable_jhf9kUEdbiDVCr06NO7PTg_rNajGeut
-# CRACKED_TOKEN and COMPOSIO_API_KEY via `systemctl edit cracked-chat`, never in
-# this file. COMPOSIO_API_KEY is authority over every user's connected accounts;
-# it never leaves this process and is added to a request only on its way upstream.
+# CRACKED_TOKEN, ANTHROPIC_API_KEY and COMPOSIO_API_KEY via `systemctl edit
+# cracked-chat`, never in this file. ANTHROPIC_API_KEY is required: every
+# guest's turns run on it, and the guest image deliberately carries none.
+# COMPOSIO_API_KEY is authority over every user's connected accounts. Neither
+# leaves this process; each is added to a request only on its way upstream.
 
 ExecStart=/usr/local/bin/cracked-chat
 Restart=on-failure

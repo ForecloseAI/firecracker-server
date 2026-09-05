@@ -4,6 +4,7 @@ package hostnet
 
 import (
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 )
@@ -23,6 +24,26 @@ func SlotAddrs(slot int) (hostIP, guestIP, mac string) {
 	guestIP = fmt.Sprintf("172.16.%d.%d", g/256, g%256)
 	mac = fmt.Sprintf("02:FC:00:00:%02X:%02X", slot/256, slot%256)
 	return
+}
+
+// SlotOf is SlotAddrs run backwards for the guest address: which slot a guest
+// at addr lives in. False for anything that is not guest-shaped -- a host tap
+// address, a network or broadcast address, or anything outside 172.16/16 --
+// rather than rounding to a neighbour, because the answer names a machine. It
+// is what the host's guest broker uses to decide whether a caller is a guest.
+func SlotOf(addr netip.Addr) (int, bool) {
+	if !addr.Is4() {
+		return 0, false
+	}
+	o := addr.As4()
+	if o[0] != 172 || o[1] != 16 {
+		return 0, false
+	}
+	n := int(o[2])*256 + int(o[3])
+	if n%4 != 2 {
+		return 0, false
+	}
+	return (n - 2) / 4, true
 }
 
 // CreateTap builds a fresh tap owned by user, reclaiming any stale device of

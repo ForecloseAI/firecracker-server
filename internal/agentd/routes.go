@@ -17,9 +17,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /agents", s.handleList)
 	mux.HandleFunc("POST /agents", s.handleCreate)
+	mux.HandleFunc("PATCH /agents/{id}", s.handleUpdate)
 	mux.HandleFunc("DELETE /agents/{id}", s.handleDelete)
 	mux.HandleFunc("GET /agent-types", s.handleTypes)
 	mux.HandleFunc("GET /usage", s.handleUsage)
+	mux.HandleFunc("GET /usage/agents", s.handleAgentUsage)
 	mux.HandleFunc("GET /pending", s.handlePending)
 	mux.HandleFunc("GET /pending/events", s.handlePendingEvents)
 	mux.HandleFunc("POST /approvals/{apid}", s.handleResolve)
@@ -78,26 +80,52 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, s.sup.List())
 }
 
-// createReq is the body of POST /agents.
-type createReq struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-}
+// agentBodyCap bounds a create or update. A custom agent's role is a page or
+// two of text; anything near this is a client bug.
+const agentBodyCap = 64 << 10
 
 // handleCreate adds an agent to the roster. It does not start it: an agent
-// runs when it is first addressed.
+// runs when it is first addressed. The reply is the roster row, never the
+// record: a custom agent's record carries the person's key.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
-	var req createReq
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Type == "" {
+	var req agentapi.CreateAgentReq
+	if !decode(w, r, agentBodyCap, &req) {
+		return
+	}
+	if req.Type == "" {
 		fail(w, http.StatusBadRequest, "bad_request", "type is required", "")
 		return
 	}
-	rec, err := s.sup.Create(req.Type, req.Name)
+	rec, err := s.sup.CreateWith(req)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "agent")
 		return
 	}
-	reply(w, http.StatusCreated, rec)
+	reply(w, http.StatusCreated, s.sup.statusFor(rec))
+}
+
+// handleUpdate changes a custom agent's name, role or model, and recycles it so
+// the next reply is on the new prompt.
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	var patch agentapi.AgentPatch
+	if !decode(w, r, agentBodyCap, &patch) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := s.sup.Roster().Get(id); !ok {
+		fail(w, http.StatusNotFound, "not_found", "no such agent", "agent")
+		return
+	}
+	rec, err := s.sup.Update(id, patch)
+	if errors.Is(err, errNotCustom) {
+		fail(w, http.StatusConflict, "conflict", err.Error(), "agent")
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad_request", err.Error(), "agent")
+		return
+	}
+	reply(w, http.StatusOK, s.sup.statusFor(rec))
 }
 
 // handleDelete stops an agent and drops it from the roster. With ?purge=true
@@ -141,6 +169,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		OK: true, Ready: true, Agents: len(statuses),
 		Live: s.sup.LiveCount(), Working: working, SessionState: state,
 	})
+}
+
+// handleAgentUsage reports what each agent has spent today, this week and ever,
+// in tokens, named from the roster.
+func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request) {
+	reply(w, http.StatusOK, s.sup.AgentUsage())
 }
 
 // handleUsage reports what this machine has spent, in tokens, across every

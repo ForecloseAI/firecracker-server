@@ -144,7 +144,7 @@ func TestSkillWrittenDuringATurnRecyclesTheAgent(t *testing.T) {
 	}
 	// And the freshly composed prompt is the one that carries it.
 	skills, _ := LoadSkills("", a.dir)
-	prompt := ComposeSystemPrompt(testProfile(), roots{own: a.dir}, "", skills)
+	prompt := ComposeSystemPrompt(testProfile(), Record{ID: "boss"}, roots{own: a.dir}, "", skills)
 	if !strings.Contains(prompt, "expense-filing") {
 		t.Error("a rebuilt prompt does not list the new skill")
 	}

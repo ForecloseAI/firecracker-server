@@ -304,6 +304,10 @@ type Person struct {
 	// still reports it: the app has no other way to find out which country it
 	// should be showing, and guessing from the device is what this replaced.
 	TZ string `json:"tz,omitempty"`
+	// Country is where they live, as the ISO code the app's country list is
+	// keyed on. Stored like TZ, for TZ's reasons; it is what decides which
+	// language an agent writes in.
+	Country string `json:"country,omitempty"`
 }
 
 // EventsPage is the body of GET /agents/{id}/events?poll=1.
@@ -331,6 +335,43 @@ type UsageReport struct {
 	LastActivity   time.Time    `json:"last_activity,omitzero"`
 }
 
+// UnattributedAgent is the agent id spend recorded before usage was split by
+// agent is carried under: real money with no one to credit it to.
+const UnattributedAgent = "unattributed"
+
+// UsageWindow is spend inside one span of the person's calendar. ByModel is
+// never nil: the app maps a null list to nothing at all.
+type UsageWindow struct {
+	ByModel []ModelUsage `json:"by_model"`
+	Turns   int64        `json:"turns"`
+}
+
+// AgentUsage is one agent's spend today, this calendar week, and ever, named
+// from the roster. Retired means the agent is gone but its spend is not; OwnKey
+// means it runs on the person's own model now, so the host's price is an
+// estimate rather than its bill.
+type AgentUsage struct {
+	Agent    string      `json:"agent"`
+	Name     string      `json:"name"`
+	Retired  bool        `json:"retired"`
+	OwnKey   bool        `json:"own_key"`
+	Today    UsageWindow `json:"today"`
+	Week     UsageWindow `json:"week"`
+	Lifetime UsageWindow `json:"lifetime"`
+}
+
+// AgentUsageReport is GET /usage/agents: the per-agent view, dated on the
+// person's own clock -- the day and the Monday the windows were cut at, so a
+// reader can say what "today" meant when the report was made. Its own route,
+// because GET /usage is polled every few seconds by a dashboard that never
+// looks at this, and these windows are only ever wanted by a person.
+type AgentUsageReport struct {
+	Zone      string       `json:"zone,omitempty"`
+	Today     string       `json:"today,omitempty"`
+	WeekStart string       `json:"week_start,omitempty"`
+	Agents    []AgentUsage `json:"agents"`
+}
+
 // Profile is one kind of agent: its role prompt, its model, and what it may do.
 // Here rather than in agentd because the host renders a roster from it and must
 // not import the daemon, which would pull the model SDK into the host binary.
@@ -354,12 +395,79 @@ type Task struct {
 }
 
 // Record is one agent's durable identity: who it is, not whether it is running.
+//
+// Instructions and Model are set only for a custom agent, one the person built
+// in the app rather than picked from the gallery. The model carries the
+// person's own key, which is why a Record never leaves the guest: the host sees
+// a Status, whose ModelView has no key.
 type Record struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	CreatedAt time.Time `json:"created_at"`
-	Task      *Task     `json:"task,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Type         string       `json:"type"`
+	CreatedAt    time.Time    `json:"created_at"`
+	Task         *Task        `json:"task,omitempty"`
+	Instructions string       `json:"instructions,omitempty"`
+	Model        *ModelConfig `json:"model,omitempty"`
+}
+
+// CustomType is the profile key of an agent the person built themselves. Any
+// number of them may exist, which is the one way it differs from a gallery type.
+const CustomType = "custom"
+
+// ThinkingBudgets is how many tokens each thinking level buys the model to
+// reason with. "" is no extended thinking at all. One table, so a level is
+// validated and priced from the same place.
+var ThinkingBudgets = map[string]int64{"low": 2048, "medium": 8192, "high": 16384}
+
+// ModelConfig is a custom agent's own model: an endpoint that speaks the
+// Anthropic API, which the person pays for with their own key. The key lives
+// in agents.json on the person's own machine and nowhere else: what leaves the
+// guest is a ModelView, and an edit that carries no key keeps the stored one.
+type ModelConfig struct {
+	URL      string `json:"url"`
+	APIKey   string `json:"api_key,omitempty"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking,omitempty"`
+}
+
+// View is the config as anyone outside the guest may see it: everything but
+// the key, and whether there is one.
+func (m *ModelConfig) View() *ModelView {
+	if m == nil {
+		return nil
+	}
+	return &ModelView{URL: m.URL, Model: m.Model, Thinking: m.Thinking, KeySet: m.APIKey != ""}
+}
+
+// ModelView is ModelConfig with the key replaced by whether one is set.
+type ModelView struct {
+	URL      string `json:"url"`
+	Model    string `json:"model"`
+	Thinking string `json:"thinking,omitempty"`
+	KeySet   bool   `json:"key_set"`
+}
+
+// CreateAgentReq is the body of POST /agents. Instructions and Model are for a
+// custom agent; a gallery type ignores them.
+type CreateAgentReq struct {
+	Type         string       `json:"type"`
+	Name         string       `json:"name"`
+	Instructions string       `json:"instructions,omitempty"`
+	Model        *ModelConfig `json:"model,omitempty"`
+}
+
+// AgentPatch is the body of PATCH /agents/{id}. A nil field is left alone.
+type AgentPatch struct {
+	Name         *string     `json:"name,omitempty"`
+	Instructions *string     `json:"instructions,omitempty"`
+	Model        *ModelPatch `json:"model,omitempty"`
+}
+
+// ModelPatch replaces a custom agent's model, or with Clear returns it to the
+// default.
+type ModelPatch struct {
+	Clear bool `json:"clear,omitempty"`
+	ModelConfig
 }
 
 // Schedule is a standing instruction to message an agent at a given time.
@@ -381,16 +489,23 @@ type Schedule struct {
 	Enabled   bool      `json:"enabled"`
 }
 
-// Status is one agent as GET /agents reports it: identity plus what it is doing.
+// Status is one agent as GET /agents reports it: identity, what it is doing,
+// and the two facts of its profile a roster needs, so a reader does not have
+// to fetch the catalog to draw a row. A custom agent's row also carries the
+// role the person wrote and a view of its model.
 type Status struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	State        string `json:"state"`
-	Live         bool   `json:"live"`
-	Task         *Task  `json:"task,omitempty"`
-	LastEventID  int    `json:"last_event_id"`
-	Conversation int    `json:"conversation_bytes"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Type         string     `json:"type"`
+	Description  string     `json:"description,omitempty"`
+	Browser      bool       `json:"browser"`
+	State        string     `json:"state"`
+	Live         bool       `json:"live"`
+	Task         *Task      `json:"task,omitempty"`
+	LastEventID  int        `json:"last_event_id"`
+	Conversation int        `json:"conversation_bytes"`
+	Instructions string     `json:"instructions,omitempty"`
+	Model        *ModelView `json:"model,omitempty"`
 }
 
 // Health is GET /health. Ready is constant true rather than a real signal, and

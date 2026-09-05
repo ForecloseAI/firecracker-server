@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"cracked/internal/agentapi"
 )
@@ -26,9 +25,15 @@ type fakeGuest struct {
 	resolved      []resolution
 	resolveStatus int // non-zero to make the next resolve fail with this code
 
-	sched  []agentapi.Schedule
-	person agentapi.Person // the last profile the gateway forwarded
-	body   string          // the raw JSON of the last message, as it came off the wire
+	sched         []agentapi.Schedule
+	usage         agentapi.AgentUsageReport // what the machine says each agent has spent
+	usageHits     int                       // how often it was asked
+	created       agentapi.CreateAgentReq   // the last create the gateway forwarded
+	createStatus  int                       // non-zero to refuse the next create with this code
+	createMessage string                    // and this message
+	patched       agentapi.AgentPatch       // the last patch the gateway forwarded
+	person        agentapi.Person           // the last profile the gateway forwarded
+	body          string                    // the raw JSON of the last message, as it came off the wire
 }
 
 // resolution is one decision the gateway forwarded, kept so a test can assert
@@ -44,6 +49,7 @@ var fakeProfiles = []agentapi.Profile{
 	{Key: "boss", Title: "Boss", Description: "Runs the team"},
 	{Key: "coder", Title: "Coder", Description: "Writes code"},
 	{Key: "researcher", Title: "Researcher", Description: "Reads the web", Browser: true},
+	{Key: "custom", Title: "Custom", Description: "Built by you", Browser: true},
 }
 
 // routes wires the guest endpoints these tests depend on.
@@ -58,6 +64,7 @@ func (g *fakeGuest) routes() http.Handler {
 		json.NewEncoder(w).Encode(fakeProfiles)
 	})
 	mux.HandleFunc("POST /agents", g.create)
+	mux.HandleFunc("PATCH /agents/{id}", g.update)
 	mux.HandleFunc("DELETE /agents/{id}", g.remove)
 	mux.HandleFunc("POST /agents/{id}/messages", g.message)
 	mux.HandleFunc("GET /agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +84,12 @@ func (g *fakeGuest) routes() http.Handler {
 	mux.HandleFunc("GET /schedules", g.schedules)
 	mux.HandleFunc("DELETE /schedules/{id}", g.dropSchedule)
 	mux.HandleFunc("PUT /person", g.putPerson)
+	mux.HandleFunc("GET /usage/agents", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.usageHits++
+		json.NewEncoder(w).Encode(g.usage)
+	})
 	return mux
 }
 
@@ -103,21 +116,81 @@ func (g *fakeGuest) resolve(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"approval_id": r.PathValue("apid")})
 }
 
-// create adds a roster row, giving it the id agentd would derive from the type.
+// create adds a roster row, giving it the id agentd would derive from the type
+// -- or, for a custom agent, from the name. The last request is kept so a test
+// can see exactly what the gateway forwarded, key included.
 func (g *fakeGuest) create(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Type, Name string }
+	var req agentapi.CreateAgentReq
 	json.NewDecoder(r.Body).Decode(&req)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.created = req
+	if g.createStatus != 0 {
+		w.WriteHeader(g.createStatus)
+		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request", "message": g.createMessage})
+		return
+	}
+	// Mirrors agentd, which is the one authority: a custom agent needs a name
+	// and a role.
+	if req.Type == agentapi.CustomType && (strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Instructions) == "") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request", "message": "name: must be 1 to 40 characters"})
+		return
+	}
 	// Mirrors agentd: an empty name falls back to the lowercase type key.
-	name := req.Name
+	name, id := req.Name, req.Type
 	if name == "" {
 		name = req.Type
 	}
-	rec := agentapi.Record{ID: req.Type, Name: name, Type: req.Type, CreatedAt: time.Now()}
-	g.roster = append(g.roster, agentapi.Status{ID: rec.ID, Name: rec.Name, Type: rec.Type})
+	if req.Type == agentapi.CustomType {
+		id = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	}
+	st := agentapi.Status{ID: id, Name: name, Type: req.Type,
+		Instructions: req.Instructions, Model: req.Model.View()}
+	for _, p := range fakeProfiles {
+		if p.Key == req.Type {
+			st.Description, st.Browser = p.Description, p.Browser
+		}
+	}
+	g.roster = append(g.roster, st)
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(rec)
+	json.NewEncoder(w).Encode(st)
+}
+
+// update applies a patch the way agentd does, and keeps it for assertions.
+func (g *fakeGuest) update(w http.ResponseWriter, r *http.Request) {
+	var patch agentapi.AgentPatch
+	json.NewDecoder(r.Body).Decode(&patch)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.patched = patch
+	for i, st := range g.roster {
+		if st.ID != r.PathValue("id") {
+			continue
+		}
+		// Mirrors agentd: only a custom agent's role or model may change.
+		if st.Type != agentapi.CustomType && (patch.Instructions != nil || patch.Model != nil) {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"message": "only a custom agent's instructions or model can change"})
+			return
+		}
+		if patch.Name != nil {
+			st.Name = *patch.Name
+		}
+		if patch.Instructions != nil {
+			st.Instructions = *patch.Instructions
+		}
+		if patch.Model != nil {
+			st.Model = patch.Model.ModelConfig.View()
+			if patch.Model.Clear {
+				st.Model = nil
+			}
+		}
+		g.roster[i] = st
+		json.NewEncoder(w).Encode(st)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 
 // remove drops a roster row.
@@ -160,7 +233,7 @@ func (g *fakeGuest) message(w http.ResponseWriter, r *http.Request) {
 // The returned string is that user's access token.
 func newFake(t *testing.T) (*Server, *fakeGuest, string) {
 	t.Helper()
-	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss"}}}
+	g := &fakeGuest{roster: []agentapi.Status{{ID: "boss", Name: "Boss", Type: "boss", Description: "Runs the team"}}}
 	s, tok := serverOver(t, g)
 	return s, g, tok
 }

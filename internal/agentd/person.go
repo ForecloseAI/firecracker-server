@@ -1,8 +1,10 @@
 package agentd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -81,7 +83,68 @@ func RenderPersonSection(stateDir string) string {
 	if body == "" {
 		return ""
 	}
-	return "## About the person you work for\n\n" + body +
+	return "## About the person you work for\n\n" + body + whereTheyAre(stateDir) +
 		"\nWhen you learn something durable about them, record it with " +
 		"remember_about_person. Passing preferences for one task are not worth keeping."
+}
+
+// whereTheyAre is the fact the language rule in the base identity turns on:
+// their country when the app sent one, or, for a machine onboarded before it
+// did, their clock, which is the nearest thing to a region it knows.
+func whereTheyAre(stateDir string) string {
+	if code := readStateFile(countryPath(stateDir)); code != "" {
+		return "- Country: " + code + "\n"
+	}
+	if tz := readStateFile(zonePath(stateDir)); tz != "" {
+		return "- Their clock is " + tz + ".\n"
+	}
+	return ""
+}
+
+// countryPath is where the person's country is remembered: machine state
+// beside the zone, for the zone's reasons.
+func countryPath(stateDir string) string { return filepath.Join(stateDir, "country") }
+
+// countryShape is what the app's country list is keyed on: two capital
+// letters, an ISO 3166-1 alpha-2 code. Only the shape is checked here; the
+// list is the app's, and a code it does not know costs a line the model
+// cannot use, not a wrong clock.
+var countryShape = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// validCountry says why a code cannot be stored, and is the one place that
+// rule lives, so the handler refuses exactly what would not be kept.
+func validCountry(code string) error {
+	if !countryShape.MatchString(code) {
+		return errors.New("country must be a two-letter ISO code")
+	}
+	return nil
+}
+
+// rememberCountry stores a code, reporting whether it changed.
+func rememberCountry(stateDir, code string) bool {
+	if validCountry(code) != nil {
+		return false
+	}
+	return storeStateFile(countryPath(stateDir), code)
+}
+
+// readStateFile is one machine-state value -- the zone, the country -- read
+// back, or "" when there is not one yet. Trimmed so no caller has to defend
+// against the trailing newline a hand edit of the file would leave.
+func readStateFile(path string) string {
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(buf))
+}
+
+// storeStateFile writes one machine-state value, reporting whether it changed:
+// the same value again writes nothing, which is what tells a caller that
+// nothing has to be recomposed.
+func storeStateFile(path, value string) bool {
+	if value == readStateFile(path) {
+		return false
+	}
+	return os.WriteFile(path, []byte(value), 0o640) == nil
 }

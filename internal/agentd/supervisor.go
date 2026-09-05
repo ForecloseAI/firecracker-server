@@ -1,11 +1,13 @@
 package agentd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -38,8 +40,11 @@ type Supervisor struct {
 	catalog   *Catalog
 	model     string // overrides the profile's model when set, for cheap testing
 	maxLive   int
-	roster    *Roster
-	ctx       context.Context
+	// endpoint is how every agent on this machine reaches the model, decided
+	// once here so the startup line and the agents cannot disagree.
+	endpoint endpoint
+	roster   *Roster
+	ctx      context.Context
 
 	// wg tracks running agent goroutines so shutdown can wait for them.
 	wg sync.WaitGroup
@@ -107,7 +112,7 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	}
 	s := &Supervisor{
 		stateDir: stateDir, workspace: workspace, catalog: catalog,
-		model: model, maxLive: maxLive, roster: roster, ctx: ctx,
+		model: model, maxLive: maxLive, roster: roster, ctx: ctx, endpoint: defaultEndpoint(),
 		agents: map[string]*live{}, browser: newBrowserServer(ChromeURL, stateDir),
 		apps:  newAppsServer(ReadApps(stateDir)),
 		meter: OpenMeter(stateDir), hub: NewInteractions(), schedules: schedules,
@@ -120,6 +125,13 @@ func NewSupervisor(ctx context.Context, stateDir, workspace string,
 	go s.runSchedules()
 	return s, nil
 }
+
+// ModelRoute says how model calls travel, for the startup line. Said once at
+// boot so a guest with no way to the model is diagnosed there rather than one
+// failed turn at a time: otherwise a daemon with no route boots clean, answers
+// /health with ok:true, accepts messages with 202, and buries the real error in
+// one agent's event log.
+func (s *Supervisor) ModelRoute() string { return s.endpoint.String() }
 
 // Schedules exposes the machine's schedules, for the HTTP surface and the tools.
 func (s *Supervisor) Schedules() *ScheduleStore { return s.schedules }
@@ -148,6 +160,49 @@ func (s *Supervisor) ResolveApproval(apid string, d Decision) bool {
 // Meter exposes the machine's running spend, for the HTTP surface.
 func (s *Supervisor) Meter() *Meter { return s.meter }
 
+// AgentUsage is the per-agent spend, cut now on the person's clock and named
+// from the roster: roster order first, then agents that were retired by id,
+// then whatever was spent before agents were told apart.
+func (s *Supervisor) AgentUsage() agentapi.AgentUsageReport {
+	report := s.meter.ByAgent(personNow(s.stateDir))
+	roster := s.roster.List()
+	for i := range report.Agents {
+		nameAgent(&report.Agents[i], roster)
+	}
+	slices.SortStableFunc(report.Agents, func(a, b agentapi.AgentUsage) int {
+		return cmp.Compare(usageRank(a, roster), usageRank(b, roster))
+	})
+	return report
+}
+
+// nameAgent fills in what the roster knows about one usage row.
+func nameAgent(a *agentapi.AgentUsage, roster []Record) {
+	if a.Agent == agentapi.UnattributedAgent {
+		a.Name = "Before per-agent tracking"
+		return
+	}
+	a.Name, a.Retired = a.Agent, true
+	for _, rec := range roster {
+		if rec.ID == a.Agent {
+			a.Name, a.Retired, a.OwnKey = rec.Name, false, rec.Model != nil
+		}
+	}
+}
+
+// usageRank orders usage rows: the roster's own order, then retired agents,
+// then the unattributed carry last.
+func usageRank(a agentapi.AgentUsage, roster []Record) int {
+	for i, rec := range roster {
+		if rec.ID == a.Agent {
+			return i
+		}
+	}
+	if a.Agent == agentapi.UnattributedAgent {
+		return len(roster) + 1
+	}
+	return len(roster)
+}
+
 // Roster exposes the durable roster.
 func (s *Supervisor) Roster() *Roster { return s.roster }
 
@@ -172,7 +227,10 @@ func (s *Supervisor) List() []Status {
 // history, which is exactly wrong: an evicted agent is the one most likely to
 // have a long one.
 func (s *Supervisor) statusFor(rec Record) Status {
-	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task}
+	p, _ := s.catalog.Get(rec.Type) // an unknown type only costs the description
+	st := Status{ID: rec.ID, Name: rec.Name, Type: rec.Type, State: "idle", Task: rec.Task,
+		Description: p.Description, Browser: p.Browser,
+		Instructions: rec.Instructions, Model: rec.Model.View()}
 	l, ok := s.liveAgent(rec.ID)
 	if !ok {
 		_, last, _ := ReadLogSince(s.dirFor(rec.ID), 0)
@@ -262,7 +320,7 @@ func (s *Supervisor) start(rec Record) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	agent, err := New(rec.ID, s.dirFor(rec.ID), s.workspace, profile, s)
+	agent, err := New(rec, s.dirFor(rec.ID), s.workspace, profile, s)
 	if err != nil {
 		return nil, err
 	}
@@ -341,12 +399,144 @@ func (s *Supervisor) idleByAgeLocked() []string {
 }
 
 // Create adds an agent of the given type and starts nothing: it runs when it
-// is first addressed.
+// is first addressed. For one the person builds themselves, see CreateWith.
 func (s *Supervisor) Create(typeKey, name string) (Record, error) {
-	if _, ok := s.catalog.Get(typeKey); !ok {
-		return Record{}, fmt.Errorf("no profile %q", typeKey)
+	return s.CreateWith(agentapi.CreateAgentReq{Type: typeKey, Name: name})
+}
+
+// CreateWith adds an agent from a full request: type and name, and for a
+// custom agent the role the person wrote and the model they chose. This is
+// the one place those are checked; the host relays a refusal as it is said.
+func (s *Supervisor) CreateWith(req agentapi.CreateAgentReq) (Record, error) {
+	if _, ok := s.catalog.Get(req.Type); !ok {
+		return Record{}, fmt.Errorf("no profile %q", req.Type)
 	}
-	return s.roster.Add(typeKey, name)
+	rec := Record{Name: req.Name, Type: req.Type, Instructions: req.Instructions, Model: req.Model}
+	if req.Type == agentapi.CustomType {
+		if err := validCustom(rec); err != nil {
+			return Record{}, err
+		}
+	}
+	return s.roster.Add(rec)
+}
+
+// Update changes a custom agent's name, role or model, then makes the change
+// real on whatever is running: see refresh.
+func (s *Supervisor) Update(id string, p agentapi.AgentPatch) (Record, error) {
+	rec, err := s.roster.Update(id, func(r *Record) error { return applyPatch(r, p) })
+	if err != nil {
+		return Record{}, err
+	}
+	s.refresh(id)
+	return rec, nil
+}
+
+// refresh gets a live agent onto its new record. Idle, it is stopped now and
+// the next message starts it fresh; mid-turn, it is marked to recycle when the
+// turn ends -- the flag create_skill uses -- so the next reply is on the new
+// prompt either way. One lock hold decides once: a message arriving between
+// two decisions could otherwise start a fresh, already-correct agent and then
+// have it flagged to recycle after its first turn for nothing.
+func (s *Supervisor) refresh(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.agents[id]
+	if !ok {
+		return
+	}
+	if l.agent.quiesce() {
+		s.stopLocked(id)
+		return
+	}
+	l.agent.reload.set()
+}
+
+// errNotCustom is the refusal for editing what only a custom agent has.
+var errNotCustom = errors.New("only a custom agent's instructions or model can change")
+
+// applyPatch lays a patch over a record. Anyone may be renamed; only a custom
+// agent's role and model may change, because the shipped profiles are the
+// product and the boss is the boss.
+func applyPatch(r *Record, p agentapi.AgentPatch) error {
+	if r.Type != agentapi.CustomType && (p.Instructions != nil || p.Model != nil) {
+		return errNotCustom
+	}
+	if p.Name != nil {
+		r.Name = strings.TrimSpace(*p.Name)
+	}
+	if p.Instructions != nil {
+		r.Instructions = *p.Instructions
+	}
+	if p.Model != nil {
+		patchModel(r, p.Model)
+	}
+	if r.Type == agentapi.CustomType {
+		return validCustom(*r)
+	}
+	return validName(r.Name)
+}
+
+// patchModel replaces or clears a record's model, keeping the stored key when
+// the patch carries none.
+func patchModel(r *Record, m *agentapi.ModelPatch) {
+	if m.Clear {
+		r.Model = nil
+		return
+	}
+	next := m.ModelConfig
+	if next.APIKey == "" && r.Model != nil {
+		next.APIKey = r.Model.APIKey
+	}
+	r.Model = &next
+}
+
+// nameCap and roleCap bound what a person types for an agent: a name that fits
+// a roster row, and a role of a page or two -- well under the prompt budget the
+// agent's own instructions file already has, so one cannot crowd out the rest.
+const (
+	nameCap = 40
+	roleCap = 8000
+)
+
+// validCustom is everything a custom agent must have: a name, a role, and a
+// whole model if it has one at all.
+func validCustom(rec Record) error {
+	if err := validName(rec.Name); err != nil {
+		return err
+	}
+	if n := len([]rune(strings.TrimSpace(rec.Instructions))); n == 0 || n > roleCap {
+		return fmt.Errorf("instructions: must be 1 to %d characters", roleCap)
+	}
+	return validModel(rec.Model)
+}
+
+// validName bounds a name: something, and something that fits a roster row.
+func validName(name string) error {
+	if n := len([]rune(strings.TrimSpace(name))); n == 0 || n > nameCap {
+		return fmt.Errorf("name: must be 1 to %d characters", nameCap)
+	}
+	return nil
+}
+
+// validModel checks a custom model before it is stored: an endpoint this
+// machine may dial, a model id, a known thinking level, and a key.
+func validModel(m *agentapi.ModelConfig) error {
+	if m == nil {
+		return nil
+	}
+	if m.URL == "" || validSessionURL(m.URL) != nil {
+		return errors.New("model url: not something this machine can dial")
+	}
+	if strings.TrimSpace(m.Model) == "" {
+		return errors.New("model: a model id is required")
+	}
+	if _, ok := agentapi.ThinkingBudgets[m.Thinking]; m.Thinking != "" && !ok {
+		return fmt.Errorf("model thinking: %q is not low, medium or high", m.Thinking)
+	}
+	if m.APIKey == "" {
+		return errors.New("model: an api key is required")
+	}
+	return nil
 }
 
 // Delete stops an agent and removes it from the roster. With purge, its whole

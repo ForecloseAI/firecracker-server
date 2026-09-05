@@ -770,10 +770,10 @@ func zonePath(stateDir string) string { return filepath.Join(stateDir, "timezone
 // actually moved. Unexported: outside this file the only way to set a zone is
 // the Supervisor method below, which is what carries the adoption with it.
 func rememberZone(stateDir, tz string) bool {
-	if tz == readZoneFile(stateDir) || validZone(tz) != nil {
+	if validZone(tz) != nil {
 		return false
 	}
-	return os.WriteFile(zonePath(stateDir), []byte(tz), 0o640) == nil
+	return storeStateFile(zonePath(stateDir), tz)
 }
 
 // validZone reports whether this is a name the machine can adopt, and is the
@@ -867,15 +867,7 @@ func personNow(stateDir string) time.Time {
 }
 
 // readZoneFile returns the stored zone name, or "" when there is not one yet.
-// Trimmed here so no caller has to defend against the trailing newline a hand
-// edit of the file would leave.
-func readZoneFile(stateDir string) string {
-	buf, err := os.ReadFile(zonePath(stateDir))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(buf))
-}
+func readZoneFile(stateDir string) string { return readStateFile(zonePath(stateDir)) }
 
 // rezone recomputes the next firing of every enabled clock schedule.
 //

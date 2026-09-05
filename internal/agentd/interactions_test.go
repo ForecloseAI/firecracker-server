@@ -135,7 +135,7 @@ func ids(rs []agentapi.Raised) []string {
 // are already careful about.
 func TestResolveDoesNotStartAnAgent(t *testing.T) {
 	sup := newTestSupervisor(t)
-	if _, err := sup.Roster().Add("coder", "Coder"); err != nil {
+	if _, err := sup.Roster().Add(Record{Type: "coder", Name: "Coder"}); err != nil {
 		t.Fatal(err)
 	}
 	s := NewServer(sup)

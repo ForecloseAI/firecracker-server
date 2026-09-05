@@ -267,12 +267,12 @@ func TestNoiseIsDropped(t *testing.T) {
 }
 
 // The client upserts on an agent frame, so one that arrived without a role or
-// capabilities would wipe what GET /agents had already told it.
+// capabilities would wipe what GET /agents had already told it. The row the
+// guest reports carries both, so the feed has nothing to fetch.
 func TestAgentFrameCarriesTheProfile(t *testing.T) {
 	f := newFeed("m1", noHandoff)
-	f.profiles["coder"] = agentapi.Profile{Key: "coder", Description: "Writes code"}
 	var out strings.Builder
-	f.emitRoster(&out, []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder"}})
+	f.emitRoster(&out, []agentapi.Status{{ID: "coder", Name: "Coder", Type: "coder", Description: "Writes code"}})
 	var frame feedFrame
 	if err := json.Unmarshal(payload(t, out.String()), &frame); err != nil {
 		t.Fatal(err)

@@ -122,18 +122,6 @@ mount_ro() {
   sudo mount -o ro,loop "$image" /mnt/rootfs-ro
 }
 
-# recover_key reads the baked API key out of the CURRENT image so a rebuild
-# never needs it handed over. build-rootfs.sh only WARNS when it is missing --
-# it will happily ship an image whose every agent has an empty key.
-recover_key() {
-  mount_ro "${1:-$BASE/images/rootfs.ext4}"
-  ANTHROPIC_API_KEY="$(sudo sed -n 's/^ANTHROPIC_API_KEY=//p' /mnt/rootfs-ro/etc/cracked-agent.env)"
-  sudo umount /mnt/rootfs-ro
-  [ -n "$ANTHROPIC_API_KEY" ] || { echo "FATAL: no API key in the current image"; exit 1; }
-  export ANTHROPIC_API_KEY
-  echo "recovered the API key from the running image (${#ANTHROPIC_API_KEY} chars)"
-}
-
 # check_space refuses to start a build that cannot finish, and says what NOT to
 # delete: this host still runs the CLASSIC docker builder, so dangling images
 # ARE the layer cache. `docker image prune` to make room turns a ten-minute
@@ -161,10 +149,8 @@ build_image() {
   if ! sudo test -e "$IMAGE_BUILDING"; then
     sudo cp "$BASE/images/rootfs.ext4" "$BASE/images/rootfs.ext4.bak"
     printf '%s\n' "$COMMIT" | sudo tee "$IMAGE_BUILDING" >/dev/null
-    recover_key
   else
     echo "retrying image build; preserving the existing known-good backup"
-    recover_key "$BASE/images/rootfs.ext4.bak"
   fi
   # As ubuntu, never `sudo -E`: the script self-sudoes, and sudo resets HOME
   # and PATH, losing both the guest pubkey and the Go toolchain.
@@ -173,20 +159,24 @@ build_image() {
     "$HERE/scripts/build-rootfs.sh"
 }
 
-# verify_image proves the new image carries the binary we just built. Better
-# than grepping for a hand-picked string: a discriminator derived from an old
-# diff silently passes against a stale image, and a hash cannot.
+# verify_image proves the new image carries the binary we just built and no
+# credential. Better than grepping for a hand-picked string: a discriminator
+# derived from an old diff silently passes against a stale image, and a hash
+# cannot. The credential check is the inverse of what it used to be: the key
+# now lives only in cracked-chat's drop-in, and an image that still carries one
+# is an image every guest can read it from.
 verify_image() {
   local image="${1:-$BASE/images/rootfs.ext4}"
-  local want have keylen
+  local want have
   want="$(sha256sum "$HERE/rootfs/files/agentd" | cut -d' ' -f1)"
   mount_ro "$image"
   have="$(sudo sha256sum /mnt/rootfs-ro/usr/local/bin/agentd | cut -d' ' -f1)"
-  keylen="$(sudo sed -n 's/^ANTHROPIC_API_KEY=//p' /mnt/rootfs-ro/etc/cracked-agent.env | wc -c)"
+  local credential=0
+  sudo test ! -e /mnt/rootfs-ro/etc/cracked-agent.env || credential=1
   sudo umount /mnt/rootfs-ro
   [ "$want" = "$have" ] || { echo "FATAL: the image's agentd is not the one just built"; exit 1; }
-  [ "$keylen" -gt 20 ] || { echo "FATAL: the image shipped with no API key"; exit 1; }
-  echo "image ok: agentd ${want:0:12}, key present"
+  [ "$credential" = "0" ] || { echo "FATAL: the image still carries a credential"; exit 1; }
+  echo "image ok: agentd ${want:0:12}, no credential"
 }
 
 # stage_image rebuilds the guest image only when its recipe moved. Nothing is

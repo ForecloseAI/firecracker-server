@@ -22,9 +22,9 @@ const appsGatewayPrefix = "/apps/"
 // The provider's MCP endpoint turned out to need the PROJECT api key -- the
 // session URL alone answers Unauthorized -- and that key is authority over every
 // user's connected accounts. A guest is a machine its owner has root on, so a
-// key that reads everybody's email cannot live there. This is the broker
-// rootfs/Dockerfile:207 sketches for the Anthropic key, built for this first:
-// the host holds the credential, the guest holds a ticket to its own session.
+// key that reads everybody's email cannot live there. So the host holds the
+// credential and the guest holds a ticket to its own session. The model broker
+// beside it (LLMGateway) has the same shape minus the ticket, and says why.
 //
 // A ticket is safe to hand over because it is worthless anywhere else. It names
 // no user, it is pinned to one guest's address, and the port it works on is
@@ -140,16 +140,6 @@ func (g *AppsGateway) route(ticket, remote string) (appsRoute, bool) {
 	return r, true
 }
 
-// Routes is the handler guests reach. Everything that is not a valid ticket
-// from the right address is 404: a broker that distinguished "no such ticket"
-// from "wrong address" would be an oracle for guessing them.
-func (g *AppsGateway) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc(appsGatewayPrefix, g.serve)
-	mux.HandleFunc("/", http.NotFound)
-	return mux
-}
-
 // serve resolves the ticket and, if it names a route this guest may use, hands
 // the request to a proxy built for that one route.
 //
@@ -198,14 +188,8 @@ func (g *AppsGateway) proxyTo(route appsRoute) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL, r.Out.Host = route.upstream, route.upstream.Host
-			kept := make(http.Header, len(forwardedHeaders))
-			for _, h := range forwardedHeaders {
-				if v := r.Out.Header.Values(h); len(v) > 0 {
-					kept[http.CanonicalHeaderKey(h)] = v
-				}
-			}
-			kept.Set("x-api-key", g.key)
-			r.Out.Header = kept
+			r.Out.Header = keepHeaders(r.Out.Header, forwardedHeaders)
+			r.Out.Header.Set("x-api-key", g.key)
 		},
 		FlushInterval: -1, // the MCP transport streams; buffering would stall it
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

@@ -32,6 +32,8 @@ type Server struct {
 	kinds *appCaps
 	// gw is how a guest reaches its session without holding the credential.
 	gw *AppsGateway
+	// llm lends the host's model credential to guests, request by request.
+	llm *LLMGateway
 
 	mu      sync.Mutex
 	bridges map[string]*Bridge
@@ -60,20 +62,13 @@ func NewServer(cfg Config, control *Control, caps *Caps, auth *Verifier) *Server
 		s.catalog = newAppCatalog(s.composio)
 		s.kinds = newAppCaps(s.composio)
 	}
+	s.llm = NewLLMGateway(cfg.AnthropicKey, cfg.AnthropicUpstream)
 	return s
 }
 
-// AppsRoutes is the guest-facing broker, or nil when no provider is configured.
-//
-// Its own listener and its own handler tree, deliberately: it is the one surface
-// an untrusted guest can reach, and mounting it on the mux that serves /v1 and
-// the operator page would put it one routing mistake away from both.
-func (s *Server) AppsRoutes() http.Handler {
-	if s.gw == nil {
-		return nil
-	}
-	return s.gw.Routes()
-}
+// GuestRoutes is the listener a guest reaches: both brokers on one mux, with
+// their own logging. See guestRoutes for why it is kept apart from Routes.
+func (s *Server) GuestRoutes() http.Handler { return guestRoutes(s.gw, s.llm) }
 
 // Routes builds the handler, wrapped in stdlib CSRF protection.
 func (s *Server) Routes() http.Handler {

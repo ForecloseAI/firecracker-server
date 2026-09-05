@@ -1,8 +1,11 @@
 package chat
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -35,11 +38,22 @@ type Config struct {
 	ComposioKey string
 	// ComposioBase overrides the provider's REST root, for a test host.
 	ComposioBase string
-	// AppsAddr is the broker guests dial to reach their own session. Bound on
-	// every interface rather than loopback, because it has to be reachable from
-	// a tap device -- the firewall and the ticket check are what keep it shut,
-	// and the port is not in the security group.
+	// AppsAddr is the guest listener: the connected-apps broker and the model
+	// broker share it. Bound on every interface rather than loopback, because
+	// it has to be reachable from a tap device -- the firewall and each
+	// broker's own gate are what keep it shut, and the port is not in the
+	// security group.
 	AppsAddr string
+
+	// AnthropicKey is the model credential every guest's turns run on. It lives
+	// ONLY here: the guest image carries none, and agentd dials this host's
+	// broker for every model call. Required, because a chat host without it is
+	// every machine on the fleet unable to take a turn.
+	AnthropicKey string
+	// AnthropicUpstream is where brokered model calls go. Scheme and host only;
+	// the guest's own path and query ride through. Parsed here, once, so the
+	// broker is handed something already known to be sound.
+	AnthropicUpstream *url.URL
 	// ComposioCallback is where a person lands after approving an app. It has to
 	// be a page this service serves, because the browser coming back from a
 	// provider carries no token and a custom scheme is not reliably followed
@@ -63,7 +77,11 @@ func LoadConfig() (Config, error) {
 		ComposioKey:         env("COMPOSIO_API_KEY", ""),
 		ComposioBase:        env("COMPOSIO_BASE_URL", ""),
 		AppsAddr:            env("CHAT_APPS_ADDR", "0.0.0.0:8092"),
+
+		AnthropicKey: env("ANTHROPIC_API_KEY", ""),
 	}
+	// A parse failure leaves nil, which validate refuses by name.
+	c.AnthropicUpstream, _ = url.Parse(env("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"))
 	c.ComposioCallback = env("COMPOSIO_CALLBACK_URL", c.Origin+connectedPath)
 	return c, c.validate()
 }
@@ -73,7 +91,7 @@ func LoadConfig() (Config, error) {
 func (c Config) validate() error {
 	for _, f := range []struct{ name, val string }{
 		{"CHAT_ORIGIN", c.Origin}, {"CHAT_VNC_ORIGIN", c.VNCOrigin}, {"CRACKED_TOKEN", c.Token},
-		{"SUPABASE_URL", c.SupabaseURL},
+		{"SUPABASE_URL", c.SupabaseURL}, {"ANTHROPIC_API_KEY", c.AnthropicKey},
 	} {
 		if f.val == "" {
 			return fmt.Errorf("%s must be set", f.name)
@@ -91,22 +109,45 @@ func (c Config) validate() error {
 	if c.ComposioKey != "" && c.SupabasePublishable == "" {
 		return fmt.Errorf("SUPABASE_PUBLISHABLE_KEY must be set when COMPOSIO_API_KEY is")
 	}
-	// Checked only when the feature is on. env() gives this a default, so it can
-	// never be empty; the failure this catches is a missing port -- "8092" or a
-	// bare host -- which is what makes NewAppsGateway return nil, and that opens
-	// no listener and short-circuits every push. Connected apps off, with a valid
-	// key set and nothing said.
-	//
-	// It stops there on purpose. SplitHostPort is happy with a non-numeric port,
-	// but that one does not fail quietly: the gateway is built, listen() cannot
-	// bind, and the service dies saying so. Only the silent case needs catching
-	// here.
-	if c.ComposioKey != "" {
-		if _, _, err := net.SplitHostPort(c.AppsAddr); err != nil {
-			return fmt.Errorf("CHAT_APPS_ADDR must be host:port: %w", err)
-		}
+	return c.validateGuest()
+}
+
+// validateGuest checks the guest listener and where its model broker forwards.
+// The listener always opens, so its address is checked unconditionally; a
+// non-numeric port is left to listen(), which fails loudly on its own.
+func (c Config) validateGuest() error {
+	if _, _, err := net.SplitHostPort(c.AppsAddr); err != nil {
+		return fmt.Errorf("CHAT_APPS_ADDR must be host:port: %w", err)
+	}
+	if err := validUpstream(c.AnthropicUpstream); err != nil {
+		return fmt.Errorf("ANTHROPIC_UPSTREAM %w", err)
 	}
 	return nil
+}
+
+// validUpstream accepts a bare https origin, or plain http on loopback for a
+// test server. The key rides on every request, so anything else in the clear is
+// refused; a path or query would be glued onto the SDK's own, so those are too.
+func validUpstream(u *url.URL) error {
+	if u == nil || u.Host == "" {
+		return errors.New("must be an absolute URL")
+	}
+	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {
+		return errors.New("must be scheme and host only")
+	}
+	if u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname())) {
+		return nil
+	}
+	return errors.New("must be https, or the key travels in the clear")
+}
+
+// isLoopback says whether a host names this machine, where plaintext is fine.
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 // env reads a variable with a fallback.

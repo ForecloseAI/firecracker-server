@@ -1,22 +1,24 @@
 package chat
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
 
-// upstreamSpy stands in for the provider's MCP endpoint and records what the
+// upstreamSpy stands in for whatever a broker forwards to and records what the
 // broker actually sent it.
 type upstreamSpy struct {
-	srv    *httptest.Server
-	apikey string
-	auth   string
-	path   string
+	srv         *httptest.Server
+	hits        int
+	path, query string
+	hdr         http.Header
+	body        string
 }
 
 // newUpstream starts a spy that answers everything with "upstream ok".
@@ -24,23 +26,40 @@ func newUpstream(t *testing.T) *upstreamSpy {
 	t.Helper()
 	spy := &upstreamSpy{}
 	spy.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		spy.apikey, spy.auth, spy.path = r.Header.Get("x-api-key"), r.Header.Get("Authorization"), r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		spy.hits++
+		spy.path, spy.query, spy.hdr, spy.body = r.URL.Path, r.URL.RawQuery, r.Header.Clone(), string(b)
 		w.Write([]byte("upstream ok"))
 	}))
 	t.Cleanup(spy.srv.Close)
 	return spy
 }
 
-// ask sends one request through the broker from a chosen guest address.
-func ask(gw *AppsGateway, url, from string, hdr map[string]string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0"}`))
+// askGuest sends one request to the guest listener from a chosen address.
+func askGuest(h http.Handler, method, target, from string, hdr map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(`{"jsonrpc":"2.0"}`))
 	req.RemoteAddr = from + ":51234"
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
-	gw.Routes().ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// ask is askGuest for the apps broker alone: a POST through the real guest mux.
+func ask(gw *AppsGateway, url, from string, hdr map[string]string) *httptest.ResponseRecorder {
+	return askGuest(guestRoutes(gw, nil), http.MethodPost, url, from, hdr)
+}
+
+// captureLog routes the standard logger into a buffer for one test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	was := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(was) })
+	return &buf
 }
 
 // The happy path: the guest reaches its session and the credential is added on
@@ -62,8 +81,8 @@ func TestTheBrokerAddsTheCredentialTheGuestNeverHas(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != "upstream ok" {
 		t.Fatalf("status %d body %q", rec.Code, rec.Body)
 	}
-	if up.apikey != "the-project-key" {
-		t.Errorf("upstream saw x-api-key %q", up.apikey)
+	if up.hdr.Get("x-api-key") != "the-project-key" {
+		t.Errorf("upstream saw x-api-key %q", up.hdr.Get("x-api-key"))
 	}
 	if up.path != "/mcp/sess_1" {
 		t.Errorf("upstream saw path %q", up.path)
@@ -82,7 +101,7 @@ func TestATicketOnlyWorksFromTheGuestItWasMintedFor(t *testing.T) {
 			t.Errorf("a request from %s got %d", from, rec.Code)
 		}
 	}
-	if up.apikey != "" {
+	if up.hdr.Get("x-api-key") != "" {
 		t.Error("upstream was reached by the wrong guest")
 	}
 }
@@ -110,11 +129,11 @@ func TestAGuestCannotSmuggleItsOwnCredentials(t *testing.T) {
 		"x-api-key":     "a-key-the-guest-made-up",
 		"Authorization": "Bearer stolen",
 	})
-	if up.apikey != "the-real-key" {
-		t.Errorf("the guest overrode the credential: %q", up.apikey)
+	if up.hdr.Get("x-api-key") != "the-real-key" {
+		t.Errorf("the guest overrode the credential: %q", up.hdr.Get("x-api-key"))
 	}
-	if up.auth != "" {
-		t.Errorf("the guest's Authorization was forwarded: %q", up.auth)
+	if up.hdr.Get("Authorization") != "" {
+		t.Errorf("the guest's Authorization was forwarded: %q", up.hdr.Get("Authorization"))
 	}
 }
 
@@ -210,9 +229,7 @@ func TestOnlyTheHeadersTheTransportNeedsAreForwarded(t *testing.T) {
 // The journal is read aloud in debugging sessions, so a session url in it is a
 // credential in a paste buffer.
 func TestAFailedHopKeepsTheSessionOutOfTheLog(t *testing.T) {
-	var buf strings.Builder
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
+	buf := captureLog(t)
 
 	gw := NewAppsGateway("k", "0.0.0.0:8092")
 	url, _ := gw.Register("m1", "172.16.0.2", "172.16.0.1", "http://127.0.0.1:1/mcp/sess_SECRET")

@@ -18,7 +18,7 @@ func TestWhatWeKnowAboutThePersonReachesTheSystemPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := ComposeSystemPrompt(Profile{Prompt: "role"}, roots{own: t.TempDir()}, state, nil)
+	got := ComposeSystemPrompt(Profile{Prompt: "role"}, Record{ID: "boss"}, roots{own: t.TempDir()}, state, nil)
 	for _, want := range []string{"About the person", "Naman", "Founder"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the prompt never mentions %q", want)
@@ -29,7 +29,7 @@ func TestWhatWeKnowAboutThePersonReachesTheSystemPrompt(t *testing.T) {
 // An agent with no profile yet must get no section at all, rather than a heading
 // announcing that we know nothing -- which spends prefix tokens saying only that.
 func TestNoProfileAddsNothingToThePrompt(t *testing.T) {
-	got := ComposeSystemPrompt(Profile{Prompt: "role"}, roots{own: t.TempDir()}, t.TempDir(), nil)
+	got := ComposeSystemPrompt(Profile{Prompt: "role"}, Record{ID: "boss"}, roots{own: t.TempDir()}, t.TempDir(), nil)
 	if strings.Contains(got, "About the person") {
 		t.Error("an empty profile still added its heading to the prompt")
 	}
@@ -238,5 +238,55 @@ func TestGetPersonReportsTheZone(t *testing.T) {
 	}
 	if got := do(t, srv, "GET", "/person", "").Body.String(); !strings.Contains(got, "Asia/Kolkata") {
 		t.Errorf("GET /person = %s, want it to carry the zone", got)
+	}
+}
+
+// The country is what sets the language an agent writes in. It is machine
+// state like the zone, and it reaches the prompt as one line; a machine
+// onboarded before countries were sent gets its clock instead, the nearest
+// thing to a region it knows.
+func TestTheCountrySetsTheLanguageLine(t *testing.T) {
+	state := t.TempDir()
+	WritePerson(state, agentapi.Person{Name: "Naman"})
+	rememberZone(state, "Asia/Kolkata")
+	got := ComposeSystemPrompt(Profile{}, Record{ID: "boss"}, roots{own: t.TempDir()}, state, nil)
+	if !strings.Contains(got, "Their clock is Asia/Kolkata") {
+		t.Errorf("with no country the clock was not offered:\n%s", got)
+	}
+	if !rememberCountry(state, "IN") {
+		t.Fatal("a valid code was not stored")
+	}
+	got = ComposeSystemPrompt(Profile{}, Record{ID: "boss"}, roots{own: t.TempDir()}, state, nil)
+	if !strings.Contains(got, "Country: IN") || strings.Contains(got, "Their clock is") {
+		t.Errorf("the country line is wrong:\n%s", got)
+	}
+	if rememberCountry(state, "IN") {
+		t.Error("storing the same code again counted as a change")
+	}
+}
+
+// A country rides with the zone: stored as machine state, echoed on GET so a
+// reinstall can show it, refused when it is not a code, and kept through a
+// zone-only save -- which is the settings screen moving the clock.
+func TestCountryIsStoredEchoedRefusedAndKept(t *testing.T) {
+	sup := newTestSupervisor(t)
+	srv := NewServer(sup)
+	if w := do(t, srv, "PUT", "/person", `{"name":"Naman","tz":"Asia/Kolkata","country":"IN"}`); w.Code != 204 {
+		t.Fatalf("put = %d: %s", w.Code, w.Body)
+	}
+	if got := do(t, srv, "GET", "/person", "").Body.String(); !strings.Contains(got, `"country":"IN"`) {
+		t.Errorf("GET /person = %s, want the country", got)
+	}
+	if w := do(t, srv, "PUT", "/person", `{"tz":"Europe/Berlin"}`); w.Code != 204 {
+		t.Fatalf("zone-only put = %d: %s", w.Code, w.Body)
+	}
+	if got := readStateFile(countryPath(sup.stateDir)); got != "IN" {
+		t.Errorf("a zone-only save changed the country to %q", got)
+	}
+	if w := do(t, srv, "PUT", "/person", `{"country":"india"}`); w.Code != 400 {
+		t.Errorf("a bad code was accepted: %d", w.Code)
+	}
+	if w := do(t, srv, "PUT", "/person", `{"country":"DE"}`); w.Code != 204 || readStateFile(countryPath(sup.stateDir)) != "DE" {
+		t.Errorf("a country-only save did not land: %d %q", w.Code, readStateFile(countryPath(sup.stateDir)))
 	}
 }

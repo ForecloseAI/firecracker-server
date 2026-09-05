@@ -61,6 +61,14 @@ func (c *Client) Usage() (agentapi.UsageReport, error) {
 	return r, err
 }
 
+// AgentUsage is what each agent on the machine has spent today, this week and
+// ever, in tokens, named from the roster.
+func (c *Client) AgentUsage() (agentapi.AgentUsageReport, error) {
+	var r agentapi.AgentUsageReport
+	err := c.get("/usage/agents", &r)
+	return r, err
+}
+
 // Agents lists the roster. This is the call that makes every other one
 // possible: there is no implicit "the agent" any more, so a caller that wants
 // to reach all of them has to ask which exist.
@@ -124,11 +132,28 @@ func (c *Client) post(path string, body any, idempotencyKey string) error {
 type StatusError struct {
 	Code int
 	Path string
+	// Message is what the guest said, when it said anything: agentd answers a
+	// refusal with {"error", "message", "resource"}, and the message is the
+	// part a person can act on ("instructions: longer than 8000 characters").
+	Message string
 }
 
 // Error renders the refusal.
 func (e *StatusError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("agent %s: %d: %s", e.Path, e.Code, e.Message)
+	}
 	return fmt.Sprintf("agent %s: %d", e.Path, e.Code)
+}
+
+// refusal reads a non-2xx reply into a StatusError, keeping the guest's own
+// message so the gateway can pass it on instead of re-deriving it.
+func refusal(resp *http.Response, path string) *StatusError {
+	var body struct {
+		Message string `json:"message"`
+	}
+	json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body)
+	return &StatusError{Code: resp.StatusCode, Path: path, Message: body.Message}
 }
 
 // write posts a JSON body on the longer timeout and decodes the reply. Used for
@@ -155,8 +180,7 @@ func (c *Client) decode(req *http.Request, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return &StatusError{Code: resp.StatusCode, Path: path}
+		return refusal(resp, path)
 	}
 	if out == nil {
 		return nil
@@ -208,16 +232,23 @@ type Send struct {
 	File *agentapi.File `json:"file,omitempty"`
 }
 
-// CreateAgent adds an agent of the given type to the roster. It does not start
-// it -- an agent runs when it is first addressed.
+// CreateAgent adds an agent to the roster and returns it as the roster reports
+// it -- never the record, which for a custom agent carries the person's key. It
+// does not start it: an agent runs when it is first addressed.
 //
 // The name is passed explicitly because the daemon falls back to the TYPE KEY
 // when it is empty, which is lowercase: the roster card would read "researcher"
 // where the gallery card the person tapped said "Researcher".
-func (c *Client) CreateAgent(typeKey, name string) (agentapi.Record, error) {
-	var out agentapi.Record
-	body := map[string]string{"type": typeKey, "name": name}
-	err := c.write(http.MethodPost, "/agents", body, &out)
+func (c *Client) CreateAgent(req agentapi.CreateAgentReq) (agentapi.Status, error) {
+	var out agentapi.Status
+	err := c.write(http.MethodPost, "/agents", req, &out)
+	return out, err
+}
+
+// UpdateAgent changes a custom agent's name, role or model.
+func (c *Client) UpdateAgent(id string, p agentapi.AgentPatch) (agentapi.Status, error) {
+	var out agentapi.Status
+	err := c.write(http.MethodPatch, "/agents/"+id, p, &out)
 	return out, err
 }
 

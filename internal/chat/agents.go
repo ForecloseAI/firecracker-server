@@ -2,6 +2,7 @@ package chat
 
 import (
 	"hash/fnv"
+	"strings"
 	"time"
 	"unicode"
 
@@ -31,6 +32,11 @@ type Agent struct {
 	Machine      string       `json:"machine"`
 	Stats        AgentStats   `json:"stats"`
 	Capabilities Capabilities `json:"capabilities"`
+	// Custom marks an agent the person built: Instructions is the role they
+	// wrote, and Model their own model if they chose one, as the guest views it.
+	Custom       bool                `json:"custom"`
+	Instructions string              `json:"instructions,omitempty"`
+	Model        *agentapi.ModelView `json:"model,omitempty"`
 }
 
 // AgentStats is the three tiles on the detail screen. Zero for now: the real
@@ -152,8 +158,8 @@ func projectTemplates(profiles []agentapi.Profile, roster []agentapi.Status) []T
 	}
 	out := make([]Template, 0, len(profiles))
 	for _, p := range profiles {
-		if p.Key == agentapi.BossID {
-			continue
+		if p.Key == agentapi.BossID || p.Key == agentapi.CustomType {
+			continue // the boss is already there; a custom agent is built, not picked
 		}
 		out = append(out, projectTemplate(p, active[p.Key]))
 	}
@@ -180,26 +186,47 @@ var shapes = map[string]string{
 // passed in rather than read off Status.Live: Live means "holds a goroutine right
 // now", and an idle agent is evicted to save memory, so using it would show a
 // perfectly healthy agent as offline.
-func projectRoster(roster []agentapi.Status, profiles []agentapi.Profile, machine string, online bool) []Agent {
-	byKey := map[string]agentapi.Profile{}
-	for _, p := range profiles {
-		byKey[p.Key] = p
-	}
+func projectRoster(roster []agentapi.Status, machine string, online bool) []Agent {
 	out := make([]Agent, 0, len(roster))
 	for _, st := range roster {
-		out = append(out, projectAgent(st, byKey[st.Type], machine, online))
+		out = append(out, projectAgent(st, machine, online))
 	}
 	return out
 }
 
-// projectAgent builds one row.
-func projectAgent(st agentapi.Status, p agentapi.Profile, machine string, online bool) Agent {
-	return Agent{
-		ID: st.ID, Name: st.Name, Role: p.Description,
+// projectAgent builds one row. The row carries its profile's description and
+// browser flag, so nothing here has to fetch the catalog. A custom agent's role
+// is the opening of what the person wrote, when they wrote anything.
+func projectAgent(st agentapi.Status, machine string, online bool) Agent {
+	a := Agent{
+		ID: st.ID, Name: st.Name, Role: st.Description,
 		Initial: initialOf(st.Name), Hue: hueOf(st.ID), Shape: shapeOf(st.Type),
 		Online: online, Task: taskOf(st), State: stateOf(st), Machine: machine + " · Linux",
-		Capabilities: Capabilities{Browse: p.Browser},
+		Capabilities: Capabilities{Browse: st.Browser},
 	}
+	if st.Type == agentapi.CustomType {
+		a.Custom, a.Instructions, a.Model = true, st.Instructions, st.Model
+		if role := roleOf(st.Instructions); role != "" {
+			a.Role = role
+		}
+	}
+	return a
+}
+
+// roleCap is how much of a custom agent's instructions the roster shows.
+const roleCap = 60
+
+// roleOf is the one-line role for an agent the person described in prose: the
+// first sentence, cut to fit the roster row.
+func roleOf(instructions string) string {
+	line := strings.TrimSpace(instructions)
+	if i := strings.IndexAny(line, ".\n!?"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	if r := []rune(line); len(r) > roleCap {
+		line = strings.TrimSpace(string(r[:roleCap-1])) + "…"
+	}
+	return line
 }
 
 // stateOf is what the agent is doing. An agent that has never been started

@@ -40,11 +40,9 @@ func run() error {
 	srv := chat.NewServer(cfg, control, caps, auth)
 	go listen(cfg.Addr, srv.Routes(), "chat")
 	go listen(cfg.VNCAddr, gw.Routes(), "vnc")
-	// The one listener a guest can reach. Started only when a provider is
-	// configured, so a deployment without one opens no guest-facing port at all.
-	if apps := srv.AppsRoutes(); apps != nil {
-		go listen(cfg.AppsAddr, apps, "apps")
-	}
+	// The one listener a guest can reach: the connected-apps broker and the
+	// model broker share it. Always open, because the model key is required.
+	go listen(cfg.AppsAddr, srv.GuestRoutes(), "guest")
 	return waitForSignal()
 }
 
