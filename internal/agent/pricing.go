@@ -46,7 +46,22 @@ var priceTable = map[string]rate{
 }
 
 // rateFor finds a model's price by longest matching prefix.
+//
+// The id is put into this table's dialect first, which is two differences, not
+// one. A gateway prefixes by provider, and it spells a version with a dot where
+// Anthropic uses a dash: "anthropic/claude-haiku-4.5" and "claude-haiku-4-5"
+// are the same model at the same rates.
+//
+// Stripping the prefix alone is worse than doing nothing, and Opus is why.
+// "claude-haiku-4.5" simply misses and reads as unpriced, but "claude-opus-4.5"
+// still HasPrefix-matches the shorter "claude-opus-4" -- so the longest match is
+// a key three times the real rate, and the bill is wrong rather than absent.
+// Normalising both differences is what makes the fallback safe to have.
 func rateFor(model string) (rate, bool) {
+	if _, rest, found := strings.Cut(model, "/"); found {
+		model = rest
+	}
+	model = strings.ReplaceAll(model, ".", "-")
 	best, found := "", rate{}
 	for prefix, r := range priceTable {
 		if strings.HasPrefix(model, prefix) && len(prefix) > len(best) {
@@ -57,7 +72,15 @@ func rateFor(model string) (rate, bool) {
 }
 
 // costOf prices one model's token totals, reporting whether it could.
+//
+// An endpoint that priced the call itself is the better authority and is taken
+// at its word: it knows its own fees and which provider it actually routed to,
+// neither of which a table here can. The table answers for everything else --
+// Anthropic direct, and every row written before any endpoint reported a figure.
 func costOf(model string, u agentapi.Usage) (float64, bool) {
+	if u.CostUSD > 0 {
+		return u.CostUSD, true
+	}
 	r, ok := rateFor(model)
 	if !ok {
 		return 0, false

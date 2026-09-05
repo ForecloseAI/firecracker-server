@@ -517,10 +517,14 @@ func (a *Agent) systemBlocks() []anthropic.BetaTextBlockParam {
 // params builds the request for one turn from a candidate history.
 //
 // Thinking raises the ceiling by its own budget, because the budget has to fit
-// under max_tokens. Temperature is never set: thinking forbids it. Context
-// management and the betas go only to Anthropic itself; an endpoint of the
-// person's own that speaks the API is sent plain requests, and compaction
-// still bounds how long its conversation can grow.
+// under max_tokens. Temperature is never set: thinking forbids it.
+//
+// Context management and the betas are withheld only from an endpoint we know
+// nothing about -- a URL the person pasted -- which is sent plain requests, and
+// where compaction still bounds how long its conversation can grow. Our own
+// broker gets them: OpenRouter documents context_management as a request field,
+// and without it every tool result in a long history is re-billed uncached on
+// every turn.
 func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunnerParams {
 	p := anthropic.BetaMessageNewParams{
 		Model: anthropic.Model(a.ep.model), MaxTokens: maxTokens,
@@ -531,7 +535,7 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 		p.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(budget)
 		p.MaxTokens = maxTokens + budget
 	}
-	if !a.ep.foreign {
+	if a.ep.known() {
 		p.ContextManagement = contextManagement()
 		p.Betas = betasFor(budget > 0)
 	}
@@ -724,14 +728,55 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 }
 
 // usageOf copies one response's token counts onto the wire type. Shared with
-// the compaction call, which books the same four fields.
+// the compaction call, which books the same fields.
 func usageOf(u anthropic.BetaUsage) Usage {
 	return Usage{
 		InputTokens:              u.InputTokens,
 		OutputTokens:             u.OutputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CostUSD:                  reportedCost(u),
 	}
+}
+
+// reportedCost is what the endpoint says the call cost, in US dollars.
+//
+// OpenRouter reports two figures and how to combine them depends on is_byok,
+// which is why that flag is read rather than assumed. Both shapes verified
+// against the live API, 2026-09-06:
+//
+//	byok:      cost 0          upstream_inference_cost 0.000053
+//	not byok:  cost 0.0000253  upstream_inference_cost 0.0000253
+//
+// On a BYOK call the inference is billed to our own provider account and cost
+// is only what OpenRouter charged on top -- zero while under the free monthly
+// allowance -- so the bill is the two added. Off BYOK, cost IS the bill and
+// upstream_inference_cost is the same money described a second way; adding
+// them there would double every turn.
+//
+// The docs say upstream_inference_cost is "0 or null" for non-BYOK requests.
+// It is not, which is the whole reason this reads is_byok instead of treating
+// a populated upstream figure as proof of anything.
+//
+// Anthropic returns none of it, so this is zero there and the host's price
+// table answers instead. The SDK has no struct member for these fields -- they
+// are nobody's idea of the Messages API -- but it keeps the raw block, so they
+// survive unmarshalling and can be read back out.
+func reportedCost(u anthropic.BetaUsage) float64 {
+	var r struct {
+		Cost        float64 `json:"cost"`
+		IsBYOK      bool    `json:"is_byok"`
+		CostDetails struct {
+			UpstreamInferenceCost float64 `json:"upstream_inference_cost"`
+		} `json:"cost_details"`
+	}
+	if err := json.Unmarshal([]byte(u.RawJSON()), &r); err != nil {
+		return 0
+	}
+	if r.IsBYOK {
+		return r.Cost + r.CostDetails.UpstreamInferenceCost
+	}
+	return r.Cost
 }
 
 // bookUsage puts one response's tokens in both places that account for spend.

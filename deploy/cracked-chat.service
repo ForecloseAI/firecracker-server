@@ -30,8 +30,8 @@ Environment=SUPABASE_URL=https://vpjsckvgqodzsbxuceau.supabase.co
 # it is the same key the app ships with, and row-level security plus the caller's
 # own token are what decide which rows a request may see.
 Environment=SUPABASE_PUBLISHABLE_KEY=sb_publishable_jhf9kUEdbiDVCr06NO7PTg_rNajGeut
-# CRACKED_TOKEN, ANTHROPIC_API_KEY and COMPOSIO_API_KEY via `systemctl edit
-# cracked-chat`, never in this file. ANTHROPIC_API_KEY is required: every
+# CRACKED_TOKEN, OPENROUTER_API_KEY and COMPOSIO_API_KEY via `systemctl edit
+# cracked-chat`, never in this file. OPENROUTER_API_KEY is required: every
 # guest's turns run on it, and the guest image deliberately carries none.
 # COMPOSIO_API_KEY is authority over every user's connected accounts. Neither
 # leaves this process; each is added to a request only on its way upstream.

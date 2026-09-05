@@ -226,6 +226,7 @@ func addUsage(into *agentapi.Usage, u agentapi.Usage) {
 	into.CacheReadInputTokens += u.CacheReadInputTokens
 	into.ClearedInputTokens += u.ClearedInputTokens
 	into.ClearedToolUses += u.ClearedToolUses
+	into.CostUSD += u.CostUSD
 }
 
 // Report is the machine-wide total the host's dashboard has always read:

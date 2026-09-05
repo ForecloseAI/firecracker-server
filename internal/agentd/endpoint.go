@@ -30,15 +30,11 @@ const brokerPort = "8092"
 // so any non-empty string does; this one says what it is in a capture.
 const brokerKey = "brokered"
 
-// appURL and appName are what OpenRouter attributes a request to, in its
-// HTTP-Referer and X-Title headers: the service making the call and its name.
-// appURL is CHAT_ORIGIN -- see internal/chat/config.go -- stated again rather
-// than imported, because the guest cannot depend on chat. Constants, not
-// config: they say who we are, which does not vary per machine.
-const (
-	appURL  = "https://chat.usetypeo.com"
-	appName = "AutoBots"
-)
+// appURL is what OpenRouter attributes a request to, in its HTTP-Referer
+// header. It is CHAT_ORIGIN -- see internal/chat/config.go -- stated again
+// rather than imported, because the guest has no CHAT_ORIGIN to read. The name
+// beside it does not need restating: agentapi.AppName serves both sides.
+const appURL = "https://chat.usetypeo.com"
 
 // routeTable is the kernel's routing table. The guest's default route is its
 // tap gateway, which is the host, which is where the broker listens. A var so
@@ -47,10 +43,9 @@ var routeTable = "/proc/net/route"
 
 // endpoint is where one agent's model calls go and what they present.
 //
-// Empty means the SDK's own environment: a credential in ANTHROPIC_API_KEY or
-// ANTHROPIC_AUTH_TOKEN, and whatever ANTHROPIC_BASE_URL says. That is how a
-// developer's laptop and every offline test run. A guest has none of those --
-// the image ships no credential on purpose -- and dials the host instead.
+// A guest ships no credential on purpose and dials the host's broker. A laptop
+// with OPENROUTER_API_KEY calls OpenRouter directly on it, which is the same
+// request over the same protocol -- so what is proved locally is what runs.
 type endpoint struct {
 	baseURL string
 	key     string
@@ -58,84 +53,108 @@ type endpoint struct {
 	// agent whatever the person chose, with how much it should reason.
 	model    string
 	thinking string
-	// foreign marks an endpoint of the person's own that is not Anthropic
-	// itself -- OpenRouter's Anthropic-compatible surface, typically. Requests
-	// to it are plain: no betas, no context management, since another service
-	// that speaks the API need not honour them. Everything else -- the
-	// environment, the broker, api.anthropic.com on their own key -- is
-	// Anthropic, and the zero value says so.
-	foreign bool
+	// bearer says to authenticate with Authorization rather than the x-api-key
+	// header alone, and to say who is calling. True where the key is the
+	// caller's own AND the endpoint is not Anthropic itself: OpenRouter wants a
+	// bearer, Anthropic wants the key header, and a brokered request wants
+	// neither because the host sets both on its own key.
+	bearer bool
+	// summary is the cheap model to compact with, in the id dialect this
+	// endpoint speaks -- OpenRouter prefixes by provider, Anthropic does not,
+	// and each rejects the other's spelling. Empty is the whole of what we know
+	// about an endpoint somebody pasted a URL for: see known.
+	//
+	// It travels with the endpoint rather than being one constant because
+	// compaction is the call nobody watches. A wrong id there does not fail a
+	// turn; it fails inside compactIfNeeded, which logs and returns, so the
+	// conversation silently stops being trimmed and re-pays its whole history
+	// on every turn after that.
+	summary string
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
 	err error
 }
 
+// known says whether this is a service we recognise, which is what decides
+// whether the extras can be relied on: betas and context management go only to
+// an endpoint we chose, never to a URL somebody pasted, because a service that
+// merely speaks the API need not honour them. Knowing its cheap model is the
+// same knowledge, so one field answers both.
+func (ep endpoint) known() bool { return ep.summary != "" }
+
 // defaultEndpoint decides how this process reaches the model. Decided once,
 // by the supervisor, so the startup line and every agent agree.
 //
-// A credential in the environment wins outright, ANTHROPIC_BASE_URL included,
-// so nothing changes for anyone who has one. Without one, an explicit base URL
-// names the broker; without that too, the broker is the default gateway.
+// A key of this process's own wins outright and calls OpenRouter directly:
+// that is a laptop, and it is deliberately the same request the fleet makes.
+// Without one, ANTHROPIC_BASE_URL names a broker explicitly -- which is how the
+// tests point at an httptest server -- and without that, the broker is this
+// guest's default gateway.
+//
+// No branch hands the SDK its own environment: an Anthropic key reaches nothing
+// here, since the ids the profiles ask for are OpenRouter slugs it would reject.
 func defaultEndpoint() endpoint {
-	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" {
-		return endpoint{}
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		return endpoint{baseURL: agentapi.OpenRouterBase, key: key, bearer: true, summary: summaryOpenRouter}
 	}
 	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
-		return endpoint{baseURL: base, key: brokerKey}
+		return endpoint{baseURL: base, key: brokerKey, summary: summaryOpenRouter}
 	}
 	gw, err := gatewayIP()
 	if err != nil {
 		return endpoint{err: err}
 	}
-	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey}
+	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey,
+		summary: summaryOpenRouter}
 }
 
 // forAgent is this endpoint with the model one agent should call -- or, when
-// the person gave the agent a model of its own, that endpoint instead, on
-// their key. Theirs is foreign unless it is api.anthropic.com itself.
+// the person gave the agent a model of its own, that endpoint instead, on their
+// key.
+//
+// One question decides both flags: is this Anthropic itself? If not, it is a
+// gateway we know nothing about, so requests go plain and authenticate the way
+// OpenRouter does. If it is, nothing changes from the day this path was written
+// -- their key in the x-api-key header, betas and all.
 func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 	if own == nil {
 		ep.model = model
 		return ep
 	}
-	base := modelBase(own.URL)
+	base, _ := agentapi.TrimSDKSuffix(own.URL)
 	u, err := url.Parse(base)
-	return endpoint{baseURL: base, key: own.APIKey, model: own.Model, thinking: own.Thinking,
-		foreign: err != nil || u.Hostname() != "api.anthropic.com"}
-}
-
-// modelBase trims a pasted base URL back to what the SDK expects. The SDK
-// appends "v1/messages" itself, and OpenRouter documents its endpoint as
-// .../api/v1, so a URL copied from those docs would otherwise dial v1 twice.
-func modelBase(raw string) string {
-	trimmed := strings.TrimRight(raw, "/")
-	for _, suffix := range []string{"/v1/chat/completions", "/v1/messages", "/v1"} {
-		if strings.HasSuffix(trimmed, suffix) {
-			return strings.TrimSuffix(trimmed, suffix)
-		}
+	isAnthropic := err == nil && u.Hostname() == "api.anthropic.com"
+	ep = endpoint{baseURL: base, key: own.APIKey, model: own.Model,
+		thinking: own.Thinking, bearer: !isAnthropic}
+	if isAnthropic {
+		ep.summary = summaryAnthropic // Anthropic knows the cheap model, unprefixed.
 	}
-	return trimmed
+	return ep
 }
 
 // newClient builds the SDK client for an endpoint. One construction path for
-// both kinds: the transport below is a property of a model call, not of where
+// all of them: the transport below is a property of a model call, not of where
 // the key came from, so a hang reproduces the same on a laptop as in a guest.
-// A brokered endpoint also drops the SDK's environment defaults, so a stray
-// ANTHROPIC_BASE_URL or credential file cannot redirect it.
+//
+// The SDK's environment defaults are dropped for every endpoint, including the
+// one that failed to find a broker -- that endpoint has no base URL, so a
+// version of this that dropped them only alongside one left exactly the broken
+// case reading a stray ANTHROPIC_API_KEY and quietly reaching Anthropic instead
+// of failing the loud way the startup line promises.
 func newClient(ep endpoint) anthropic.Client {
-	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP())}
+	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP()),
+		option.WithoutEnvironmentDefaults()}
 	if ep.baseURL != "" {
-		opts = append(opts, option.WithoutEnvironmentDefaults(),
-			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
+		opts = append(opts, option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
-	// A gateway of the person's own also gets a bearer credential, which is how
-	// OpenRouter authenticates, and the two headers it attributes traffic by.
-	// Both shapes go rather than one: it is their key and their host, so the
-	// second copy tells nobody new, and a proxy of their own that wanted the key
-	// header keeps working on it.
-	if ep.foreign {
+	// An endpoint carrying a key of our own that is not Anthropic also gets a
+	// bearer credential, which is how OpenRouter authenticates, and the two
+	// headers it attributes traffic by. Both auth shapes go rather than one: it
+	// is the same key to the same host either way, so the second copy tells
+	// nobody new, and a proxy that wanted the key header keeps working on it.
+	if ep.bearer {
 		opts = append(opts, option.WithAuthToken(ep.key),
-			option.WithHeader("HTTP-Referer", appURL), option.WithHeader("X-Title", appName))
+			option.WithHeader("HTTP-Referer", appURL), option.WithHeader("X-Title", agentapi.AppName))
 	}
 	return anthropic.NewClient(opts...)
 }
@@ -205,8 +224,8 @@ func (ep endpoint) String() string {
 	switch {
 	case ep.err != nil:
 		return "no broker (" + ep.err.Error() + "); every turn will fail"
-	case ep.baseURL == "":
-		return "the credential in the environment"
+	case ep.bearer:
+		return ep.baseURL + " on this process's own key"
 	default:
 		return "the broker at " + ep.baseURL
 	}

@@ -183,7 +183,7 @@ func TestAgentsCannotHireACustomAgent(t *testing.T) {
 // the ceiling by exactly the budget; reasoning between tool calls needs a beta
 // of its own, which only Anthropic understands.
 func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium"}}
+	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium", summary: summaryOpenRouter}}
 	p := a.params(nil).BetaMessageNewParams
 	if p.MaxTokens != maxTokens+8192 || p.Thinking.OfEnabled == nil || p.Thinking.OfEnabled.BudgetTokens != 8192 {
 		t.Fatalf("thinking request: max_tokens %d thinking %+v", p.MaxTokens, p.Thinking)
@@ -191,7 +191,8 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 	if !slices.Contains(p.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
 		t.Error("interleaved thinking was not asked for")
 	}
-	plain := (&Agent{system: "p", ep: endpoint{model: "m"}}).params(nil).BetaMessageNewParams
+	plain := (&Agent{system: "p", ep: endpoint{model: "m", summary: summaryOpenRouter}}).
+		params(nil).BetaMessageNewParams
 	if plain.MaxTokens != maxTokens || plain.Thinking.OfEnabled != nil ||
 		slices.Contains(plain.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
 		t.Errorf("an agent that does not think got %d tokens, %+v, %v", plain.MaxTokens, plain.Thinking, plain.Betas)
@@ -201,20 +202,44 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 // An endpoint of the person's own speaks the API but not Anthropic's betas: it
 // gets plain requests, and its compaction runs on its own model, since the
 // cheap one may not exist there.
-func TestAForeignEndpointGetsPlainRequests(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com", model: "m", thinking: "low", foreign: true}}
+func TestAPastedEndpointGetsPlainRequests(t *testing.T) {
+	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com",
+		model: "m", thinking: "low", bearer: true}}
 	p := a.params(nil).BetaMessageNewParams
 	if len(p.Betas) != 0 || p.ContextManagement.Edits != nil {
-		t.Errorf("a foreign endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
+		t.Errorf("a pasted endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
 	}
 	if p.Thinking.OfEnabled == nil {
 		t.Error("thinking is not a beta and should still be asked for")
 	}
-	if a.compactModel() != "m" {
-		t.Errorf("compaction on a foreign endpoint uses %q", a.compactModel())
+}
+
+// The assertion that used to live above this was `(&Agent{}).compactModel()`,
+// which builds an endpoint with no host at all: it proved the default branch was
+// taken and nothing about which id that branch names. That is precisely how a
+// rename of the summariser to an OpenRouter slug passed the whole suite while
+// pointing a bring-your-own-Anthropic agent at a model Anthropic does not have.
+//
+// Compaction is the call nobody watches -- a bad id there does not fail a turn,
+// it logs inside compactIfNeeded and returns, so the conversation quietly stops
+// being trimmed -- so the id each endpoint actually sends is worth pinning.
+func TestEachEndpointCompactsWithAnIDItsOwnHostKnows(t *testing.T) {
+	// The ids are written out rather than referred to by constant. Asserting
+	// against the same constant the code reads moves both sides together, which
+	// is the flaw that let the original bug through -- verified by swapping the
+	// constants and watching a symbolic version of this test still pass. These
+	// two literals were confirmed against their own hosts on 2026-09-06.
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
+	if got := (&Agent{ep: base}).compactModel(); string(got) != "anthropic/claude-haiku-4.5" {
+		t.Errorf("brokered compaction uses %q, want anthropic/claude-haiku-4.5", got)
 	}
-	if (&Agent{}).compactModel() != summaryModel {
-		t.Error("compaction on Anthropic left the cheap model")
+	own := &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"}
+	if got := (&Agent{ep: base.forAgent("x", own)}).compactModel(); string(got) != "claude-haiku-4-5" {
+		t.Errorf("Anthropic compaction uses %q, want its own unprefixed claude-haiku-4-5", got)
+	}
+	pasted := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "k", Model: "m"}
+	if got := (&Agent{ep: base.forAgent("x", pasted)}).compactModel(); string(got) != "m" {
+		t.Errorf("an unknown endpoint compacts with %q, want the agent's own model", got)
 	}
 }
 
@@ -243,5 +268,26 @@ func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 	}
 	if !got[2].Retired || got[2].Name != "gone" || got[3].Retired || got[3].Name != "Before per-agent tracking" {
 		t.Errorf("retired and pre-split rows: %+v %+v", got[2], got[3])
+	}
+}
+
+// The counterpart, and the one this cutover could most easily have broken.
+//
+// The broker's upstream is OpenRouter now, so the old rule -- "betas go only to
+// Anthropic" -- would have switched context editing off for the whole fleet.
+// Nothing would have failed: turns would keep working and every tool result in
+// a long history would quietly be re-billed uncached on every turn. OpenRouter
+// documents context_management as a request field, so the fleet keeps it, and
+// this test is what says so out loud.
+func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
+	a := &Agent{system: "p", ep: endpoint{
+		baseURL: "http://172.16.0.1:8092", key: brokerKey,
+		model: "anthropic/claude-sonnet-5", summary: summaryOpenRouter}}
+	p := a.params(nil).BetaMessageNewParams
+	if !slices.Contains(p.Betas, anthropic.AnthropicBetaContextManagement2025_06_27) {
+		t.Errorf("brokered betas = %v, want the context-management beta", p.Betas)
+	}
+	if p.ContextManagement.Edits == nil {
+		t.Error("the brokered path sends no context management; every tool result is re-billed")
 	}
 }

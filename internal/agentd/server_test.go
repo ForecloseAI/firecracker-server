@@ -27,7 +27,7 @@ func newTestServer(t *testing.T) (*Server, *Agent) {
 // newTestSupervisor builds a supervisor over temp directories.
 func newTestSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
-	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key-for-offline-tests")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-not-a-real-key-for-offline-tests")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	sup, err := NewSupervisor(ctx, t.TempDir(), t.TempDir(), testCatalog(t), "claude-haiku-4-5", 8)

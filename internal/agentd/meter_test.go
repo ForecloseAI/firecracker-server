@@ -269,3 +269,40 @@ func TestUsageWindowsNeverEncodeNull(t *testing.T) {
 		t.Errorf("an empty window encoded as %s", buf)
 	}
 }
+
+// Cost accumulates the same way tokens do, and over the same on-disk file.
+//
+// Every turn is one Record, so a cost that is stored but never summed would
+// report the LAST call's price as the whole machine's spend -- a figure that
+// looks plausible, stays small, and is wrong by however many turns have run.
+func TestReportedCostAccumulatesAndSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	priced := func(c float64) agentapi.Usage {
+		return agentapi.Usage{InputTokens: 100, OutputTokens: 20, CostUSD: c}
+	}
+	m := OpenMeter(dir)
+	m.Record("boss", "anthropic/claude-sonnet-5", priced(0.25))
+	m.Record("boss", "anthropic/claude-sonnet-5", priced(0.75))
+
+	got := OpenMeter(dir).Report()
+	if len(got.ByModel) != 1 {
+		t.Fatalf("by model = %+v, want one row", got.ByModel)
+	}
+	// 0.25 and 0.75 are both exact in binary, so == is safe here. Pick figures
+	// that are not (0.1 + 0.2) and this asserts a rounding artefact instead.
+	if got.ByModel[0].CostUSD != 1.00 {
+		t.Errorf("CostUSD = %v, want 1.00 (two turns summed, across a restart)", got.ByModel[0].CostUSD)
+	}
+}
+
+// A turn that reported no cost must not poison one that did. The two live in
+// the same row, so an endpoint change mid-conversation -- or a compaction call
+// against Anthropic -- has to leave the reported figure intact.
+func TestAnUnpricedTurnDoesNotDisturbAPricedOne(t *testing.T) {
+	m := OpenMeter(t.TempDir())
+	m.Record("boss", "anthropic/claude-sonnet-5", agentapi.Usage{InputTokens: 1, CostUSD: 0.40})
+	m.Record("boss", "anthropic/claude-sonnet-5", agentapi.Usage{InputTokens: 1})
+	if got := m.Report().ByModel[0].CostUSD; got != 0.40 {
+		t.Errorf("CostUSD = %v, want 0.40", got)
+	}
+}

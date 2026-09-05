@@ -76,7 +76,8 @@ func TestClearingThresholdsAreSane(t *testing.T) {
 // messages -- which is what makes clearing free. This is the test that fails if
 // someone later adds a second one without revisiting that decision.
 func TestSystemBlockIsTheOnlyCacheBreakpoint(t *testing.T) {
-	a := &Agent{system: "some prompt", ep: endpoint{model: "claude-sonnet-5"}}
+	a := &Agent{system: "some prompt", ep: endpoint{model: "anthropic/claude-sonnet-5",
+		summary: summaryOpenRouter}}
 	p := a.params(nil)
 	if p.BetaMessageNewParams.ContextManagement.Edits == nil {
 		t.Fatal("params carry no context management")

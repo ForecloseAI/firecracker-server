@@ -7,10 +7,11 @@ import (
 	"net/netip"
 	"net/url"
 
+	"cracked/internal/agentapi"
 	"cracked/internal/hostnet"
 )
 
-// llmGatewayPrefix is where a guest's model calls arrive. The Anthropic API
+// llmGatewayPrefix is where a guest's model calls arrive. The Messages API
 // lives entirely under /v1/, so a guest is handed the listener's root as its
 // base URL and the SDK's own paths land here unchanged.
 const llmGatewayPrefix = "/v1/"
@@ -18,19 +19,24 @@ const llmGatewayPrefix = "/v1/"
 // llmForwardedHeaders is everything a guest may say to the model service.
 //
 // An ALLOW list, for the same reason forwardedHeaders is: the guest is
-// untrusted and a strip list is a promise to have thought of every header. The
-// two anthropic-* headers are load-bearing -- the SDK versions every request,
-// and agentd depends on a beta for context management -- so dropping either
-// would fail every turn.
+// untrusted and a strip list is a promise to have thought of every header.
+//
+// The two anthropic-* headers are forwarded because the SDK sends them on every
+// request and this is an Anthropic-shaped endpoint. Anthropic-Version is
+// required there and tolerated by OpenRouter. Anthropic-Beta is how the SDK
+// renders Betas, and OpenRouter documents no such header -- it takes
+// context_management in the BODY instead, which rides through untouched. What
+// an undocumented header actually does there has not been observed, so it is
+// forwarded rather than guessed at: interleaved thinking is the only thing that
+// rides on it alone, and forwarding costs nothing. Not a header to remove
+// without checking which of the two endpoints is on the other end.
 var llmForwardedHeaders = []string{"Content-Type", "Accept", "Anthropic-Version", "Anthropic-Beta"}
 
-// llmAllowedPaths is what a guest may call: the two message endpoints, POST
-// only. Files, batches, model listing and everything else the key could reach
-// are refused, so the broker lends the key for turns and nothing wider.
-var llmAllowedPaths = map[string]bool{
-	"/v1/messages":              true,
-	"/v1/messages/count_tokens": true,
-}
+// llmMessagesPath is all a guest may call, POST only. Files,
+// batches, model listing, generation lookups and everything else the key could
+// reach are refused, so the broker lends the key for turns and nothing wider.
+
+const llmMessagesPath = "/v1/messages"
 
 // LLMGateway lends the host's model credential to guests, one request at a time.
 //
@@ -48,15 +54,16 @@ type LLMGateway struct {
 }
 
 // NewLLMGateway prepares the broker. Config has already required the key and
-// validated the upstream, so there is nothing here that can fail.
-func NewLLMGateway(key string, upstream *url.URL) *LLMGateway {
-	return &LLMGateway{proxy: llmProxy(key, upstream)}
+// validated the upstream, so there is nothing here that can fail. origin is
+// this service's own URL, which is how OpenRouter attributes the traffic.
+func NewLLMGateway(key string, upstream *url.URL, origin string) *LLMGateway {
+	return &LLMGateway{proxy: llmProxy(key, upstream, origin)}
 }
 
 // serve gates one request on where it came from and what it asks for. Both
 // refusals are the same bare 404, so nothing about the listener can be probed.
 func (g *LLMGateway) serve(w http.ResponseWriter, r *http.Request) {
-	if !fromGuest(r.RemoteAddr) || r.Method != http.MethodPost || !llmAllowedPaths[r.URL.Path] {
+	if !fromGuest(r.RemoteAddr) || r.Method != http.MethodPost || r.URL.Path != llmMessagesPath {
 		http.NotFound(w, r)
 		return
 	}
@@ -74,18 +81,28 @@ func fromGuest(remote string) bool {
 	return ok
 }
 
-// llmProxy forwards to the model service. SetURL keeps the request's own path
-// and query -- the SDK's ?beta=true included -- and the header map is replaced
-// rather than edited, so whatever the guest added is gone before the credential
-// is set. The upstream is named in a failure: it is no secret (it sits in the
-// systemd unit), and when ANTHROPIC_UPSTREAM points at a test host, which host
-// failed is the one fact the line is for.
-func llmProxy(key string, upstream *url.URL) *httputil.ReverseProxy {
+// llmProxy forwards to the model service. SetURL joins the upstream's path with
+// the request's own -- /api plus /v1/messages -- and keeps the query, the SDK's
+// ?beta=true included. The header map is replaced rather than edited, so
+// whatever the guest added is gone before the credential is set.
+//
+// OpenRouter authenticates with a bearer token, not the x-api-key Anthropic
+// wants, and attributes traffic by the two headers below. All three are set
+// here rather than in the guest, which is the point of the broker: the guest
+// holds no credential and cannot claim to be somebody else.
+//
+// The upstream is named in a failure: it is no secret (it sits in the systemd
+// unit), and when OPENROUTER_UPSTREAM points at a test host, which host failed
+// is the one fact the line is for.
+func llmProxy(key string, upstream *url.URL, origin string) *httputil.ReverseProxy {
+	bearer := "Bearer " + key // fixed for this proxy's life; not per request
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			pr.Out.Header = keepHeaders(pr.Out.Header, llmForwardedHeaders)
-			pr.Out.Header.Set("x-api-key", key)
+			pr.Out.Header.Set("Authorization", bearer)
+			pr.Out.Header.Set("HTTP-Referer", origin)
+			pr.Out.Header.Set("X-Title", agentapi.AppName)
 		},
 		FlushInterval: -1, // responses may stream; buffering would stall them
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

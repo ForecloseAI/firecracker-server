@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,7 +26,8 @@ const routeFixture = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\t
 // credential cannot leak into a test that means to exercise the broker path.
 func clearModelEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"} {
+	for _, k := range []string{"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"} {
 		t.Setenv(k, "")
 	}
 }
@@ -67,16 +69,45 @@ func TestNoDefaultRouteIsAnError(t *testing.T) {
 	}
 }
 
-// A developer's own key must keep working exactly as before: no broker, the
-// SDK's own environment handling, ANTHROPIC_BASE_URL included.
-func TestAnEnvCredentialWinsOverTheBroker(t *testing.T) {
+// A key of this process's own beats the broker, and calls OpenRouter directly.
+//
+// The point is that it is the SAME request the fleet makes: same protocol, same
+// betas, same context management. A laptop that quietly ran a weaker request
+// would prove nothing about production, so it must count as known here even
+// though this endpoint is not Anthropic.
+func TestAnOpenRouterKeyWinsOverTheBroker(t *testing.T) {
+	clearModelEnv(t)
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-x")
+	ep := defaultEndpoint()
+	if ep.baseURL != agentapi.OpenRouterBase || ep.key != "sk-or-x" || ep.err != nil {
+		t.Fatalf("endpoint = %+v", ep)
+	}
+	if !ep.bearer {
+		t.Error("a direct OpenRouter call must authenticate with a bearer token")
+	}
+	if !ep.known() {
+		t.Error("the laptop path dropped the betas the fleet sends")
+	}
+	if line := ep.String(); !strings.Contains(line, "own key") {
+		t.Errorf("startup line %q", line)
+	}
+}
+
+// An Anthropic key in the environment is no longer a route to anywhere. It used
+// to mean "call Anthropic directly"; the model ids the profiles ask for are
+// OpenRouter slugs now, so honouring it would send a request Anthropic rejects
+// while the log claimed everything was fine.
+func TestAStrayAnthropicKeyDoesNotDivertTheBroker(t *testing.T) {
 	clearModelEnv(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-x")
-	if ep := defaultEndpoint(); ep != (endpoint{}) {
-		t.Fatalf("with a key in the environment the endpoint was %+v", ep)
+	table := filepath.Join(t.TempDir(), "route")
+	if err := os.WriteFile(table, []byte(routeFixture), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if line := defaultEndpoint().String(); !strings.Contains(line, "environment") {
-		t.Errorf("startup line %q", line)
+	useRouteTable(t, table)
+	ep := defaultEndpoint()
+	if ep.key != brokerKey || !strings.Contains(ep.baseURL, brokerPort) {
+		t.Fatalf("endpoint = %+v, want the broker", ep)
 	}
 }
 
@@ -179,19 +210,25 @@ func assertTurnLogged(t *testing.T, a *Agent) {
 // URL, their key, their model, their thinking level -- and counts as Anthropic
 // only when it actually is.
 func TestAPersonsOwnEndpointReplacesTheMachines(t *testing.T) {
-	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
-	if ep := base.forAgent("claude-sonnet-5", nil); ep.model != "claude-sonnet-5" ||
-		ep.baseURL != base.baseURL || ep.key != brokerKey || ep.foreign {
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
+	if ep := base.forAgent("anthropic/claude-sonnet-5", nil); ep.model != "anthropic/claude-sonnet-5" ||
+		ep.baseURL != base.baseURL || ep.key != brokerKey || !ep.known() || ep.bearer {
 		t.Fatalf("machine endpoint for a gallery agent: %+v", ep)
 	}
 	own := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own", Model: "m", Thinking: "high"}
-	if ep := base.forAgent("claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
-		ep.model != "m" || ep.thinking != "high" || !ep.foreign {
+	if ep := base.forAgent("anthropic/claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
+		ep.model != "m" || ep.thinking != "high" || ep.known() || !ep.bearer {
 		t.Fatalf("own endpoint: %+v", ep)
 	}
+	// Anthropic on the person's own key is the path this change promised not to
+	// touch. It carries a key of their own, so a rule keyed on "is this our
+	// placeholder?" would have started sending Anthropic a bearer token.
 	direct := base.forAgent("x", &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"})
-	if direct.foreign {
-		t.Error("api.anthropic.com on the person's own key was treated as foreign")
+	if !direct.known() {
+		t.Error("api.anthropic.com on the person's own key was sent a plain request")
+	}
+	if direct.bearer {
+		t.Error("api.anthropic.com was sent a bearer token; it authenticates with x-api-key")
 	}
 }
 
@@ -252,17 +289,17 @@ func ask(t *testing.T, ep endpoint) {
 	}
 }
 
-// A gateway of the person's own is authenticated with a bearer token, because
+// A gateway the person pasted is authenticated with a bearer token, because
 // that is what OpenRouter -- the reason this path exists -- reads. It is sent
 // alongside the x-api-key, not instead of it, so an endpoint that wants the
 // Anthropic shape still works. The two attribution headers ride along.
-func TestAForeignEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
+func TestAPastedEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
 	clearModelEnv(t)
 	fake := fakeModel(t)
 	own := &agentapi.ModelConfig{URL: fake.srv.URL, APIKey: "sk-or-test", Model: "openai/gpt-4o"}
 	ep := endpoint{}.forAgent("unused", own)
-	if !ep.foreign {
-		t.Fatal("a gateway on 127.0.0.1 should be foreign")
+	if !ep.bearer {
+		t.Fatal("a gateway on 127.0.0.1 should authenticate with a bearer")
 	}
 	ask(t, ep)
 	if got := fake.hdr.Get("Authorization"); got != "Bearer sk-or-test" {
@@ -271,8 +308,8 @@ func TestAForeignEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
 	if got := fake.hdr.Get("x-api-key"); got != "sk-or-test" {
 		t.Errorf("x-api-key = %q, want the key alongside the bearer", got)
 	}
-	if r, ti := fake.hdr.Get("HTTP-Referer"), fake.hdr.Get("X-Title"); r != appURL || ti != appName {
-		t.Errorf("attribution = %q / %q, want %q / %q", r, ti, appURL, appName)
+	if r, ti := fake.hdr.Get("HTTP-Referer"), fake.hdr.Get("X-Title"); r != appURL || ti != agentapi.AppName {
+		t.Errorf("attribution = %q / %q, want %q / %q", r, ti, appURL, agentapi.AppName)
 	}
 }
 
@@ -307,8 +344,8 @@ func TestAPastedBaseURLIsTrimmedToWhatTheSDKWants(t *testing.T) {
 		{"https://api.anthropic.com", "https://api.anthropic.com"},
 		{"http://172.16.0.1:8092", "http://172.16.0.1:8092"},
 	} {
-		if got := modelBase(c.raw); got != c.want {
-			t.Errorf("modelBase(%q) = %q, want %q", c.raw, got, c.want)
+		if got, _ := agentapi.TrimSDKSuffix(c.raw); got != c.want {
+			t.Errorf("TrimSDKSuffix(%q) = %q, want %q", c.raw, got, c.want)
 		}
 	}
 	ep := endpoint{}.forAgent("x", &agentapi.ModelConfig{

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"cracked/internal/agentapi"
 	"errors"
 	"fmt"
 	"net"
@@ -45,15 +46,16 @@ type Config struct {
 	// security group.
 	AppsAddr string
 
-	// AnthropicKey is the model credential every guest's turns run on. It lives
+	// OpenRouterKey is the model credential every guest's turns run on. It lives
 	// ONLY here: the guest image carries none, and agentd dials this host's
 	// broker for every model call. Required, because a chat host without it is
 	// every machine on the fleet unable to take a turn.
-	AnthropicKey string
-	// AnthropicUpstream is where brokered model calls go. Scheme and host only;
-	// the guest's own path and query ride through. Parsed here, once, so the
-	// broker is handed something already known to be sound.
-	AnthropicUpstream *url.URL
+	OpenRouterKey string
+	// OpenRouterUpstream is where brokered model calls go. An origin, optionally
+	// with a path -- OpenRouter serves its Anthropic-Messages endpoint under
+	// /api -- and the guest's own path and query ride through on top of it.
+	// Parsed here, once, so the broker is handed something already known sound.
+	OpenRouterUpstream *url.URL
 	// ComposioCallback is where a person lands after approving an app. It has to
 	// be a page this service serves, because the browser coming back from a
 	// provider carries no token and a custom scheme is not reliably followed
@@ -78,10 +80,10 @@ func LoadConfig() (Config, error) {
 		ComposioBase:        env("COMPOSIO_BASE_URL", ""),
 		AppsAddr:            env("CHAT_APPS_ADDR", "0.0.0.0:8092"),
 
-		AnthropicKey: env("ANTHROPIC_API_KEY", ""),
+		OpenRouterKey: env("OPENROUTER_API_KEY", ""),
 	}
 	// A parse failure leaves nil, which validate refuses by name.
-	c.AnthropicUpstream, _ = url.Parse(env("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"))
+	c.OpenRouterUpstream, _ = url.Parse(env("OPENROUTER_UPSTREAM", agentapi.OpenRouterBase))
 	c.ComposioCallback = env("COMPOSIO_CALLBACK_URL", c.Origin+connectedPath)
 	return c, c.validate()
 }
@@ -91,7 +93,7 @@ func LoadConfig() (Config, error) {
 func (c Config) validate() error {
 	for _, f := range []struct{ name, val string }{
 		{"CHAT_ORIGIN", c.Origin}, {"CHAT_VNC_ORIGIN", c.VNCOrigin}, {"CRACKED_TOKEN", c.Token},
-		{"SUPABASE_URL", c.SupabaseURL}, {"ANTHROPIC_API_KEY", c.AnthropicKey},
+		{"SUPABASE_URL", c.SupabaseURL}, {"OPENROUTER_API_KEY", c.OpenRouterKey},
 	} {
 		if f.val == "" {
 			return fmt.Errorf("%s must be set", f.name)
@@ -119,21 +121,34 @@ func (c Config) validateGuest() error {
 	if _, _, err := net.SplitHostPort(c.AppsAddr); err != nil {
 		return fmt.Errorf("CHAT_APPS_ADDR must be host:port: %w", err)
 	}
-	if err := validUpstream(c.AnthropicUpstream); err != nil {
-		return fmt.Errorf("ANTHROPIC_UPSTREAM %w", err)
+	if err := validUpstream(c.OpenRouterUpstream); err != nil {
+		return fmt.Errorf("OPENROUTER_UPSTREAM %w", err)
 	}
 	return nil
 }
 
-// validUpstream accepts a bare https origin, or plain http on loopback for a
-// test server. The key rides on every request, so anything else in the clear is
-// refused; a path or query would be glued onto the SDK's own, so those are too.
+// validUpstream accepts an https origin, optionally with a path, or plain http
+// on loopback for a test server. The key rides on every request, so anything
+// else in the clear is refused.
+//
+// A path is allowed because OpenRouter's Messages endpoint lives under /api and
+// the proxy joins the two -- /api plus the SDK's /v1/messages is the real URL.
+// But not a path the SDK will append to itself: every OpenRouter doc page prints
+// the base as .../api/v1, so the obvious copy-paste dials /api/v1/v1/messages
+// and 404s the whole fleet on a value that looks right. Refused here by name,
+// where an operator can act on it, rather than an hour later inside a guest.
+//
+// A query is refused outright: the guest's own would be concatenated onto it,
+// and the SDK sends ?beta=true on every call, so no second one can help.
 func validUpstream(u *url.URL) error {
 	if u == nil || u.Host == "" {
 		return errors.New("must be an absolute URL")
 	}
-	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {
-		return errors.New("must be scheme and host only")
+	if u.RawQuery != "" {
+		return errors.New("must not carry a query")
+	}
+	if _, trimmed := agentapi.TrimSDKSuffix(u.Path); trimmed {
+		return errors.New("must not end in a path the SDK appends itself, like /v1")
 	}
 	if u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname())) {
 		return nil

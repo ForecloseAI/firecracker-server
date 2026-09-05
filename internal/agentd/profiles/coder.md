@@ -2,7 +2,7 @@
 key: coder
 title: Coder
 description: Writes and changes code, runs it, and proves it works before saying it does.
-model: claude-sonnet-5
+model: anthropic/claude-sonnet-5
 browser: false
 tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, list_agents, message_agent
 ---

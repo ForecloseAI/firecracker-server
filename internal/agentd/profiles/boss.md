@@ -2,7 +2,7 @@
 key: boss
 title: Boss
 description: Orchestrator. Plans work, does it or hands it to a specialist, and reports back.
-model: claude-sonnet-5
+model: anthropic/claude-sonnet-5
 browser: true
 tools: Read, Write, Edit, Glob, Grep, Bash, ask_human, start_task, list_agents, message_agent, delegate, create_agent, delete_agent, list_agent_types
 ---
