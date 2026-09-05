@@ -109,3 +109,30 @@ func TestTheDaemonAndTheHostShareOneType(t *testing.T) {
 		t.Error("agentd.Event is no longer an alias of agentapi.Event; the wire format has been split in two again")
 	}
 }
+
+// The SDK appends v1/messages to a base URL, and every OpenRouter doc page
+// prints the base as .../api/v1 -- so a URL copied from those docs dials
+// /api/v1/v1/messages and 404s with nothing in the message to explain it.
+//
+// This lives here rather than beside its caller because the knowledge is shared:
+// the host refuses an upstream that carries such a suffix, and anything else
+// that has to reason about what the SDK appends reads the same list.
+func TestTrimSDKSuffixTakesABaseURLBackToWhatTheSDKWants(t *testing.T) {
+	for _, c := range []struct {
+		raw, want string
+		trimmed   bool
+	}{
+		{"https://openrouter.ai/api/v1", "https://openrouter.ai/api", true},
+		{"https://openrouter.ai/api/v1/", "https://openrouter.ai/api", true},
+		{"https://openrouter.ai/api/v1/messages", "https://openrouter.ai/api", true},
+		{"https://openrouter.ai/api/v1/chat/completions", "https://openrouter.ai/api", true},
+		{"https://openrouter.ai/api", "https://openrouter.ai/api", false},
+		{"https://api.anthropic.com", "https://api.anthropic.com", false},
+		{"http://172.16.0.1:8092", "http://172.16.0.1:8092", false},
+	} {
+		got, trimmed := agentapi.TrimSDKSuffix(c.raw)
+		if got != c.want || trimmed != c.trimmed {
+			t.Errorf("TrimSDKSuffix(%q) = %q, %v; want %q, %v", c.raw, got, trimmed, c.want, c.trimmed)
+		}
+	}
+}

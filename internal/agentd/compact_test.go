@@ -318,12 +318,12 @@ func TestSummarySpendReachesTheMeterAndTheTranscript(t *testing.T) {
 	a := newTestAgent(t)
 	a.team = &Supervisor{meter: OpenMeter(t.TempDir())}
 
-	a.bookUsage(summaryOpenRouter, Usage{InputTokens: 4000, OutputTokens: 300, CostUSD: 0.20})
+	a.bookUsage(summaryModel, Usage{InputTokens: 4000, OutputTokens: 300, CostUSD: 0.20})
 
 	rows := a.meter().Report().ByModel
 	found := false
 	for _, row := range rows {
-		if row.Model != summaryOpenRouter {
+		if row.Model != summaryModel {
 			continue
 		}
 		found = true

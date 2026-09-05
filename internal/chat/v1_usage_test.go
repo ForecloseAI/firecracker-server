@@ -112,14 +112,23 @@ func TestUnpricedModelsAreNamedNotZeroed(t *testing.T) {
 	}
 }
 
-// An agent on the person's own model is marked by the guest, so the screen
-// can say the figure is an estimate at our rates rather than our bill.
-func TestAnAgentOnItsOwnKeyIsMarked(t *testing.T) {
+// No agent is marked as running on the person's own key, because none does.
+//
+// The flag used to say "the figure beside me is an estimate at our rates, not
+// our bill", and the screen showed it INSTEAD of that agent's tokens and turns.
+// Both halves stopped being true at once: every agent is brokered, so every
+// figure is what was charged. Sending it anyway would tell somebody their real
+// bill was a guess, so it is not on the wire at all.
+func TestNoAgentIsMarkedAsRunningOnItsOwnKey(t *testing.T) {
 	s, g, u := newFake(t)
 	g.usage = agentapi.AgentUsageReport{Agents: []agentapi.AgentUsage{
-		{Agent: "maya", Name: "Maya", OwnKey: true, Today: window(), Week: window(), Lifetime: window()}}}
+		{Agent: "maya", Name: "Maya", Today: window(), Week: window(), Lifetime: window()}}}
+	w := call(t, s, u, "GET", "/v1/usage", "")
+	if strings.Contains(w.Body.String(), "ownKey") {
+		t.Errorf("the usage response still carries ownKey: %s", w.Body)
+	}
 	got := usageOf(t, s, u)
-	if len(got.Agents) != 1 || !got.Agents[0].OwnKey || got.Agents[0].Name != "Maya" {
+	if len(got.Agents) != 1 || got.Agents[0].Name != "Maya" {
 		t.Errorf("agents: %+v", got.Agents)
 	}
 }

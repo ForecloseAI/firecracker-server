@@ -21,14 +21,14 @@ type usageWindow struct {
 	Turns            int64   `json:"turns"`
 }
 
-// agentUsage is one agent's three windows, as the guest named it. Retired
-// means the agent is gone but its spend is not; OwnKey means it runs on the
-// person's own model now, so the figure is an estimate at our rates.
+// agentUsage is one agent's three windows, as the guest named it. Retired means
+// the agent is gone but its spend is not. There is no longer an ownKey beside
+// it: every agent runs on the fleet's key, so every figure here is what was
+// charged rather than an estimate at our rates.
 type agentUsage struct {
 	AgentID  string      `json:"agentId"`
 	Name     string      `json:"name"`
 	Retired  bool        `json:"retired"`
-	OwnKey   bool        `json:"ownKey"`
 	Today    usageWindow `json:"today"`
 	Week     usageWindow `json:"week"`
 	Lifetime usageWindow `json:"lifetime"`
@@ -91,7 +91,7 @@ func projectUsage(r agentapi.AgentUsageReport) usageResponse {
 	unpriced := map[string]bool{}
 	out := usageResponse{Zone: r.Zone, WeekStart: r.WeekStart, Agents: []agentUsage{}}
 	for _, a := range r.Agents {
-		row := agentUsage{AgentID: a.Agent, Name: a.Name, Retired: a.Retired, OwnKey: a.OwnKey,
+		row := agentUsage{AgentID: a.Agent, Name: a.Name, Retired: a.Retired,
 			Today: projectWindow(a.Today, unpriced), Week: projectWindow(a.Week, unpriced),
 			Lifetime: projectWindow(a.Lifetime, unpriced)}
 		addWindow(&out.Totals.Today, row.Today)

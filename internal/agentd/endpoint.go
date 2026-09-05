@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -59,28 +58,10 @@ type endpoint struct {
 	// bearer, Anthropic wants the key header, and a brokered request wants
 	// neither because the host sets both on its own key.
 	bearer bool
-	// summary is the cheap model to compact with, in the id dialect this
-	// endpoint speaks -- OpenRouter prefixes by provider, Anthropic does not,
-	// and each rejects the other's spelling. Empty is the whole of what we know
-	// about an endpoint somebody pasted a URL for: see known.
-	//
-	// It travels with the endpoint rather than being one constant because
-	// compaction is the call nobody watches. A wrong id there does not fail a
-	// turn; it fails inside compactIfNeeded, which logs and returns, so the
-	// conversation silently stops being trimmed and re-pays its whole history
-	// on every turn after that.
-	summary string
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
 	err error
 }
-
-// known says whether this is a service we recognise, which is what decides
-// whether the extras can be relied on: betas and context management go only to
-// an endpoint we chose, never to a URL somebody pasted, because a service that
-// merely speaks the API need not honour them. Knowing its cheap model is the
-// same knowledge, so one field answers both.
-func (ep endpoint) known() bool { return ep.summary != "" }
 
 // defaultEndpoint decides how this process reaches the model. Decided once,
 // by the supervisor, so the startup line and every agent agree.
@@ -95,39 +76,31 @@ func (ep endpoint) known() bool { return ep.summary != "" }
 // here, since the ids the profiles ask for are OpenRouter slugs it would reject.
 func defaultEndpoint() endpoint {
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		return endpoint{baseURL: agentapi.OpenRouterBase, key: key, bearer: true, summary: summaryOpenRouter}
+		return endpoint{baseURL: agentapi.OpenRouterBase, key: key, bearer: true}
 	}
 	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
-		return endpoint{baseURL: base, key: brokerKey, summary: summaryOpenRouter}
+		return endpoint{baseURL: base, key: brokerKey}
 	}
 	gw, err := gatewayIP()
 	if err != nil {
 		return endpoint{err: err}
 	}
-	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey,
-		summary: summaryOpenRouter}
+	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey}
 }
 
-// forAgent is this endpoint with the model one agent should call -- or, when
-// the person gave the agent a model of its own, that endpoint instead, on their
-// key.
+// forAgent is this endpoint with the model one agent should call: the profile's,
+// or the one the person picked for a custom agent, with how hard it should think.
 //
-// One question decides both flags: is this Anthropic itself? If not, it is a
-// gateway we know nothing about, so requests go plain and authenticate the way
-// OpenRouter does. If it is, nothing changes from the day this path was written
-// -- their key in the x-api-key header, betas and all.
+// The endpoint itself never varies per agent. It used to: a custom agent carried
+// a URL and a key and got a client of its own, which is why this returned a
+// different endpoint rather than a different model. Everything goes through the
+// one broker now, so a custom agent is the fleet's own request with the model
+// field changed -- and the betas, the context management and the summariser all
+// keep working there, which under the old shape they could not.
 func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
-	if own == nil {
-		ep.model = model
-		return ep
-	}
-	base, _ := agentapi.TrimSDKSuffix(own.URL)
-	u, err := url.Parse(base)
-	isAnthropic := err == nil && u.Hostname() == "api.anthropic.com"
-	ep = endpoint{baseURL: base, key: own.APIKey, model: own.Model,
-		thinking: own.Thinking, bearer: !isAnthropic}
-	if isAnthropic {
-		ep.summary = summaryAnthropic // Anthropic knows the cheap model, unprefixed.
+	ep.model = model
+	if own != nil {
+		ep.model, ep.thinking = own.Model, own.Thinking
 	}
 	return ep
 }

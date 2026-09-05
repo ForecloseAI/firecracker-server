@@ -73,8 +73,7 @@ func TestNoDefaultRouteIsAnError(t *testing.T) {
 //
 // The point is that it is the SAME request the fleet makes: same protocol, same
 // betas, same context management. A laptop that quietly ran a weaker request
-// would prove nothing about production, so it must count as known here even
-// though this endpoint is not Anthropic.
+// would prove nothing about production.
 func TestAnOpenRouterKeyWinsOverTheBroker(t *testing.T) {
 	clearModelEnv(t)
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-x")
@@ -84,9 +83,6 @@ func TestAnOpenRouterKeyWinsOverTheBroker(t *testing.T) {
 	}
 	if !ep.bearer {
 		t.Error("a direct OpenRouter call must authenticate with a bearer token")
-	}
-	if !ep.known() {
-		t.Error("the laptop path dropped the betas the fleet sends")
 	}
 	if line := ep.String(); !strings.Contains(line, "own key") {
 		t.Errorf("startup line %q", line)
@@ -206,29 +202,26 @@ func assertTurnLogged(t *testing.T, a *Agent) {
 	}
 }
 
-// The person's own endpoint replaces the machine's for that one agent -- their
-// URL, their key, their model, their thinking level -- and counts as Anthropic
-// only when it actually is.
-func TestAPersonsOwnEndpointReplacesTheMachines(t *testing.T) {
-	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
+// A person's model choice changes the model, and only the model.
+//
+// This used to replace the whole endpoint -- their URL, their key, a client of
+// its own -- which is what made a custom agent a different kind of thing from a
+// gallery one. It is the same request now with one field different, so the
+// broker, the credential and everything that rides on knowing the upstream stay
+// exactly as they were.
+func TestAPersonsModelChoiceChangesOnlyTheModel(t *testing.T) {
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
 	if ep := base.forAgent("anthropic/claude-sonnet-5", nil); ep.model != "anthropic/claude-sonnet-5" ||
-		ep.baseURL != base.baseURL || ep.key != brokerKey || !ep.known() || ep.bearer {
+		ep.baseURL != base.baseURL || ep.key != brokerKey || ep.bearer {
 		t.Fatalf("machine endpoint for a gallery agent: %+v", ep)
 	}
-	own := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own", Model: "m", Thinking: "high"}
-	if ep := base.forAgent("anthropic/claude-sonnet-5", own); ep.baseURL != own.URL || ep.key != "sk-own" ||
-		ep.model != "m" || ep.thinking != "high" || ep.known() || !ep.bearer {
-		t.Fatalf("own endpoint: %+v", ep)
+	own := &agentapi.ModelConfig{Model: "openai/gpt-4o", Thinking: "high"}
+	ep := base.forAgent("anthropic/claude-sonnet-5", own)
+	if ep.model != "openai/gpt-4o" || ep.thinking != "high" {
+		t.Fatalf("the person's choice did not take: %+v", ep)
 	}
-	// Anthropic on the person's own key is the path this change promised not to
-	// touch. It carries a key of their own, so a rule keyed on "is this our
-	// placeholder?" would have started sending Anthropic a bearer token.
-	direct := base.forAgent("x", &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"})
-	if !direct.known() {
-		t.Error("api.anthropic.com on the person's own key was sent a plain request")
-	}
-	if direct.bearer {
-		t.Error("api.anthropic.com was sent a bearer token; it authenticates with x-api-key")
+	if ep.baseURL != base.baseURL || ep.key != brokerKey || ep.bearer {
+		t.Errorf("a custom agent left the broker or changed how it authenticates: %+v", ep)
 	}
 }
 
@@ -247,8 +240,11 @@ func TestAThinkingBlockSurvivesARestartIntact(t *testing.T) {
 	clearModelEnv(t)
 	fake := fakeModel(t)
 	fake.reply = thinkingReply
-	rec := Record{ID: "boss", Name: "Boss", Model: &agentapi.ModelConfig{
-		URL: fake.srv.URL, APIKey: "sk-own", Model: "m", Thinking: "low"}}
+	// The fake stands in for the broker: a custom agent can no longer name an
+	// endpoint, so the machine's own is pointed at it.
+	t.Setenv("ANTHROPIC_BASE_URL", fake.srv.URL)
+	rec := Record{ID: "boss", Name: "Boss",
+		Model: &agentapi.ModelConfig{Model: "m", Thinking: "low"}}
 	dir, ws := t.TempDir(), t.TempDir()
 	a, err := New(rec, dir, ws, testProfile(), nil)
 	if err != nil {
@@ -269,8 +265,8 @@ func TestAThinkingBlockSurvivesARestartIntact(t *testing.T) {
 			t.Errorf("the second request lacks %s:\n%s", want, fake.lastBody)
 		}
 	}
-	if fake.hdr.Get("x-api-key") != "sk-own" {
-		t.Errorf("the person's own key was not used: %q", fake.hdr.Get("x-api-key"))
+	if fake.hdr.Get("x-api-key") != brokerKey {
+		t.Errorf("the turn did not go through the broker: %q", fake.hdr.Get("x-api-key"))
 	}
 }
 
@@ -289,18 +285,16 @@ func ask(t *testing.T, ep endpoint) {
 	}
 }
 
-// A gateway the person pasted is authenticated with a bearer token, because
-// that is what OpenRouter -- the reason this path exists -- reads. It is sent
-// alongside the x-api-key, not instead of it, so an endpoint that wants the
-// Anthropic shape still works. The two attribution headers ride along.
-func TestAPastedEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
+// An endpoint carrying a key of this process's own -- a laptop, not a guest --
+// authenticates with a bearer token, because that is what OpenRouter reads. It
+// is sent alongside the x-api-key, not instead of it, so a proxy of somebody's
+// own that wanted the Anthropic shape keeps working. The attribution headers
+// ride along, since this is the one path where the guest sets them itself; on a
+// brokered turn the host does it.
+func TestAnOwnKeyEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
 	clearModelEnv(t)
 	fake := fakeModel(t)
-	own := &agentapi.ModelConfig{URL: fake.srv.URL, APIKey: "sk-or-test", Model: "openai/gpt-4o"}
-	ep := endpoint{}.forAgent("unused", own)
-	if !ep.bearer {
-		t.Fatal("a gateway on 127.0.0.1 should authenticate with a bearer")
-	}
+	ep := endpoint{baseURL: fake.srv.URL, key: "sk-or-test", bearer: true}
 	ask(t, ep)
 	if got := fake.hdr.Get("Authorization"); got != "Bearer sk-or-test" {
 		t.Errorf("Authorization = %q, want a bearer token", got)
@@ -328,29 +322,5 @@ func TestTheBrokerIsStillAuthenticatedWithTheKeyHeaderAlone(t *testing.T) {
 		fake.hdr.Get("X-Title") != "" {
 		t.Errorf("brokered request carried %q / %q / %q, want none of them",
 			a, r, fake.hdr.Get("X-Title"))
-	}
-}
-
-// The SDK appends v1/messages to the base URL, and OpenRouter documents its
-// endpoint as .../api/v1. Someone copying that would dial /api/v1/v1/messages
-// and get a 404 with nothing to explain it, so the suffix comes off here.
-func TestAPastedBaseURLIsTrimmedToWhatTheSDKWants(t *testing.T) {
-	for _, c := range []struct{ raw, want string }{
-		{"https://openrouter.ai/api/v1", "https://openrouter.ai/api"},
-		{"https://openrouter.ai/api/v1/", "https://openrouter.ai/api"},
-		{"https://openrouter.ai/api/v1/messages", "https://openrouter.ai/api"},
-		{"https://openrouter.ai/api/v1/chat/completions", "https://openrouter.ai/api"},
-		{"https://openrouter.ai/api", "https://openrouter.ai/api"},
-		{"https://api.anthropic.com", "https://api.anthropic.com"},
-		{"http://172.16.0.1:8092", "http://172.16.0.1:8092"},
-	} {
-		if got, _ := agentapi.TrimSDKSuffix(c.raw); got != c.want {
-			t.Errorf("TrimSDKSuffix(%q) = %q, want %q", c.raw, got, c.want)
-		}
-	}
-	ep := endpoint{}.forAgent("x", &agentapi.ModelConfig{
-		URL: "https://openrouter.ai/api/v1", APIKey: "k", Model: "m"})
-	if ep.baseURL != "https://openrouter.ai/api" {
-		t.Errorf("forAgent stored %q, want the trimmed base", ep.baseURL)
 	}
 }

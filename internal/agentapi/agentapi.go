@@ -357,14 +357,17 @@ type UsageWindow struct {
 }
 
 // AgentUsage is one agent's spend today, this calendar week, and ever, named
-// from the roster. Retired means the agent is gone but its spend is not; OwnKey
-// means it runs on the person's own model now, so the host's price is an
-// estimate rather than its bill.
+// from the roster. Retired means the agent is gone but its spend is not.
+//
+// There was an OwnKey here, meaning "this one runs on the person's key, so the
+// figure is an estimate rather than its bill". Nothing runs on anyone else's
+// key now and every figure is what was actually charged, so the flag said
+// nothing true -- and the screen it fed showed it INSTEAD of the tokens and
+// turns, which is the wrong trade once the number is real.
 type AgentUsage struct {
 	Agent    string      `json:"agent"`
 	Name     string      `json:"name"`
 	Retired  bool        `json:"retired"`
-	OwnKey   bool        `json:"own_key"`
 	Today    UsageWindow `json:"today"`
 	Week     UsageWindow `json:"week"`
 	Lifetime UsageWindow `json:"lifetime"`
@@ -407,9 +410,10 @@ type Task struct {
 // Record is one agent's durable identity: who it is, not whether it is running.
 //
 // Instructions and Model are set only for a custom agent, one the person built
-// in the app rather than picked from the gallery. The model carries the
-// person's own key, which is why a Record never leaves the guest: the host sees
-// a Status, whose ModelView has no key.
+// in the app rather than picked from the gallery. A Record used to hold the
+// person's key and so could never leave the guest; it holds no secret now, and
+// the host still sees a Status rather than this, because what an agent IS and
+// what it is DOING are different questions.
 type Record struct {
 	ID           string       `json:"id"`
 	Name         string       `json:"name"`
@@ -461,14 +465,16 @@ func TrimSDKSuffix(raw string) (string, bool) {
 // validated and priced from the same place.
 var ThinkingBudgets = map[string]int64{"low": 2048, "medium": 8192, "high": 16384}
 
-// ModelConfig is a custom agent's own model: an endpoint that speaks the
-// Anthropic API -- OpenRouter at https://openrouter.ai/api, or Anthropic
-// itself -- which the person pays for with their own key. The key lives in
-// agents.json on the person's own machine and nowhere else: what leaves the
-// guest is a ModelView, and an edit that carries no key keeps the stored one.
+// ModelConfig is the model a custom agent runs on, chosen by the person from
+// OpenRouter's catalogue -- any id it serves, not only Anthropic's.
+//
+// There is no endpoint and no key here any more. Both existed because a custom
+// agent used to dial a service of the person's own, which meant this struct
+// carried a credential and the guest built a second client to use it. Every
+// agent now goes through the same broker on the same key, so choosing a model
+// is all that is left to choose, and the request is the fleet's own request
+// with one field different.
 type ModelConfig struct {
-	URL      string `json:"url"`
-	APIKey   string `json:"api_key,omitempty"`
 	Model    string `json:"model"`
 	Thinking string `json:"thinking,omitempty"`
 }
@@ -479,15 +485,16 @@ func (m *ModelConfig) View() *ModelView {
 	if m == nil {
 		return nil
 	}
-	return &ModelView{URL: m.URL, Model: m.Model, Thinking: m.Thinking, KeySet: m.APIKey != ""}
+	return &ModelView{Model: m.Model, Thinking: m.Thinking}
 }
 
-// ModelView is ModelConfig with the key replaced by whether one is set.
+// ModelView is what anyone outside the guest may see of a custom agent's model.
+// It is now the whole of ModelConfig -- there is no longer a secret in it to
+// hold back -- and stays a separate type because the wire should not change
+// shape the next time the stored one does.
 type ModelView struct {
-	URL      string `json:"url"`
 	Model    string `json:"model"`
 	Thinking string `json:"thinking,omitempty"`
-	KeySet   bool   `json:"key_set"`
 }
 
 // CreateAgentReq is the body of POST /agents. Instructions and Model are for a

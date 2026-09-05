@@ -1,7 +1,6 @@
 package agentd
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -36,11 +35,9 @@ const (
 	keepDivisor = 4
 
 	// The summariser is cheap on purpose: it reads the whole prefix, and the job
-	// is condensing text that is already there rather than reasoning. One id per
-	// dialect, because each host rejects the other's spelling -- both verified
-	// live on 2026-09-06.
-	summaryOpenRouter = "anthropic/claude-haiku-4.5"
-	summaryAnthropic  = "claude-haiku-4-5"
+	// is condensing text that is already there rather than reasoning. One id,
+	// since every endpoint is OpenRouter now and only it has to be spelled for.
+	summaryModel = "anthropic/claude-haiku-4.5"
 
 	// summaryMaxTokens bounds the summary. It lands in every later request, so
 	// a summary that rambles is paid for on every turn until the next
@@ -162,10 +159,11 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 	}
 }
 
-// compactModel is the cheap model in the dialect this endpoint speaks, or the
-// agent's own where we know of no cheap model to name.
+// compactModel is the cheap model. Every endpoint reaches it now, so a custom
+// agent's own conversation is condensed as cheaply as anyone else's rather than
+// on whatever model it runs turns with.
 func (a *Agent) compactModel() anthropic.Model {
-	return anthropic.Model(cmp.Or(a.ep.summary, a.ep.model))
+	return summaryModel
 }
 
 // callSummary asks the cheap model to condense the prefix.

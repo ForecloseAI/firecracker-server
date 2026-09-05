@@ -12,10 +12,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// ownModel is a model the person brought themselves, key included.
+// ownModel is a model the person picked for themselves.
 func ownModel() *agentapi.ModelConfig {
-	return &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "sk-own-secret",
-		Model: "their-model", Thinking: "high"}
+	return &agentapi.ModelConfig{Model: "openai/gpt-4o", Thinking: "high"}
 }
 
 // custom builds one custom agent on a supervisor.
@@ -33,7 +32,7 @@ func custom(t *testing.T, sup *Supervisor, role string, m *agentapi.ModelConfig)
 // come back after a restart -- the key too, since the machine dials with it.
 // But the key stops at the roster's own file: what GET /agents reports says
 // only that a key is set.
-func TestACustomAgentKeepsItsRoleAndModelAndHidesTheKey(t *testing.T) {
+func TestACustomAgentKeepsItsRoleAndModel(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	rec := custom(t, sup, "Plan trips. Be brief.", ownModel())
 	again, err := LoadRoster(sup.stateDir)
@@ -41,15 +40,19 @@ func TestACustomAgentKeepsItsRoleAndModelAndHidesTheKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := again.Get(rec.ID)
-	if !ok || got.Instructions != "Plan trips. Be brief." || got.Model == nil || got.Model.APIKey != "sk-own-secret" {
+	if !ok || got.Instructions != "Plan trips. Be brief." || got.Model == nil || got.Model.Model == "" {
 		t.Fatalf("reloaded record: %+v", got)
 	}
 	wire, _ := json.Marshal(sup.List())
-	if strings.Contains(string(wire), "sk-own-secret") {
-		t.Fatalf("the key reached the roster listing: %s", wire)
+	if !strings.Contains(string(wire), `"model":"openai/gpt-4o"`) || !strings.Contains(string(wire), "Plan trips") {
+		t.Errorf("the listing lost the role or the model: %s", wire)
 	}
-	if !strings.Contains(string(wire), `"key_set":true`) || !strings.Contains(string(wire), "Plan trips") {
-		t.Errorf("the listing lost the role or the key flag: %s", wire)
+	// Nothing in a model config is a secret any more, so nothing has to be held
+	// back -- but the listing must not sprout the fields that used to carry one.
+	for _, gone := range []string{"key_set", "api_key", "url"} {
+		if strings.Contains(string(wire), gone) {
+			t.Errorf("the listing still carries %q: %s", gone, wire)
+		}
 	}
 }
 
@@ -64,17 +67,20 @@ func TestAnyNumberOfCustomAgentsMayExist(t *testing.T) {
 	}
 }
 
-// The machine is the one place a custom agent is checked -- the host relays
-// its refusal -- so every rule lives here: a name that fits a row, a role that
-// exists and fits a page or two, and a model that is whole. Half a model would
-// fail on the agent's first turn, which is the worst place to find out.
+// The machine is the one place a custom agent is checked -- the host relays its
+// refusal -- so every rule lives here: a name that fits a row, a role that
+// exists and fits a page or two, and a model that is named at a level we know.
+//
+// The model ID itself is deliberately unchecked: it goes to OpenRouter's whole
+// catalogue, which this machine holds no list of, so a name that does not exist
+// there fails the first turn in the gateway's words rather than being guessed at
+// in ours.
 func TestACustomAgentIsCheckedBeforeItIsStored(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	for _, bad := range []*agentapi.ModelConfig{
-		{URL: "http://models.example.com", APIKey: "k", Model: "m"}, // plaintext to the internet
-		{URL: "https://models.example.com", Model: "m"},             // no key
-		{URL: "https://models.example.com", APIKey: "k"},            // no model
-		{URL: "https://models.example.com", APIKey: "k", Model: "m", Thinking: "max"},
+		{Model: ""},    // no model
+		{Model: "   "}, // whitespace is not a model
+		{Model: "openai/gpt-4o", Thinking: "max"}, // not a thinking level
 	} {
 		req := agentapi.CreateAgentReq{Type: agentapi.CustomType, Name: "Maya", Instructions: "x", Model: bad}
 		if _, err := sup.CreateWith(req); err == nil {
@@ -111,15 +117,19 @@ func TestOnlyACustomAgentsRoleAndModelCanChange(t *testing.T) {
 	}
 }
 
-// The app never sees the key, so an edit that leaves it out keeps the stored
-// one; and an edit can hand the model back to the default.
-func TestAPatchKeepsTheStoredKeyAndCanClearTheModel(t *testing.T) {
+// An edit swaps the model outright, and can hand it back to the default.
+//
+// There is no longer a stored secret for a patch to preserve, which is the
+// whole of what this used to have to be careful about: an edit that left the
+// key out once meant "keep the one you hold", and now an edit is simply the
+// model the person chose.
+func TestAPatchSwapsTheModelAndCanClearIt(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	rec := custom(t, sup, "x", ownModel())
-	swap := &agentapi.ModelPatch{ModelConfig: agentapi.ModelConfig{URL: "https://other.example.com", Model: "m2"}}
+	swap := &agentapi.ModelPatch{ModelConfig: agentapi.ModelConfig{Model: "google/gemini-2.5-flash"}}
 	got, err := sup.Update(rec.ID, agentapi.AgentPatch{Model: swap})
-	if err != nil || got.Model.APIKey != "sk-own-secret" || got.Model.Model != "m2" {
-		t.Fatalf("patch without a key: %+v, %v", got.Model, err)
+	if err != nil || got.Model.Model != "google/gemini-2.5-flash" {
+		t.Fatalf("patch: %+v, %v", got.Model, err)
 	}
 	got, err = sup.Update(rec.ID, agentapi.AgentPatch{Model: &agentapi.ModelPatch{Clear: true}})
 	if err != nil || got.Model != nil {
@@ -183,7 +193,7 @@ func TestAgentsCannotHireACustomAgent(t *testing.T) {
 // the ceiling by exactly the budget; reasoning between tool calls needs a beta
 // of its own, which only Anthropic understands.
 func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium", summary: summaryOpenRouter}}
+	a := &Agent{system: "p", ep: endpoint{model: "m", thinking: "medium"}}
 	p := a.params(nil).BetaMessageNewParams
 	if p.MaxTokens != maxTokens+8192 || p.Thinking.OfEnabled == nil || p.Thinking.OfEnabled.BudgetTokens != 8192 {
 		t.Fatalf("thinking request: max_tokens %d thinking %+v", p.MaxTokens, p.Thinking)
@@ -191,7 +201,7 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 	if !slices.Contains(p.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
 		t.Error("interleaved thinking was not asked for")
 	}
-	plain := (&Agent{system: "p", ep: endpoint{model: "m", summary: summaryOpenRouter}}).
+	plain := (&Agent{system: "p", ep: endpoint{model: "m"}}).
 		params(nil).BetaMessageNewParams
 	if plain.MaxTokens != maxTokens || plain.Thinking.OfEnabled != nil ||
 		slices.Contains(plain.Betas, anthropic.AnthropicBetaInterleavedThinking2025_05_14) {
@@ -199,54 +209,43 @@ func TestThinkingRaisesTheCeilingAndAsksForTheBeta(t *testing.T) {
 	}
 }
 
-// An endpoint of the person's own speaks the API but not Anthropic's betas: it
-// gets plain requests, and its compaction runs on its own model, since the
-// cheap one may not exist there.
-func TestAPastedEndpointGetsPlainRequests(t *testing.T) {
-	a := &Agent{system: "p", ep: endpoint{baseURL: "https://models.example.com",
-		model: "m", thinking: "low", bearer: true}}
-	p := a.params(nil).BetaMessageNewParams
-	if len(p.Betas) != 0 || p.ContextManagement.Edits != nil {
-		t.Errorf("a pasted endpoint was sent betas %v and context management %+v", p.Betas, p.ContextManagement)
-	}
-	if p.Thinking.OfEnabled == nil {
-		t.Error("thinking is not a beta and should still be asked for")
-	}
-}
-
-// The assertion that used to live above this was `(&Agent{}).compactModel()`,
-// which builds an endpoint with no host at all: it proved the default branch was
-// taken and nothing about which id that branch names. That is precisely how a
-// rename of the summariser to an OpenRouter slug passed the whole suite while
-// pointing a bring-your-own-Anthropic agent at a model Anthropic does not have.
+// A custom agent's own model is now a first-class citizen rather than a poor
+// relation, and this is the whole point of routing it through the broker.
 //
-// Compaction is the call nobody watches -- a bad id there does not fail a turn,
-// it logs inside compactIfNeeded and returns, so the conversation quietly stops
-// being trimmed -- so the id each endpoint actually sends is worth pinning.
-func TestEachEndpointCompactsWithAnIDItsOwnHostKnows(t *testing.T) {
-	// The ids are written out rather than referred to by constant. Asserting
-	// against the same constant the code reads moves both sides together, which
-	// is the flaw that let the original bug through -- verified by swapping the
-	// constants and watching a symbolic version of this test still pass. These
-	// two literals were confirmed against their own hosts on 2026-09-06.
-	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
-	if got := (&Agent{ep: base}).compactModel(); string(got) != "anthropic/claude-haiku-4.5" {
-		t.Errorf("brokered compaction uses %q, want anthropic/claude-haiku-4.5", got)
+// It used to get a client of its own pointed at a URL the person pasted, which
+// meant no betas, no context management -- so its history was never trimmed and
+// every tool result in it was re-billed uncached on every turn -- and compaction
+// ran on its own model, because the cheap one might not exist wherever they had
+// pointed it. All three were the price of not knowing where the request went.
+// We know now: it goes where every other request goes.
+func TestACustomAgentsModelGetsTheSameTreatmentAsAnyOther(t *testing.T) {
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
+	own := &agentapi.ModelConfig{Model: "openai/gpt-4o", Thinking: "low"}
+	ep := base.forAgent("anthropic/claude-sonnet-5", own)
+
+	if ep.model != "openai/gpt-4o" || ep.thinking != "low" {
+		t.Fatalf("the person's choice did not take: %+v", ep)
 	}
-	own := &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"}
-	if got := (&Agent{ep: base.forAgent("x", own)}).compactModel(); string(got) != "claude-haiku-4-5" {
-		t.Errorf("Anthropic compaction uses %q, want its own unprefixed claude-haiku-4-5", got)
+	if ep.baseURL != base.baseURL || ep.key != brokerKey {
+		t.Errorf("a custom agent left the broker: %+v", ep)
 	}
-	pasted := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "k", Model: "m"}
-	if got := (&Agent{ep: base.forAgent("x", pasted)}).compactModel(); string(got) != "m" {
-		t.Errorf("an unknown endpoint compacts with %q, want the agent's own model", got)
+	p := (&Agent{system: "p", ep: ep}).params(nil).BetaMessageNewParams
+	if !slices.Contains(p.Betas, anthropic.AnthropicBetaContextManagement2025_06_27) {
+		t.Errorf("custom betas = %v, want the context-management beta", p.Betas)
+	}
+	if p.ContextManagement.Edits == nil {
+		t.Error("a custom agent's history is never trimmed; every tool result is re-billed")
+	}
+	// And it condenses on the cheap model rather than on gpt-4o, which is the
+	// bill this used to quietly run up on the longest conversations.
+	if got := (&Agent{ep: ep}).compactModel(); string(got) != "anthropic/claude-haiku-4.5" {
+		t.Errorf("custom compaction uses %q, want the cheap model", got)
 	}
 }
 
 // The per-agent view is named from the roster and ordered the way the roster
 // is: live agents first, then agents that were retired, by id, then what was
-// spent before agents were told apart. A custom agent on its own model is
-// marked, so the host can say its price is an estimate rather than the bill.
+// spent before agents were told apart.
 func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 	sup := supervisorWith(t, 8)
 	maya := custom(t, sup, "x", ownModel())
@@ -263,7 +262,7 @@ func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 	if want := []string{BossID, maya.ID, "gone", agentapi.UnattributedAgent}; !slices.Equal(ids, want) {
 		t.Fatalf("order %v, want %v", ids, want)
 	}
-	if got[0].Name != "Boss" || got[1].Name != "Maya" || !got[1].OwnKey || got[0].OwnKey {
+	if got[0].Name != "Boss" || got[1].Name != "Maya" {
 		t.Errorf("live rows: %+v %+v", got[0], got[1])
 	}
 	if !got[2].Retired || got[2].Name != "gone" || got[3].Retired || got[3].Name != "Before per-agent tracking" {
@@ -282,7 +281,7 @@ func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
 	a := &Agent{system: "p", ep: endpoint{
 		baseURL: "http://172.16.0.1:8092", key: brokerKey,
-		model: "anthropic/claude-sonnet-5", summary: summaryOpenRouter}}
+		model: "anthropic/claude-sonnet-5"}}
 	p := a.params(nil).BetaMessageNewParams
 	if !slices.Contains(p.Betas, anthropic.AnthropicBetaContextManagement2025_06_27) {
 		t.Errorf("brokered betas = %v, want the context-management beta", p.Betas)
