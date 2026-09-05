@@ -30,6 +30,14 @@ const brokerPort = "8092"
 // so any non-empty string does; this one says what it is in a capture.
 const brokerKey = "brokered"
 
+// appURL and appName are what OpenRouter attributes a request to, in its
+// HTTP-Referer and X-Title headers: the service making the call and its name.
+// Constants rather than config -- they say who we are, which does not vary.
+const (
+	appURL  = "https://chat.usetypeo.com"
+	appName = "AutoBots"
+)
+
 // routeTable is the kernel's routing table. The guest's default route is its
 // tap gateway, which is the host, which is where the broker listens. A var so
 // a test can point it at a fixture.
@@ -49,10 +57,12 @@ type endpoint struct {
 	model    string
 	thinking string
 	// foreign marks an endpoint of the person's own that is not Anthropic
-	// itself. Requests to it are plain: no betas, no context management, since
-	// another service that speaks the API need not honour them. Everything
-	// else -- the environment, the broker, api.anthropic.com on their own key
-	// -- is Anthropic, and the zero value says so.
+	// itself -- OpenRouter's Anthropic-compatible surface, typically. Requests
+	// to it are plain: no betas, no context management, since another service
+	// that speaks the API need not honour them, and they present a bearer
+	// credential, which is how a gateway authenticates. Everything else -- the
+	// environment, the broker, api.anthropic.com on their own key -- is
+	// Anthropic, and the zero value says so.
 	foreign bool
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
@@ -87,9 +97,23 @@ func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 		ep.model = model
 		return ep
 	}
-	u, err := url.Parse(own.URL)
-	return endpoint{baseURL: own.URL, key: own.APIKey, model: own.Model, thinking: own.Thinking,
+	base := modelBase(own.URL)
+	u, err := url.Parse(base)
+	return endpoint{baseURL: base, key: own.APIKey, model: own.Model, thinking: own.Thinking,
 		foreign: err != nil || u.Hostname() != "api.anthropic.com"}
+}
+
+// modelBase trims a pasted base URL back to what the SDK expects. The SDK
+// appends "v1/messages" itself, and OpenRouter documents its endpoint as
+// .../api/v1, so a URL copied from those docs would otherwise dial v1 twice.
+func modelBase(raw string) string {
+	trimmed := strings.TrimRight(raw, "/")
+	for _, suffix := range []string{"/v1/chat/completions", "/v1/messages", "/v1"} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return strings.TrimSuffix(trimmed, suffix)
+		}
+	}
+	return trimmed
 }
 
 // newClient builds the SDK client for an endpoint. One construction path for
@@ -103,7 +127,22 @@ func newClient(ep endpoint) anthropic.Client {
 		opts = append(opts, option.WithoutEnvironmentDefaults(),
 			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
+	if ep.foreign {
+		opts = append(opts, foreignOpts(ep.key)...)
+	}
 	return anthropic.NewClient(opts...)
+}
+
+// foreignOpts is what a gateway of the person's own needs beyond the base URL:
+// a bearer credential, which is how OpenRouter authenticates, and the two
+// headers it attributes traffic by. The x-api-key set alongside is left as it
+// is -- a gateway wanting that shape instead is no worse off for the extra.
+func foreignOpts(key string) []option.RequestOption {
+	return []option.RequestOption{
+		option.WithAuthToken(key),
+		option.WithHeader("HTTP-Referer", appURL),
+		option.WithHeader("X-Title", appName),
+	}
 }
 
 // modelHTTP is the one HTTP client every agent's model calls share, so

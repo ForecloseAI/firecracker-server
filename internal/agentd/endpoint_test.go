@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"cracked/internal/agentapi"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // routeFixture is a guest's routing table: the tap's own /30, a default-looking
@@ -93,6 +95,7 @@ func TestBrokeredModeHonoursABaseURLOverride(t *testing.T) {
 type modelSpy struct {
 	srv                      *httptest.Server
 	path, key, version, beta string
+	auth, referer, title     string
 	reply, lastBody          string
 }
 
@@ -111,6 +114,8 @@ func fakeModel(t *testing.T) *modelSpy {
 		spy.lastBody = string(body)
 		spy.path, spy.key = r.URL.Path, r.Header.Get("x-api-key")
 		spy.version, spy.beta = r.Header.Get("anthropic-version"), r.Header.Get("anthropic-beta")
+		spy.auth, spy.referer = r.Header.Get("Authorization"), r.Header.Get("HTTP-Referer")
+		spy.title = r.Header.Get("X-Title")
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spy.reply))
 	}))
@@ -231,5 +236,83 @@ func TestAThinkingBlockSurvivesARestartIntact(t *testing.T) {
 	}
 	if fake.key != "sk-own" {
 		t.Errorf("the person's own key was not used: %q", fake.key)
+	}
+}
+
+// ask sends the smallest possible message through a client, so a test can look
+// at what the endpoint presented. The reply is the fake's; only headers matter.
+func ask(t *testing.T, ep endpoint) {
+	t.Helper()
+	c := newClient(ep)
+	_, err := c.Beta.Messages.New(context.Background(), anthropic.BetaMessageNewParams{
+		Model: "m", MaxTokens: 16,
+		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(
+			anthropic.NewBetaTextBlock("hi"))},
+	})
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+}
+
+// A gateway of the person's own is authenticated with a bearer token, because
+// that is what OpenRouter -- the reason this path exists -- reads. It is sent
+// alongside the x-api-key, not instead of it, so an endpoint that wants the
+// Anthropic shape still works. The two attribution headers ride along.
+func TestAForeignEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
+	clearModelEnv(t)
+	fake := fakeModel(t)
+	own := &agentapi.ModelConfig{URL: fake.srv.URL, APIKey: "sk-or-test", Model: "openai/gpt-4o"}
+	ep := endpoint{}.forAgent("unused", own)
+	if !ep.foreign {
+		t.Fatal("a gateway on 127.0.0.1 should be foreign")
+	}
+	ask(t, ep)
+	if fake.auth != "Bearer sk-or-test" {
+		t.Errorf("Authorization = %q, want a bearer token", fake.auth)
+	}
+	if fake.key != "sk-or-test" {
+		t.Errorf("x-api-key = %q, want the key alongside the bearer", fake.key)
+	}
+	if fake.referer != appURL || fake.title != appName {
+		t.Errorf("attribution = %q / %q, want %q / %q", fake.referer, fake.title, appURL, appName)
+	}
+}
+
+// The broker and Anthropic itself are unchanged: x-api-key alone, and no
+// bearer token that an upstream might prefer over the key the broker swaps in.
+func TestTheBrokerIsStillAuthenticatedWithTheKeyHeaderAlone(t *testing.T) {
+	clearModelEnv(t)
+	fake := fakeModel(t)
+	ask(t, endpoint{baseURL: fake.srv.URL, key: brokerKey})
+	if fake.key != brokerKey {
+		t.Errorf("x-api-key = %q, want %q", fake.key, brokerKey)
+	}
+	if fake.auth != "" || fake.referer != "" || fake.title != "" {
+		t.Errorf("brokered request carried %q / %q / %q, want none of them",
+			fake.auth, fake.referer, fake.title)
+	}
+}
+
+// The SDK appends v1/messages to the base URL, and OpenRouter documents its
+// endpoint as .../api/v1. Someone copying that would dial /api/v1/v1/messages
+// and get a 404 with nothing to explain it, so the suffix comes off here.
+func TestAPastedBaseURLIsTrimmedToWhatTheSDKWants(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://openrouter.ai/api/v1":                  "https://openrouter.ai/api",
+		"https://openrouter.ai/api/v1/":                 "https://openrouter.ai/api",
+		"https://openrouter.ai/api/v1/messages":         "https://openrouter.ai/api",
+		"https://openrouter.ai/api/v1/chat/completions": "https://openrouter.ai/api",
+		"https://openrouter.ai/api":                     "https://openrouter.ai/api",
+		"https://api.anthropic.com":                     "https://api.anthropic.com",
+		"http://172.16.0.1:8092":                        "http://172.16.0.1:8092",
+	} {
+		if got := modelBase(raw); got != want {
+			t.Errorf("modelBase(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	ep := endpoint{}.forAgent("x", &agentapi.ModelConfig{
+		URL: "https://api.anthropic.com/v1", APIKey: "k", Model: "m"})
+	if ep.foreign {
+		t.Error("trimming a version off api.anthropic.com made it look foreign")
 	}
 }
