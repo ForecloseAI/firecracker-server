@@ -17,7 +17,7 @@ verifying Supabase access tokens; everything else is stdlib.
 | `internal/hostnet` | TAP devices and slot→IP/MAC derivation |
 | `internal/api` | HTTP routes, bearer auth, WebSocket-capable proxy |
 | `rootfs/` | guest image: Dockerfile, overlay-init, systemd units, agentd, built-in skills |
-| `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh`, `vm-ssh.sh` |
+| `scripts/` | `host-setup.sh` (once per host), `build-rootfs.sh`, `vm-ssh.sh`, `diagnose-agents.sh` |
 | `deploy/` | systemd unit for the control plane |
 
 ## Setup
@@ -598,6 +598,52 @@ unrestricted outbound internet by design (see the firewall notes above) and
 without touching this. Nor does it inspect arguments: an approved send with a
 poisoned body is an approved send. What it buys is that loud, irreversible
 actions stop and ask, and that every one is on the record.
+
+## When agents stop answering
+
+"The agent does not reply" is the same sentence for eight different faults, and
+the fleet table cannot tell them apart. Every column it draws is measured on the
+**host** — uptime, CPU, rss, agent state — so a guest that lost DNS, whose API
+key was rotated, or whose credit ran out reads exactly like a healthy one. The
+VM is up, the daemon answers, the state says idle, and nothing replies.
+
+`scripts/diagnose-agents.sh` walks the chain a message actually takes, from the
+outside in, and stops being interesting at the first layer that fails:
+
+```
+caddy -> cracked-chat -> cracked -> tap -> agentd -> api.anthropic.com
+```
+
+```sh
+scripts/diagnose-agents.sh              # every running VM
+scripts/diagnose-agents.sh alice        # one machine
+scripts/diagnose-agents.sh --no-spend   # skip the one billable probe
+```
+
+Run it on the host. It reads `CRACKED_TOKEN` out of the unit the way the
+dashboard instructions do, reaches guests through the operator `/debug/exec`
+route rather than ssh — so it still works when sshd is what is broken — and
+changes nothing.
+
+The last check is the one worth understanding. Reaching the API proves the
+network; a `200` from `/v1/models` proves the key authenticates; only an actual
+completion proves the key can still **buy** one. Credit exhaustion and a
+retired model are invisible to every other surface this system has, which is
+why the probe spends about one input token per VM. `--no-spend` skips it and
+loses that distinction.
+
+Three faults it names that are otherwise slow to find:
+
+- **An agent in `waiting` with a pending card** is blocked on a person, not
+  stuck. It sits there for `approvalTimeout` (30 minutes) looking identical to a
+  hang. If the app never rendered the card, the agent is waiting on something
+  nobody can see — `POST /agents/{id}/interrupt` clears it.
+- **A missing `MASQUERADE` rule.** Guests then resolve nothing and every turn
+  dies on dial. The rules are saved by `netfilter-persistent`, so the way this
+  goes missing is a reboot after a `host-setup.sh` run that could not save them.
+- **A rotated API key.** It is baked into the image, so fixing it is a rootfs
+  rebuild *and* a delete-and-recreate of every VM — a running VM holds the
+  deleted inode and keeps the old key.
 
 ## Operational notes
 
