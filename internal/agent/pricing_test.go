@@ -120,15 +120,16 @@ func TestAReportedCostBeatsTheTable(t *testing.T) {
 	}
 }
 
-// The table is keyed on Anthropic ids, so an OpenRouter slug matches nothing in
-// it. That is fine only because the response carries the price: without this,
-// every turn on the fleet would land in UnpricedModels and read as free.
-func TestAPrefixedSlugIsPricedFromItsOwnReport(t *testing.T) {
-	if _, ok := rateFor("anthropic/claude-sonnet-5"); ok {
-		t.Fatal("the table matched a prefixed slug; this test no longer proves anything")
+// A model this table has never heard of is priced anyway when the endpoint said
+// what it cost -- which is the whole point of reading the figure. Gemini is the
+// real case: reachable now that the fleet goes through a gateway, and no version
+// of an Anthropic price table will ever have a rate for it.
+func TestAModelTheTableNeverKnewIsPricedFromItsOwnReport(t *testing.T) {
+	if _, ok := rateFor("google/gemini-2.5-flash"); ok {
+		t.Fatal("the table priced a Gemini model; this test no longer proves anything")
 	}
 	got := Price(agentapi.UsageReport{ByModel: []agentapi.ModelUsage{
-		{Model: "anthropic/claude-sonnet-5", Usage: agentapi.Usage{InputTokens: 100, CostUSD: 0.25}},
+		{Model: "google/gemini-2.5-flash", Usage: agentapi.Usage{InputTokens: 100, CostUSD: 0.25}},
 	}})
 	if len(got.UnpricedModels) != 0 {
 		t.Errorf("unpriced = %v; a call that reported its cost is priced", got.UnpricedModels)
@@ -147,5 +148,27 @@ func TestNoReportedCostStillFallsBackToTheTable(t *testing.T) {
 	got, ok := costOf("claude-sonnet-5", agentapi.Usage{InputTokens: million})
 	if !ok || got != want {
 		t.Errorf("cost = %v (ok=%v), want %v from the table", got, ok, want)
+	}
+}
+
+// The reported cost is the authority, but it must not be the only thing between
+// this table and a fleet reporting $0. Every model the profiles ask for is
+// provider-prefixed now, so without stripping that the table matches nothing
+// the fleet runs -- and the day a response omits its cost, every VM would read
+// as free with one log line to say why.
+func TestAProviderPrefixDoesNotHideAKnownModel(t *testing.T) {
+	const million = 1_000_000
+	want := priceTable["claude-sonnet-5"].in
+	got, ok := costOf("anthropic/claude-sonnet-5", agentapi.Usage{InputTokens: million})
+	if !ok || got != want {
+		t.Errorf("cost = %v (ok=%v), want %v from the table", got, ok, want)
+	}
+	// The stripping must not invent prices for models the table never knew.
+	if _, ok := rateFor("openai/gpt-4o"); ok {
+		t.Error("a model with no table entry was priced anyway")
+	}
+	// And the longest-prefix rule still has to survive it.
+	if r, _ := rateFor("anthropic/claude-opus-4-5-20251101"); r != priceTable["claude-opus-4-5"] {
+		t.Errorf("a dated prefixed Opus 4.5 resolved to %+v", r)
 	}
 }

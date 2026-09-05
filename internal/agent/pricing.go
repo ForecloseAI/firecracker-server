@@ -46,7 +46,16 @@ var priceTable = map[string]rate{
 }
 
 // rateFor finds a model's price by longest matching prefix.
+//
+// A provider prefix comes off first. The table is keyed on the ids Anthropic
+// reports, and a gateway that reports "anthropic/claude-sonnet-5" is naming the
+// same model at the same rates -- so without this the table could not match
+// anything the fleet asks for, and a reported cost would be the only pricing
+// path there is, with silence if it ever went missing.
 func rateFor(model string) (rate, bool) {
+	if _, rest, found := strings.Cut(model, "/"); found {
+		model = rest
+	}
 	best, found := "", rate{}
 	for prefix, r := range priceTable {
 		if strings.HasPrefix(model, prefix) && len(prefix) > len(best) {
