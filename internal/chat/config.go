@@ -141,6 +141,16 @@ func validUpstream(u *url.URL) error {
 	if u.RawQuery != "" {
 		return errors.New("must not carry a query")
 	}
+	// The SDK appends v1/messages itself, and every OpenRouter doc page shows
+	// the base as .../api/v1 -- so the obvious copy-paste dials /api/v1/v1/
+	// messages and 404s the whole fleet on a value that looks right. The guest
+	// trims this for a pasted URL (modelBase); here it is refused by name,
+	// because an operator can fix a startup error and cannot see a 404 a guest
+	// gets an hour later.
+	if p := strings.TrimRight(u.Path, "/"); strings.HasSuffix(p, "/v1") ||
+		strings.HasSuffix(p, "/v1/messages") {
+		return errors.New("must not end in /v1 or /v1/messages; the SDK appends those")
+	}
 	if u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname())) {
 		return nil
 	}

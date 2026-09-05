@@ -79,6 +79,17 @@ type endpoint struct {
 	// bearer, Anthropic wants the key header, and a brokered request wants
 	// neither because the host sets both on its own key.
 	bearer bool
+	// summary is the cheap model to compact with, in the id dialect this
+	// endpoint speaks: OpenRouter prefixes by provider, Anthropic does not, and
+	// each rejects the other's spelling. Empty means we know of no cheap model
+	// here, and compaction runs on the agent's own.
+	//
+	// It has to travel with the endpoint rather than be one constant, because
+	// compaction is the call nobody watches: a wrong id there does not fail a
+	// turn, it fails inside compactIfNeeded, which logs and returns, so the
+	// conversation silently stops being trimmed and re-pays its whole history
+	// on every turn after that.
+	summary string
 	// err is why the broker could not be located, kept for the startup line.
 	// Turns on such an endpoint fail, and the log should already say why.
 	err error
@@ -99,16 +110,17 @@ type endpoint struct {
 // profiles now ask for are OpenRouter slugs Anthropic would reject.
 func defaultEndpoint() endpoint {
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		return endpoint{baseURL: openRouterBase, key: key, bearer: true}
+		return endpoint{baseURL: openRouterBase, key: key, bearer: true, summary: summaryOpenRouter}
 	}
 	if base := os.Getenv("ANTHROPIC_BASE_URL"); base != "" {
-		return endpoint{baseURL: base, key: brokerKey}
+		return endpoint{baseURL: base, key: brokerKey, summary: summaryOpenRouter}
 	}
 	gw, err := gatewayIP()
 	if err != nil {
 		return endpoint{err: err}
 	}
-	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey}
+	return endpoint{baseURL: "http://" + net.JoinHostPort(gw, brokerPort), key: brokerKey,
+		summary: summaryOpenRouter}
 }
 
 // forAgent is this endpoint with the model one agent should call -- or, when
@@ -127,8 +139,13 @@ func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 	base := modelBase(own.URL)
 	u, err := url.Parse(base)
 	notAnthropic := err != nil || u.Hostname() != "api.anthropic.com"
-	return endpoint{baseURL: base, key: own.APIKey, model: own.Model, thinking: own.Thinking,
+	ep2 := endpoint{baseURL: base, key: own.APIKey, model: own.Model, thinking: own.Thinking,
 		plain: notAnthropic, bearer: notAnthropic}
+	if !notAnthropic {
+		// Anthropic knows the cheap model, under its own unprefixed name.
+		ep2.summary = summaryAnthropic
+	}
+	return ep2
 }
 
 // modelBase trims a pasted base URL back to what the SDK expects. The SDK
@@ -150,10 +167,16 @@ func modelBase(raw string) string {
 // A brokered endpoint also drops the SDK's environment defaults, so a stray
 // ANTHROPIC_BASE_URL or credential file cannot redirect it.
 func newClient(ep endpoint) anthropic.Client {
-	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP())}
+	// WithoutEnvironmentDefaults goes on unconditionally, including on the
+	// endpoint that failed to find a broker. Applying it only alongside a base
+	// URL left exactly that case reading the SDK's environment, so a stray
+	// ANTHROPIC_API_KEY in a guest would quietly route turns to Anthropic --
+	// where the profiles' prefixed ids are rejected -- instead of failing the
+	// loud way the startup line promises.
+	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP()),
+		option.WithoutEnvironmentDefaults()}
 	if ep.baseURL != "" {
-		opts = append(opts, option.WithoutEnvironmentDefaults(),
-			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
+		opts = append(opts, option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
 	// An endpoint carrying a key of our own that is not Anthropic also gets a
 	// bearer credential, which is how OpenRouter authenticates, and the two

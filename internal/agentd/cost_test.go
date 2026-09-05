@@ -131,10 +131,10 @@ func TestACompactionSummaryBooksItsCost(t *testing.T) {
 
 	u := usageFrom(t, `{"input_tokens":4000,"output_tokens":300,
 		"cost":0.01,"is_byok":true,"cost_details":{"upstream_inference_cost":0.19}}`)
-	a.bookUsage(summaryModel, usageOf(u))
+	a.bookUsage(summaryOpenRouter, usageOf(u))
 
 	for _, row := range a.meter().Report().ByModel {
-		if row.Model == summaryModel {
+		if row.Model == summaryOpenRouter {
 			if row.CostUSD != 0.20 {
 				t.Errorf("summary CostUSD = %v, want 0.20", row.CostUSD)
 			}

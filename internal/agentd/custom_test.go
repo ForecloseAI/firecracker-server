@@ -213,8 +213,34 @@ func TestAPastedEndpointGetsPlainRequests(t *testing.T) {
 	if a.compactModel() != "m" {
 		t.Errorf("compaction on a pasted endpoint uses %q", a.compactModel())
 	}
-	if (&Agent{}).compactModel() != summaryModel {
-		t.Error("compaction on Anthropic left the cheap model")
+}
+
+// The assertion that used to live above this was `(&Agent{}).compactModel()`,
+// which builds an endpoint with no host at all: it proved the default branch was
+// taken and nothing about which id that branch names. That is precisely how a
+// rename of the summariser to an OpenRouter slug passed the whole suite while
+// pointing a bring-your-own-Anthropic agent at a model Anthropic does not have.
+//
+// Compaction is the call nobody watches -- a bad id there does not fail a turn,
+// it logs inside compactIfNeeded and returns, so the conversation quietly stops
+// being trimmed -- so the id each endpoint actually sends is worth pinning.
+func TestEachEndpointCompactsWithAnIDItsOwnHostKnows(t *testing.T) {
+	// The ids are written out rather than referred to by constant. Asserting
+	// against the same constant the code reads moves both sides together, which
+	// is the flaw that let the original bug through -- verified by swapping the
+	// constants and watching a symbolic version of this test still pass. These
+	// two literals were confirmed against their own hosts on 2026-09-06.
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey, summary: summaryOpenRouter}
+	if got := (&Agent{ep: base}).compactModel(); string(got) != "anthropic/claude-haiku-4.5" {
+		t.Errorf("brokered compaction uses %q, want anthropic/claude-haiku-4.5", got)
+	}
+	own := &agentapi.ModelConfig{URL: "https://api.anthropic.com", APIKey: "k", Model: "m"}
+	if got := (&Agent{ep: base.forAgent("x", own)}).compactModel(); string(got) != "claude-haiku-4-5" {
+		t.Errorf("Anthropic compaction uses %q, want its own unprefixed claude-haiku-4-5", got)
+	}
+	pasted := &agentapi.ModelConfig{URL: "https://models.example.com", APIKey: "k", Model: "m"}
+	if got := (&Agent{ep: base.forAgent("x", pasted)}).compactModel(); string(got) != "m" {
+		t.Errorf("an unknown endpoint compacts with %q, want the agent's own model", got)
 	}
 }
 
@@ -256,7 +282,8 @@ func TestAgentUsageIsNamedAndOrderedByTheRoster(t *testing.T) {
 // this test is what says so out loud.
 func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
 	a := &Agent{system: "p", ep: endpoint{
-		baseURL: "http://172.16.0.1:8092", key: brokerKey, model: "anthropic/claude-sonnet-5"}}
+		baseURL: "http://172.16.0.1:8092", key: brokerKey,
+		model: "anthropic/claude-sonnet-5", summary: summaryOpenRouter}}
 	p := a.params(nil).BetaMessageNewParams
 	if !slices.Contains(p.Betas, anthropic.AnthropicBetaContextManagement2025_06_27) {
 		t.Errorf("brokered betas = %v, want the context-management beta", p.Betas)
@@ -264,7 +291,7 @@ func TestABrokeredTurnKeepsItsBetasAndContextManagement(t *testing.T) {
 	if p.ContextManagement.Edits == nil {
 		t.Error("the brokered path sends no context management; every tool result is re-billed")
 	}
-	if a.compactModel() != summaryModel {
+	if string(a.compactModel()) != summaryOpenRouter {
 		t.Errorf("brokered compaction uses %q, want the cheap model", a.compactModel())
 	}
 }

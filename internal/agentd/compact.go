@@ -36,7 +36,11 @@ const (
 
 	// summaryModel is cheap on purpose: this reads the whole prefix, and the
 	// job is condensing text that is already there rather than reasoning.
-	summaryModel = "anthropic/claude-haiku-4.5"
+	// The cheap summariser, spelled for each endpoint that knows it. Both
+	// verified against OpenRouter 2026-09-06; the dashed "claude-haiku-4-5" is
+	// an error there, and the dotted prefixed form is an error at Anthropic.
+	summaryOpenRouter = "anthropic/claude-haiku-4.5"
+	summaryAnthropic  = "claude-haiku-4-5"
 
 	// summaryMaxTokens bounds the summary. It lands in every later request, so
 	// a summary that rambles is paid for on every turn until the next
@@ -158,14 +162,13 @@ func synthPair(summary string, covered int) []anthropic.BetaMessageParam {
 	}
 }
 
-// compactModel is the cheap model where we know it exists, or the agent's own
-// on an endpoint we know nothing about, where a summariser id we picked may
-// name nothing at all.
+// compactModel is the cheap model in the dialect this endpoint speaks, or the
+// agent's own where we know of no cheap model to name.
 func (a *Agent) compactModel() anthropic.Model {
-	if a.ep.plain {
+	if a.ep.summary == "" {
 		return anthropic.Model(a.ep.model)
 	}
-	return summaryModel
+	return anthropic.Model(a.ep.summary)
 }
 
 // callSummary asks the cheap model to condense the prefix.

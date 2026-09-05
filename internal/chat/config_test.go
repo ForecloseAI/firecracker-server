@@ -47,15 +47,21 @@ func TestTheModelKeyIsRequired(t *testing.T) {
 // so is a value that did not parse at all.
 func TestUpstreamMustBeHTTPSUnlessLoopback(t *testing.T) {
 	for _, ok := range []string{"https://openrouter.ai/api", "https://openrouter.ai/api/",
-		"https://api.anthropic.com", "http://127.0.0.1:9", "http://localhost:9", "http://[::1]:9"} {
+		"http://127.0.0.1:9", "http://localhost:9", "http://[::1]:9"} {
 		c := validConfig()
 		c.OpenRouterUpstream = mustURL(ok)
 		if err := c.validate(); err != nil {
 			t.Errorf("%s refused: %v", ok, err)
 		}
 	}
+	// api.anthropic.com is NOT in the accepted list, deliberately: the broker
+	// authenticates with a bearer token now, which Anthropic reads as an OAuth
+	// token, so that upstream would 401 every turn. Accepting it here would
+	// advertise a rollback that does not work.
 	for _, bad := range []string{"http://openrouter.ai/api",
-		"https://openrouter.ai/api?x=1", "openrouter.ai/api", ""} {
+		"https://openrouter.ai/api?x=1", "openrouter.ai/api", "",
+		"https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/",
+		"https://openrouter.ai/api/v1/messages"} {
 		c := validConfig()
 		c.OpenRouterUpstream = mustURL(bad)
 		if err := c.validate(); err == nil {

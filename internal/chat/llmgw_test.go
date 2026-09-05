@@ -118,9 +118,9 @@ func TestOnlyAGuestAddressMayUseTheModelBroker(t *testing.T) {
 	}
 }
 
-// The key is lent for turns and nothing wider: only the two message endpoints,
+// The key is lent for turns and nothing wider: only the one message endpoint,
 // and only POST. Everything else the key could reach is 404.
-func TestOnlyTheTwoMessagePathsAreProxied(t *testing.T) {
+func TestOnlyTheMessagesPathIsProxied(t *testing.T) {
 	up := newUpstream(t)
 	h := modelBroker(up.srv.URL)
 	refused := []struct{ method, path string }{
