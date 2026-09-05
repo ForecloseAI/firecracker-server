@@ -27,6 +27,7 @@ func fullEvent() agentd.Event {
 		Usage: &agentapi.Usage{
 			InputTokens: 1, OutputTokens: 2, CacheReadInputTokens: 3,
 			CacheCreationInputTokens: 4, ClearedInputTokens: 5, ClearedToolUses: 6,
+			CostUSD: 0.0725,
 		},
 		DurationMS: 1500, SessionState: "working", Message: "a message", IsError: true,
 		ApprovalID: "coder.ap_001", Preview: "a preview", Question: "a question",

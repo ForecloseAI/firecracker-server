@@ -25,10 +25,15 @@ import (
 // that must reach "whoever is in charge here" without listing the roster first.
 const BossID = "boss"
 
-// Usage mirrors the SDK's usage block. There is deliberately no cost field: the
-// Messages API returns token counts only, so events carry tokens plus the model
-// id and pricing is applied host-side, where the table can change without
-// rebuilding a guest image.
+// Usage mirrors the SDK's usage block, plus what the call cost when the endpoint
+// is willing to say.
+//
+// Pricing is still applied host-side wherever it is not: Anthropic returns token
+// counts only, so an event carries tokens and a model id, and the table that
+// turns those into money changes without rebuilding a guest image. What changed
+// is that a gateway can price its own call better than any table -- it knows its
+// fees and which provider it actually routed to -- so when one does, that figure
+// wins.
 type Usage struct {
 	// ClearedInputTokens and ClearedToolUses report what context editing
 	// actually removed. They are the only evidence it is doing anything: a
@@ -41,6 +46,11 @@ type Usage struct {
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+
+	// CostUSD is what the endpoint reported this call cost, in US dollars, and
+	// zero when it reported nothing. Zero means "no figure", never "free": the
+	// host falls back to its price table, and to the unpriced warning after that.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // UI tells a client how to render a pending interaction.

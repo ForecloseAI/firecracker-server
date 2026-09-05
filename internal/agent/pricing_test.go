@@ -98,3 +98,54 @@ func TestEveryModelsSpendIsInTheTotal(t *testing.T) {
 		t.Errorf("totals = %+v", got)
 	}
 }
+
+// An endpoint that priced its own call knows two things this table cannot: the
+// fees it added, and which provider it actually routed to. When it reports a
+// figure, that figure is the bill -- and it has to beat the table rather than
+// merely fill in for it, or every OpenRouter turn would be re-estimated at
+// Anthropic list prices and quietly disagree with the invoice.
+func TestAReportedCostBeatsTheTable(t *testing.T) {
+	// A million input tokens, which the table would price at its own rate --
+	// so a fall-through would give a different number, not merely a wrong one.
+	u := agentapi.Usage{InputTokens: 1_000_000, CostUSD: 7.50}
+	if table, _ := costOf("claude-sonnet-5", agentapi.Usage{InputTokens: 1_000_000}); table == 7.50 {
+		t.Fatal("the table happens to agree with the reported figure; this test proves nothing")
+	}
+	got, ok := costOf("claude-sonnet-5", u)
+	if !ok {
+		t.Fatal("a call that came with a price was reported as unpriceable")
+	}
+	if got != 7.50 {
+		t.Errorf("cost = %v, want 7.50 (the table overrode the reported figure)", got)
+	}
+}
+
+// The table is keyed on Anthropic ids, so an OpenRouter slug matches nothing in
+// it. That is fine only because the response carries the price: without this,
+// every turn on the fleet would land in UnpricedModels and read as free.
+func TestAPrefixedSlugIsPricedFromItsOwnReport(t *testing.T) {
+	if _, ok := rateFor("anthropic/claude-sonnet-5"); ok {
+		t.Fatal("the table matched a prefixed slug; this test no longer proves anything")
+	}
+	got := Price(agentapi.UsageReport{ByModel: []agentapi.ModelUsage{
+		{Model: "anthropic/claude-sonnet-5", Usage: agentapi.Usage{InputTokens: 100, CostUSD: 0.25}},
+	}})
+	if len(got.UnpricedModels) != 0 {
+		t.Errorf("unpriced = %v; a call that reported its cost is priced", got.UnpricedModels)
+	}
+	if got.CostUSD != 0.25 {
+		t.Errorf("CostUSD = %v, want 0.25", got.CostUSD)
+	}
+}
+
+// Rows written before any endpoint reported a figure -- and every turn against
+// Anthropic direct -- carry no cost. Zero must mean "ask the table", not "free",
+// or the fallback this whole path depends on would be dead code.
+func TestNoReportedCostStillFallsBackToTheTable(t *testing.T) {
+	const million = 1_000_000
+	want := priceTable["claude-sonnet-5"].in
+	got, ok := costOf("claude-sonnet-5", agentapi.Usage{InputTokens: million})
+	if !ok || got != want {
+		t.Errorf("cost = %v (ok=%v), want %v from the table", got, ok, want)
+	}
+}

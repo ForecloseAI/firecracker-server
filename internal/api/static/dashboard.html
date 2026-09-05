@@ -136,6 +136,15 @@ function num(n) {
   return String(n || 0);
 }
 
+/** Token VOLUME on one usage event, not a cost proxy: cache reads bill at a
+ *  tenth of input and cache writes at a quarter more, so this sum says how much
+ *  moved, and the cost beside it says what that came to. */
+function tokensOf(u) {
+  if (!u) return 0;
+  return (u.input_tokens || 0) + (u.output_tokens || 0) +
+    (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+}
+
 /** Dollars, with enough precision to see a single cheap turn. */
 function usd(n) {
   if (!n) return "$0";
@@ -279,7 +288,10 @@ function eventLine(e) {
   const body = {
     text: () => esc(e.text),
     tool_use: () => "<b>" + esc(e.tool) + "</b> " + esc(JSON.stringify(e.input ?? {}).slice(0, 300)),
-    usage: () => usd(e.cost_usd) + " in " + Math.round((e.duration_ms || 0) / 100) / 10 + "s",
+    // Tokens always, cost only when the endpoint reported one -- "$0" on an
+    // Anthropic turn would read as a free call rather than an unpriced one.
+    usage: () => esc(e.model || "") + " " + tokensOf(e.usage) + " tokens" +
+      (e.usage && e.usage.cost_usd ? " &middot; " + usd(e.usage.cost_usd) : ""),
     approval_required: () => '<span class="err">needs a decision:</span> ' + esc(e.preview),
     question: () => '<span class="err">asked:</span> ' + esc(e.question),
     decision: () => esc(e.decision) + " " + esc(e.approval_id),

@@ -57,7 +57,15 @@ func rateFor(model string) (rate, bool) {
 }
 
 // costOf prices one model's token totals, reporting whether it could.
+//
+// An endpoint that priced the call itself is the better authority and is taken
+// at its word: it knows its own fees and which provider it actually routed to,
+// neither of which a table here can. The table answers for everything else --
+// Anthropic direct, and every row written before any endpoint reported a figure.
 func costOf(model string, u agentapi.Usage) (float64, bool) {
+	if u.CostUSD > 0 {
+		return u.CostUSD, true
+	}
 	r, ok := rateFor(model)
 	if !ok {
 		return 0, false

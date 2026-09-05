@@ -724,14 +724,41 @@ func (a *Agent) record(msg *anthropic.BetaMessage) {
 }
 
 // usageOf copies one response's token counts onto the wire type. Shared with
-// the compaction call, which books the same four fields.
+// the compaction call, which books the same fields.
 func usageOf(u anthropic.BetaUsage) Usage {
 	return Usage{
 		InputTokens:              u.InputTokens,
 		OutputTokens:             u.OutputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CostUSD:                  reportedCost(u),
 	}
+}
+
+// reportedCost is what the endpoint says the call cost, in US dollars.
+//
+// OpenRouter returns two numbers and the bill is their sum. cost is what it
+// charged this account, which under BYOK is only its platform fee, because the
+// inference itself went on the person's own provider key;
+// upstream_inference_cost is what that provider charged, and is absent
+// everywhere else. Reading only the first would under-report a BYOK turn by
+// almost the whole bill, and do it silently.
+//
+// Anthropic returns neither, so this is zero there and the host's price table
+// answers instead. The SDK has no struct member for either field -- they are
+// nobody's idea of the Messages API -- but it keeps the raw block, so they
+// survive unmarshalling and can be read back out.
+func reportedCost(u anthropic.BetaUsage) float64 {
+	var r struct {
+		Cost        float64 `json:"cost"`
+		CostDetails struct {
+			UpstreamInferenceCost float64 `json:"upstream_inference_cost"`
+		} `json:"cost_details"`
+	}
+	if err := json.Unmarshal([]byte(u.RawJSON()), &r); err != nil {
+		return 0
+	}
+	return r.Cost + r.CostDetails.UpstreamInferenceCost
 }
 
 // bookUsage puts one response's tokens in both places that account for spend.
