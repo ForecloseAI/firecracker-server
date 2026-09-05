@@ -47,15 +47,21 @@ var priceTable = map[string]rate{
 
 // rateFor finds a model's price by longest matching prefix.
 //
-// A provider prefix comes off first. The table is keyed on the ids Anthropic
-// reports, and a gateway that reports "anthropic/claude-sonnet-5" is naming the
-// same model at the same rates -- so without this the table could not match
-// anything the fleet asks for, and a reported cost would be the only pricing
-// path there is, with silence if it ever went missing.
+// The id is put into this table's dialect first, which is two differences, not
+// one. A gateway prefixes by provider, and it spells a version with a dot where
+// Anthropic uses a dash: "anthropic/claude-haiku-4.5" and "claude-haiku-4-5"
+// are the same model at the same rates.
+//
+// Stripping the prefix alone is worse than doing nothing, and Opus is why.
+// "claude-haiku-4.5" simply misses and reads as unpriced, but "claude-opus-4.5"
+// still HasPrefix-matches the shorter "claude-opus-4" -- so the longest match is
+// a key three times the real rate, and the bill is wrong rather than absent.
+// Normalising both differences is what makes the fallback safe to have.
 func rateFor(model string) (rate, bool) {
 	if _, rest, found := strings.Cut(model, "/"); found {
 		model = rest
 	}
+	model = strings.ReplaceAll(model, ".", "-")
 	best, found := "", rate{}
 	for prefix, r := range priceTable {
 		if strings.HasPrefix(model, prefix) && len(prefix) > len(best) {

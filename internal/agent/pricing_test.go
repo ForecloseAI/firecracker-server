@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"cracked/internal/agentapi"
@@ -139,33 +140,47 @@ func TestAModelTheTableNeverKnewIsPricedFromItsOwnReport(t *testing.T) {
 	}
 }
 
-// Rows written before any endpoint reported a figure -- and every turn against
-// Anthropic direct -- carry no cost. Zero must mean "ask the table", not "free",
-// or the fallback this whole path depends on would be dead code.
-func TestNoReportedCostStillFallsBackToTheTable(t *testing.T) {
-	const million = 1_000_000
-	want := priceTable["claude-sonnet-5"].in
-	got, ok := costOf("claude-sonnet-5", agentapi.Usage{InputTokens: million})
-	if !ok || got != want {
-		t.Errorf("cost = %v (ok=%v), want %v from the table", got, ok, want)
-	}
-}
-
 // The reported cost is the authority, but it must not be the only thing between
 // this table and a fleet reporting $0. Every model the profiles ask for is
 // provider-prefixed now, so without stripping that the table matches nothing
 // the fleet runs -- and the day a response omits its cost, every VM would read
 // as free with one log line to say why.
 func TestAProviderPrefixDoesNotHideAKnownModel(t *testing.T) {
-	const million = 1_000_000
+	// Both spellings, because rows written before any endpoint reported a figure
+	// carry the bare id and every turn since carries the prefixed one. Zero cost
+	// has to mean "ask the table" for both, or the fallback is dead code.
 	want := priceTable["claude-sonnet-5"].in
-	got, ok := costOf("anthropic/claude-sonnet-5", agentapi.Usage{InputTokens: million})
-	if !ok || got != want {
-		t.Errorf("cost = %v (ok=%v), want %v from the table", got, ok, want)
+	for _, id := range []string{"claude-sonnet-5", "anthropic/claude-sonnet-5"} {
+		got, ok := costOf(id, agentapi.Usage{InputTokens: 1_000_000})
+		if !ok || got != want {
+			t.Errorf("%s: cost = %v (ok=%v), want %v from the table", id, got, ok, want)
+		}
+	}
+	// A gateway spells a version with a dot where this table uses a dash, and
+	// half-translating is worse than not translating. Haiku would merely miss;
+	// Opus 4.5 would still prefix-match the shorter claude-opus-4 entry and bill
+	// at three times the real rate -- wrong rather than absent, which is the one
+	// outcome this table exists to prevent.
+	for _, id := range []string{"anthropic/claude-haiku-4.5", "anthropic/claude-opus-4.5"} {
+		bare := strings.ReplaceAll(strings.TrimPrefix(id, "anthropic/"), ".", "-")
+		got, ok := rateFor(id)
+		if !ok {
+			t.Errorf("%s did not price at all", id)
+			continue
+		}
+		if want := priceTable[bare]; got != want {
+			t.Errorf("%s priced at %+v, want %+v", id, got, want)
+		}
+	}
+	if r, _ := rateFor("anthropic/claude-opus-4.5"); r == priceTable["claude-opus-4"] {
+		t.Error("Opus 4.5 resolved to Opus 4 rates, which are 3x higher")
 	}
 	// The stripping must not invent prices for models the table never knew.
 	if _, ok := rateFor("openai/gpt-4o"); ok {
 		t.Error("a model with no table entry was priced anyway")
+	}
+	if _, ok := rateFor("google/gemini-2.5-flash"); ok {
+		t.Error("a Gemini id was priced from an Anthropic table")
 	}
 	// And the longest-prefix rule still has to survive it.
 	if r, _ := rateFor("anthropic/claude-opus-4-5-20251101"); r != priceTable["claude-opus-4-5"] {

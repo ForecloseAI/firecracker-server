@@ -291,7 +291,7 @@ function eventLine(e) {
     // Tokens always, cost only when the endpoint reported one -- "$0" on an
     // Anthropic turn would read as a free call rather than an unpriced one.
     usage: () => esc(e.model || "") + " " + tokensOf(e.usage) + " tokens" +
-      (e.usage && e.usage.cost_usd ? " &middot; " + usd(e.usage.cost_usd) : ""),
+      (e.usage?.cost_usd ? " &middot; " + usd(e.usage.cost_usd) : ""),
     approval_required: () => '<span class="err">needs a decision:</span> ' + esc(e.preview),
     question: () => '<span class="err">asked:</span> ' + esc(e.question),
     decision: () => esc(e.decision) + " " + esc(e.approval_id),
