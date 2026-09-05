@@ -420,8 +420,9 @@ const CustomType = "custom"
 var ThinkingBudgets = map[string]int64{"low": 2048, "medium": 8192, "high": 16384}
 
 // ModelConfig is a custom agent's own model: an endpoint that speaks the
-// Anthropic API, which the person pays for with their own key. The key lives
-// in agents.json on the person's own machine and nowhere else: what leaves the
+// Anthropic API -- OpenRouter at https://openrouter.ai/api, or Anthropic
+// itself -- which the person pays for with their own key. The key lives in
+// agents.json on the person's own machine and nowhere else: what leaves the
 // guest is a ModelView, and an edit that carries no key keeps the stored one.
 type ModelConfig struct {
 	URL      string `json:"url"`

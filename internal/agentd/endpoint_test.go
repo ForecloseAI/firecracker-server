@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"cracked/internal/agentapi"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // routeFixture is a guest's routing table: the tap's own /30, a default-looking
@@ -91,9 +93,10 @@ func TestBrokeredModeHonoursABaseURLOverride(t *testing.T) {
 
 // modelSpy stands in for the model service and remembers what it was asked.
 type modelSpy struct {
-	srv                      *httptest.Server
-	path, key, version, beta string
-	reply, lastBody          string
+	srv             *httptest.Server
+	path            string
+	hdr             http.Header
+	reply, lastBody string
 }
 
 // modelReply is the smallest assistant message the SDK accepts: one text block,
@@ -109,8 +112,7 @@ func fakeModel(t *testing.T) *modelSpy {
 	spy.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		spy.lastBody = string(body)
-		spy.path, spy.key = r.URL.Path, r.Header.Get("x-api-key")
-		spy.version, spy.beta = r.Header.Get("anthropic-version"), r.Header.Get("anthropic-beta")
+		spy.path, spy.hdr = r.URL.Path, r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spy.reply))
 	}))
@@ -134,11 +136,12 @@ func TestATurnReachesTheModelThroughTheBaseURLSeam(t *testing.T) {
 	if err := a.Turn(context.Background(), "hi"); err != nil {
 		t.Fatalf("turn: %v", err)
 	}
-	if fake.path != "/v1/messages" || fake.key != brokerKey {
-		t.Errorf("the model saw %s with key %q", fake.path, fake.key)
+	if fake.path != "/v1/messages" || fake.hdr.Get("x-api-key") != brokerKey {
+		t.Errorf("the model saw %s with key %q", fake.path, fake.hdr.Get("x-api-key"))
 	}
-	if fake.version == "" || !strings.Contains(fake.beta, "context-management-2025-06-27") {
-		t.Errorf("anthropic-version %q anthropic-beta %q", fake.version, fake.beta)
+	if v, b := fake.hdr.Get("anthropic-version"), fake.hdr.Get("anthropic-beta"); v == "" ||
+		!strings.Contains(b, "context-management-2025-06-27") {
+		t.Errorf("anthropic-version %q anthropic-beta %q", v, b)
 	}
 	assertTurnLogged(t, a)
 }
@@ -229,7 +232,88 @@ func TestAThinkingBlockSurvivesARestartIntact(t *testing.T) {
 			t.Errorf("the second request lacks %s:\n%s", want, fake.lastBody)
 		}
 	}
-	if fake.key != "sk-own" {
-		t.Errorf("the person's own key was not used: %q", fake.key)
+	if fake.hdr.Get("x-api-key") != "sk-own" {
+		t.Errorf("the person's own key was not used: %q", fake.hdr.Get("x-api-key"))
+	}
+}
+
+// ask sends the smallest possible message through a client, so a test can look
+// at what the endpoint presented. The reply is the fake's; only headers matter.
+func ask(t *testing.T, ep endpoint) {
+	t.Helper()
+	c := newClient(ep)
+	_, err := c.Beta.Messages.New(context.Background(), anthropic.BetaMessageNewParams{
+		Model: "m", MaxTokens: 16,
+		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(
+			anthropic.NewBetaTextBlock("hi"))},
+	})
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+}
+
+// A gateway of the person's own is authenticated with a bearer token, because
+// that is what OpenRouter -- the reason this path exists -- reads. It is sent
+// alongside the x-api-key, not instead of it, so an endpoint that wants the
+// Anthropic shape still works. The two attribution headers ride along.
+func TestAForeignEndpointPresentsABearerTokenAndSaysWhoIsCalling(t *testing.T) {
+	clearModelEnv(t)
+	fake := fakeModel(t)
+	own := &agentapi.ModelConfig{URL: fake.srv.URL, APIKey: "sk-or-test", Model: "openai/gpt-4o"}
+	ep := endpoint{}.forAgent("unused", own)
+	if !ep.foreign {
+		t.Fatal("a gateway on 127.0.0.1 should be foreign")
+	}
+	ask(t, ep)
+	if got := fake.hdr.Get("Authorization"); got != "Bearer sk-or-test" {
+		t.Errorf("Authorization = %q, want a bearer token", got)
+	}
+	if got := fake.hdr.Get("x-api-key"); got != "sk-or-test" {
+		t.Errorf("x-api-key = %q, want the key alongside the bearer", got)
+	}
+	if r, ti := fake.hdr.Get("HTTP-Referer"), fake.hdr.Get("X-Title"); r != appURL || ti != appName {
+		t.Errorf("attribution = %q / %q, want %q / %q", r, ti, appURL, appName)
+	}
+}
+
+// The broker and Anthropic itself are unchanged: x-api-key alone, and no
+// bearer token that an upstream might prefer over the key the broker swaps in.
+func TestTheBrokerIsStillAuthenticatedWithTheKeyHeaderAlone(t *testing.T) {
+	clearModelEnv(t)
+	fake := fakeModel(t)
+	ask(t, endpoint{baseURL: fake.srv.URL, key: brokerKey})
+	// Not redundant with the emptiness below: it proves the request arrived, so
+	// the three headers are absent rather than merely unobserved.
+	if got := fake.hdr.Get("x-api-key"); got != brokerKey {
+		t.Errorf("x-api-key = %q, want %q", got, brokerKey)
+	}
+	if a, r := fake.hdr.Get("Authorization"), fake.hdr.Get("HTTP-Referer"); a != "" || r != "" ||
+		fake.hdr.Get("X-Title") != "" {
+		t.Errorf("brokered request carried %q / %q / %q, want none of them",
+			a, r, fake.hdr.Get("X-Title"))
+	}
+}
+
+// The SDK appends v1/messages to the base URL, and OpenRouter documents its
+// endpoint as .../api/v1. Someone copying that would dial /api/v1/v1/messages
+// and get a 404 with nothing to explain it, so the suffix comes off here.
+func TestAPastedBaseURLIsTrimmedToWhatTheSDKWants(t *testing.T) {
+	for _, c := range []struct{ raw, want string }{
+		{"https://openrouter.ai/api/v1", "https://openrouter.ai/api"},
+		{"https://openrouter.ai/api/v1/", "https://openrouter.ai/api"},
+		{"https://openrouter.ai/api/v1/messages", "https://openrouter.ai/api"},
+		{"https://openrouter.ai/api/v1/chat/completions", "https://openrouter.ai/api"},
+		{"https://openrouter.ai/api", "https://openrouter.ai/api"},
+		{"https://api.anthropic.com", "https://api.anthropic.com"},
+		{"http://172.16.0.1:8092", "http://172.16.0.1:8092"},
+	} {
+		if got := modelBase(c.raw); got != c.want {
+			t.Errorf("modelBase(%q) = %q, want %q", c.raw, got, c.want)
+		}
+	}
+	ep := endpoint{}.forAgent("x", &agentapi.ModelConfig{
+		URL: "https://openrouter.ai/api/v1", APIKey: "k", Model: "m"})
+	if ep.baseURL != "https://openrouter.ai/api" {
+		t.Errorf("forAgent stored %q, want the trimmed base", ep.baseURL)
 	}
 }
