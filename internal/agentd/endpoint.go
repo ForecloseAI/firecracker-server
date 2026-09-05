@@ -32,7 +32,9 @@ const brokerKey = "brokered"
 
 // appURL and appName are what OpenRouter attributes a request to, in its
 // HTTP-Referer and X-Title headers: the service making the call and its name.
-// Constants rather than config -- they say who we are, which does not vary.
+// appURL is CHAT_ORIGIN -- see internal/chat/config.go -- stated again rather
+// than imported, because the guest cannot depend on chat. Constants, not
+// config: they say who we are, which does not vary per machine.
 const (
 	appURL  = "https://chat.usetypeo.com"
 	appName = "AutoBots"
@@ -59,8 +61,7 @@ type endpoint struct {
 	// foreign marks an endpoint of the person's own that is not Anthropic
 	// itself -- OpenRouter's Anthropic-compatible surface, typically. Requests
 	// to it are plain: no betas, no context management, since another service
-	// that speaks the API need not honour them, and they present a bearer
-	// credential, which is how a gateway authenticates. Everything else -- the
+	// that speaks the API need not honour them. Everything else -- the
 	// environment, the broker, api.anthropic.com on their own key -- is
 	// Anthropic, and the zero value says so.
 	foreign bool
@@ -127,22 +128,16 @@ func newClient(ep endpoint) anthropic.Client {
 		opts = append(opts, option.WithoutEnvironmentDefaults(),
 			option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
+	// A gateway of the person's own also gets a bearer credential, which is how
+	// OpenRouter authenticates, and the two headers it attributes traffic by.
+	// Both shapes go rather than one: it is their key and their host, so the
+	// second copy tells nobody new, and a proxy of their own that wanted the key
+	// header keeps working on it.
 	if ep.foreign {
-		opts = append(opts, foreignOpts(ep.key)...)
+		opts = append(opts, option.WithAuthToken(ep.key),
+			option.WithHeader("HTTP-Referer", appURL), option.WithHeader("X-Title", appName))
 	}
 	return anthropic.NewClient(opts...)
-}
-
-// foreignOpts is what a gateway of the person's own needs beyond the base URL:
-// a bearer credential, which is how OpenRouter authenticates, and the two
-// headers it attributes traffic by. The x-api-key set alongside is left as it
-// is -- a gateway wanting that shape instead is no worse off for the extra.
-func foreignOpts(key string) []option.RequestOption {
-	return []option.RequestOption{
-		option.WithAuthToken(key),
-		option.WithHeader("HTTP-Referer", appURL),
-		option.WithHeader("X-Title", appName),
-	}
 }
 
 // modelHTTP is the one HTTP client every agent's model calls share, so
