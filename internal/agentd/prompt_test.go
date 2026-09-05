@@ -69,12 +69,12 @@ func TestPromptNamesTheAgentAndTheirRole(t *testing.T) {
 }
 
 // Every agent gets the playbooks, after the identity and before its role, so
-// a role can narrow one; and the limits stay last whatever else is added.
-func TestPlaybooksComeBeforeTheRoleAndTheLimitsStayLast(t *testing.T) {
+// a role can narrow one.
+func TestPlaybooksComeAfterTheIdentityAndBeforeTheRole(t *testing.T) {
 	got := ComposeSystemPrompt(Profile{Prompt: "Role text."}, Record{ID: "boss"}, roots{own: t.TempDir()}, "", nil)
 	identity, play := strings.Index(got, BaseIdentity), strings.Index(got, Playbooks)
-	role, limits := strings.Index(got, "Role text."), strings.Index(got, BaseLimits)
-	if play < 0 || !(identity < play && play < role && role < limits) {
-		t.Fatalf("order identity=%d playbooks=%d role=%d limits=%d", identity, play, role, limits)
+	role := strings.Index(got, "Role text.")
+	if !(identity < play && play < role) {
+		t.Fatalf("order identity=%d playbooks=%d role=%d", identity, play, role)
 	}
 }

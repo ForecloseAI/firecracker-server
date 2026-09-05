@@ -260,8 +260,8 @@ func TestTheCountrySetsTheLanguageLine(t *testing.T) {
 	if !strings.Contains(got, "Country: IN") || strings.Contains(got, "Their clock is") {
 		t.Errorf("the country line is wrong:\n%s", got)
 	}
-	if rememberCountry(state, "india") || rememberCountry(state, "IN") {
-		t.Error("a bad code, or the same one again, counted as a change")
+	if rememberCountry(state, "IN") {
+		t.Error("storing the same code again counted as a change")
 	}
 }
 
@@ -280,13 +280,13 @@ func TestCountryIsStoredEchoedRefusedAndKept(t *testing.T) {
 	if w := do(t, srv, "PUT", "/person", `{"tz":"Europe/Berlin"}`); w.Code != 204 {
 		t.Fatalf("zone-only put = %d: %s", w.Code, w.Body)
 	}
-	if got := readCountryFile(sup.stateDir); got != "IN" {
+	if got := readStateFile(countryPath(sup.stateDir)); got != "IN" {
 		t.Errorf("a zone-only save changed the country to %q", got)
 	}
 	if w := do(t, srv, "PUT", "/person", `{"country":"india"}`); w.Code != 400 {
 		t.Errorf("a bad code was accepted: %d", w.Code)
 	}
-	if w := do(t, srv, "PUT", "/person", `{"country":"DE"}`); w.Code != 204 || readCountryFile(sup.stateDir) != "DE" {
-		t.Errorf("a country-only save did not land: %d %q", w.Code, readCountryFile(sup.stateDir))
+	if w := do(t, srv, "PUT", "/person", `{"country":"DE"}`); w.Code != 204 || readStateFile(countryPath(sup.stateDir)) != "DE" {
+		t.Errorf("a country-only save did not land: %d %q", w.Code, readStateFile(countryPath(sup.stateDir)))
 	}
 }

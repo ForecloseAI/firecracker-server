@@ -24,7 +24,7 @@ func (s *Server) handleGetPerson(w http.ResponseWriter, r *http.Request) {
 	// to learn it, and without it a reinstall or a second device shows "Not set"
 	// beside a machine that is on a perfectly good clock.
 	reply(w, http.StatusOK, agentapi.Person{Notes: body, Onboarded: body != "",
-		TZ: readZoneFile(s.sup.stateDir), Country: readCountryFile(s.sup.stateDir)})
+		TZ: readZoneFile(s.sup.stateDir), Country: readStateFile(countryPath(s.sup.stateDir))})
 }
 
 // handlePutPerson replaces the profile with what onboarding collected.
@@ -44,9 +44,11 @@ func (s *Server) handlePutPerson(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if p.Country != "" && !validCountry.MatchString(p.Country) {
-		fail(w, http.StatusBadRequest, "bad_request", "country must be a two-letter ISO code", "person")
-		return
+	if p.Country != "" {
+		if err := validCountry(p.Country); err != nil {
+			fail(w, http.StatusBadRequest, "bad_request", err.Error(), "person")
+			return
+		}
 	}
 	// A body carrying only a zone changes only the zone, because WritePerson
 	// replaces the file and the settings screen's zone-only save would otherwise
