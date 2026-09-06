@@ -250,8 +250,14 @@ func (s *Server) savePolicy(ctx context.Context, user string, held agentapi.Apps
 	}
 	// Otherwise the machine keeps the policy it was pushed until its claim runs
 	// out, which is up to an hour -- a person would change a setting and watch it
-	// do nothing. forgetApps drops the claim so the next request re-pushes.
-	s.forgetApps(machineFor(user))
+	// do nothing.
+	//
+	// staleApps, not forgetApps, for the reason staleApps exists: an agent can be
+	// holding an approval on this very app while somebody flips its switch, and
+	// dropping the ticket would 404 the retry at the broker. That the permissions
+	// screen is "not mid-call" was an assumption about how people use the app,
+	// not an invariant.
+	s.staleApps(machineFor(user))
 	return nil
 }
 

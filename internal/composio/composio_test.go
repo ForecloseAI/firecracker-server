@@ -191,33 +191,6 @@ func TestDisconnectToleratesAnEmptyBody(t *testing.T) {
 	}
 }
 
-// A toolkit's copy comes from the provider, so nothing about an app is written
-// down here to go stale.
-func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Write([]byte(`{"slug":"gmail","name":"Gmail","meta":{
-			"logo":"https://logos.composio.dev/api/gmail","description":"Google's email service",
-			"categories":[{"id":"email","name":"email"}]}}`))
-	}))
-	defer srv.Close()
-
-	got, err := New("k", srv.URL).Toolkit(context.Background(), "gmail")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotPath != "/toolkits/gmail" {
-		t.Errorf("asked for %q", gotPath)
-	}
-	want := Toolkit{Slug: "gmail", Name: "Gmail",
-		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service",
-		Categories: []string{"email"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %+v", got)
-	}
-}
-
 // THE test for the catalogue filter. The provider ignores every plausible
 // server-side auth filter rather than rejecting it -- auth_scheme, managed_by
 // and is_local all answer with all 1505 toolkits -- so the row's own

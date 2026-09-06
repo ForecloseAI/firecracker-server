@@ -85,7 +85,8 @@ func newAppCaps(c *composio.Client) *appCaps {
 func (a *appCaps) resolved(ctx context.Context, slugs []string,
 	policy map[string]map[string]string) (map[string]string, time.Time) {
 	held, until := a.capabilities(ctx, slugs)
-	return flatten(budgeted(held), policy), until
+	budgeted(held)
+	return flatten(held, policy), until
 }
 
 // flatten resolves every action against this person's policy, by slug.
@@ -99,12 +100,13 @@ func flatten(held, policy map[string]map[string]string) map[string]string {
 	return out
 }
 
-// budgeted drops whole apps, largest first, until the push will fit.
+// budgeted drops whole apps, largest first, until the push will fit. In place,
+// and it returns nothing so no caller reads it as a copy.
 //
 // Whole apps rather than a truncation, because half an app's actions is a person
 // asked about some of its reads and not others for no reason they could see. The
 // outer map is built per call, so nothing cached is disturbed.
-func budgeted(held map[string]map[string]string) map[string]map[string]string {
+func budgeted(held map[string]map[string]string) {
 	for pushBytes(held) > appsActionBytes {
 		app := largest(held)
 		// Said out loud: the cost lands on a machine, hours later, as an agent
@@ -112,7 +114,6 @@ func budgeted(held map[string]map[string]string) map[string]map[string]string {
 		log.Printf("chat: capability map is too big to push; dropping %s, whose actions will ask", app)
 		delete(held, app)
 	}
-	return held
 }
 
 // pushBytes is roughly what a resolved answer costs encoded: per entry a quoted

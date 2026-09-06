@@ -64,21 +64,22 @@ func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *age
 // long the answer it pushed is good for and which apps it was resolved against.
 func (s *Server) pushApps(ctx context.Context, user string, view vmView,
 	cl *agent.Client) (time.Time, []string, error) {
-	held, err := s.sessionFor(ctx, user)
+	row, err := s.sessionFor(ctx, user)
 	if err != nil {
 		return time.Time{}, nil, err
 	}
-	if err := validateComposioSessionURL(held.SessionURL); err != nil {
+	if err := validateComposioSessionURL(row.SessionURL); err != nil {
 		return time.Time{}, nil, err
 	}
-	slugs, err := s.connectedSlugs(ctx, user)
+	conns, err := s.composio.Connections(ctx, user)
 	if err != nil {
 		return time.Time{}, nil, err
 	}
+	slugs := activeSlugs(conns)
 	// Resolved BEFORE the ticket exists. See handOver for the window that keeps
 	// every provider round trip on this side of Register.
-	actions, until := s.kinds.resolved(ctx, slugs, held.Policy)
-	if err := s.handOver(view, cl, held, actions); err != nil {
+	actions, until := s.kinds.resolved(ctx, slugs, row.Policy)
+	if err := s.handOver(view, cl, row, actions); err != nil {
 		return time.Time{}, nil, err
 	}
 	return until, slugs, nil
@@ -108,7 +109,9 @@ func (s *Server) handOver(view vmView, cl *agent.Client,
 		Actions: actions})
 }
 
-// connectedSlugs is the apps this person has a working account with.
+// activeSlugs is the distinct apps a person has a WORKING account with, sorted
+// so two readings of an unchanged set compare equal. Lowercased because
+// connectionFor already treats the provider's spelling as case-insensitive.
 //
 // ACTIVE only, and that carries two jobs. Resolving an app whose grant has
 // lapsed would spend a provider call on actions that cannot run; and because
@@ -116,17 +119,6 @@ func (s *Server) handOver(view vmView, cl *agent.Client,
 // connection would make INITIATED-becomes-ACTIVE look like no change at all --
 // so the moment somebody finishes signing in would be the one moment nothing
 // noticed.
-func (s *Server) connectedSlugs(ctx context.Context, user string) ([]string, error) {
-	held, err := s.composio.Connections(ctx, user)
-	if err != nil {
-		return nil, err
-	}
-	return activeSlugs(held), nil
-}
-
-// activeSlugs is the distinct apps a set of connections names, sorted so two
-// readings of an unchanged set compare equal. Lowercased because connectionFor
-// already treats the provider's spelling as case-insensitive.
 func activeSlugs(held []composio.Connection) []string {
 	out := make([]string, 0, len(held))
 	for _, conn := range held {
@@ -182,9 +174,9 @@ type appsClaim struct {
 	// already out of date, which is how a newly connected app reaches a machine
 	// in a screen refresh rather than in an hour.
 	//
-	// Nil while a push is IN FLIGHT, and noticeApps leans on that: a claim is
+	// Nil while a push is IN FLIGHT, which is what settled() reads: a claim is
 	// taken before the work, so between claimApps and doneApps there is nothing
-	// to compare against, and dropping it there would start a second push while
+	// to compare against, and expiring it there would start a second push while
 	// the first was still crossing the internet.
 	slugs []string
 	// expires is when a pushed claim stops counting, which is the deadline of
@@ -198,6 +190,14 @@ type appsClaim struct {
 	expires time.Time
 	failed  time.Time
 }
+
+// settled reports whether this claim holds an answer that actually landed.
+//
+// pushed alone is not that question: claimApps takes the claim BEFORE the work
+// with pushed already true, so the two states are told apart by whether there
+// are slugs beside it. One spelling, because three call sites asking it
+// differently is how one of them ends up expiring a push still in flight.
+func (c appsClaim) settled() bool { return c.pushed && c.slugs != nil }
 
 // appsClaimCap bounds the table, for the reason appsRouteCap does: a service
 // running for weeks must not keep an entry per machine it has ever served.
@@ -258,13 +258,12 @@ func (s *Server) doneApps(machine string, until time.Time, slugs []string) {
 // triggers -- see noticeConnect in approval.go, because the flow that matters
 // most does not involve the Apps screen at all.
 func (s *Server) noticeApps(user string, held []composio.Connection) {
+	now := activeSlugs(held)
 	machine := machineFor(user)
 	s.mu.Lock()
-	claim := s.appsClaims[machine]
-	stale := claim.slugs != nil && !slices.Equal(claim.slugs, activeSlugs(held))
-	s.mu.Unlock()
-	if stale {
-		s.staleApps(machine)
+	defer s.mu.Unlock()
+	if claim := s.appsClaims[machine]; claim.settled() && !slices.Equal(claim.slugs, now) {
+		s.staleLocked(machine, claim)
 	}
 }
 
@@ -279,17 +278,21 @@ func (s *Server) noticeApps(user string, held []composio.Connection) {
 //
 // Zeroing the deadline is enough. claimApps treats a pushed claim past its
 // expiry as available, and the re-push registers a fresh ticket over the old one
-// anyway. forgetApps stays for a machine that is created, erased, or has had a
-// policy changed on a screen nobody is mid-call on.
+// anyway. forgetApps stays for the machine-lifetime cases -- created and erased
+// -- where there is no live ticket worth keeping.
 func (s *Server) staleApps(machine string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	held, ok := s.appsClaims[machine]
-	if !ok || !held.pushed {
-		return
+	if claim := s.appsClaims[machine]; claim.settled() {
+		s.staleLocked(machine, claim)
 	}
-	held.expires = time.Time{}
-	s.appsClaims[machine] = held
+}
+
+// staleLocked expires one claim. The caller holds s.mu, which is what lets
+// noticeApps decide and act without dropping the lock in between.
+func (s *Server) staleLocked(machine string, claim appsClaim) {
+	claim.expires = time.Time{}
+	s.appsClaims[machine] = claim
 }
 
 // evictTo keeps one of this package's bounded tables under its cap. The caller
@@ -320,9 +323,13 @@ func (s *Server) failApps(machine string) {
 	}
 }
 
-// forgetApps drops that record, so the next request pushes again. Called when a
-// machine is created or erased, both of which leave it holding nothing -- and so
-// it clears the cooldown as well, which is the difference from failApps.
+// forgetApps drops that record, so the next request pushes again. Called ONLY
+// when a machine is created or erased, both of which leave it holding nothing --
+// and so it clears the cooldown as well, which is the difference from failApps.
+//
+// Anything that merely changes the ANSWER a live machine holds wants staleApps
+// instead: this takes the ticket with it, and a machine that still exists may be
+// mid-call on it.
 func (s *Server) forgetApps(machine string) {
 	s.mu.Lock()
 	delete(s.appsClaims, machine)

@@ -222,6 +222,28 @@ type connectionsResp struct {
 // an account deletion would be worse than stopping short.
 const connectionPages = 20
 
+// walkPages follows a cursor-paged endpoint, handing each page to take.
+//
+// bound is what stops a cursor that never empties, which is a provider bug this
+// has to survive rather than loop on behind somebody opening a screen. Written
+// once because all three of this client's list calls are the same walk around
+// one line that differs, and the bound is the part worth having in one place.
+func walkPages[P any](ctx context.Context, bound int,
+	fetch func(context.Context, string) (P, error), next func(P) string, take func(P)) error {
+	cursor := ""
+	for range bound {
+		page, err := fetch(ctx, cursor)
+		if err != nil {
+			return err
+		}
+		take(page)
+		if cursor = next(page); cursor == "" {
+			return nil
+		}
+	}
+	return nil
+}
+
 // Connections lists every app account this person has connected.
 //
 // user_idS, plural, and that letter matters: the singular form is not rejected,
@@ -229,21 +251,17 @@ const connectionPages = 20
 // caller that deleted what that returned would revoke strangers' grants.
 func (c *Client) Connections(ctx context.Context, userID string) ([]Connection, error) {
 	var out []Connection
-	cursor := ""
-	for range connectionPages {
-		page, err := c.connectionPage(ctx, userID, cursor)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range page.Items {
-			out = append(out, Connection{ID: it.ID, Toolkit: it.Toolkit.Slug, Status: it.Status})
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
-	}
-	return out, nil
+	err := walkPages(ctx, connectionPages,
+		func(ctx context.Context, cursor string) (connectionsResp, error) {
+			return c.connectionPage(ctx, userID, cursor)
+		},
+		func(p connectionsResp) string { return p.NextCursor },
+		func(p connectionsResp) {
+			for _, it := range p.Items {
+				out = append(out, Connection{ID: it.ID, Toolkit: it.Toolkit.Slug, Status: it.Status})
+			}
+		})
+	return out, err
 }
 
 // connectionPage fetches one page of a person's connected accounts.
@@ -311,18 +329,6 @@ func (t toolkitResp) toolkit() Toolkit {
 	return out
 }
 
-// Toolkit fetches one app's public metadata.
-//
-// Kept beside Toolkits rather than replaced by it: this answers for a slug the
-// catalogue does not hold, which an app connected by an agent may well be.
-func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
-	var out toolkitResp
-	if err := c.send(ctx, http.MethodGet, "/toolkits/"+url.PathEscape(slug), nil, &out); err != nil {
-		return Toolkit{}, err
-	}
-	return out.toolkit(), nil
-}
-
 // toolkitsResp is one page of GET /toolkits.
 type toolkitsResp struct {
 	Items      []toolkitResp `json:"items"`
@@ -360,23 +366,16 @@ const toolkitPages = 8
 // will run for us rather than a scheme name we matched.
 func (c *Client) Toolkits(ctx context.Context) ([]Toolkit, error) {
 	var out []Toolkit
-	cursor := ""
-	for range toolkitPages {
-		page, err := c.toolkitPage(ctx, cursor)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range page.Items {
-			if len(it.ManagedAuth) > 0 {
-				out = append(out, it.toolkit())
+	err := walkPages(ctx, toolkitPages, c.toolkitPage,
+		func(p toolkitsResp) string { return p.NextCursor },
+		func(p toolkitsResp) {
+			for _, it := range p.Items {
+				if len(it.ManagedAuth) > 0 {
+					out = append(out, it.toolkit())
+				}
 			}
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
-	}
-	return out, nil
+		})
+	return out, err
 }
 
 // toolkitPage fetches one page of the provider's catalogue. The order is the
@@ -446,19 +445,18 @@ const (
 // got back for exactly this reason.
 func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
 	held := map[string]string{}
-	cursor := ""
-	for range toolPages {
-		page, err := c.toolsPage(ctx, slug, cursor)
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range page.Items {
-			held[it.Slug] = capabilityOf(it.Tags)
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
+	err := walkPages(ctx, toolPages,
+		func(ctx context.Context, cursor string) (toolsResp, error) {
+			return c.toolsPage(ctx, slug, cursor)
+		},
+		func(p toolsResp) string { return p.NextCursor },
+		func(p toolsResp) {
+			for _, it := range p.Items {
+				held[it.Slug] = capabilityOf(it.Tags)
+			}
+		})
+	if err != nil {
+		return nil, err
 	}
 	return held, nil
 }

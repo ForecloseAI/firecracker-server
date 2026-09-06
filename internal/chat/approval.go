@@ -63,18 +63,24 @@ func (s *Server) deliver(w http.ResponseWriter, cl *agent.Client,
 	}
 }
 
-// noticeConnect drops this machine's apps claim when somebody says they have
-// finished connecting an app.
+// noticeConnect expires this machine's apps claim when somebody answers a
+// Connect card to say they have finished connecting an app.
 //
-// THE trigger that matters. A push is what carries an app's actions to a
-// machine, and it is due again only when what it holds goes stale -- up to an
-// hour. The flow this product leads with does not touch the Apps screen at all:
-// an agent raises a Connect card, the person signs in, the agent retries. So
-// without this an agent that just walked somebody through connecting Notion
-// would then ask about every Notion read for the rest of the hour.
+// A push is what carries an app's actions to a machine, and it is due again only
+// when what it holds goes stale -- up to an hour. The flow this is for does not
+// touch the Apps screen at all: an agent raises a Connect card, the person signs
+// in, the agent retries. Without it an agent that just walked somebody through
+// connecting Notion would ask about every Notion read for the rest of the hour.
 //
-// The connection may not be ACTIVE at the moment they tap, which costs a wasted
-// push and nothing else -- the next request re-pushes and sees it by then.
+// It also covers a race the other trigger cannot: noticeApps compares ACTIVE
+// slugs, so a connection still INITIATED when the screen reads it looks like no
+// change at all. This expires unconditionally.
+//
+// NOT REACHED TODAY, and worth saying rather than implying otherwise: no client
+// resolves a connect ask. The mobile app's Connect card calls the connect flow
+// and drops the result, and the host's AskUI carries no app for it to render
+// from in the first place. This is the host half, correct and waiting; the
+// client half is the same gap that leaves the agent's ask_human blocked.
 func (s *Server) noticeConnect(user string, ui *AskUI, req approvalReq) {
 	if ui == nil || ui.Kind != askConnect || req.Verdict != verdictApproved {
 		return

@@ -195,17 +195,35 @@ func TestMintingASessionKeepsThePolicyBesideIt(t *testing.T) {
 }
 
 // Changing a setting has to reach the machine. A pushed claim lasts as long as
-// the read-only set it carried -- up to an hour -- so without dropping it the
-// person changes a permission, watches nothing happen, and has no way to tell
-// whether it saved.
+// the set it carried -- up to an hour -- so without expiring it the person
+// changes a permission, watches nothing happen, and has no way to tell whether
+// it saved.
+//
+// The claim carries slugs because that is what a push that LANDED looks like;
+// pushed with none is the in-flight shape, which nothing may expire.
 func TestSettingAPolicyMakesTheMachineDueAnotherPush(t *testing.T) {
 	s, tok, _ := withStore(t, `{"items":[]}`)
 	machine := machineFor(testUserID)
-	s.appsClaims[machine] = appsClaim{pushed: true, expires: time.Now().Add(time.Hour)}
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	if _, err := gw.Register(machine, "172.16.0.2", "172.16.0.1",
+		"https://backend.composio.dev/mcp/sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	s.gw = gw
+	s.appsClaims[machine] = appsClaim{
+		pushed: true, expires: time.Now().Add(time.Hour), slugs: []string{"gmail"}}
 
 	call(t, s, tok, "PUT", "/v1/apps/gmail/policy", `{"capability":"write","policy":"never"}`)
 
 	if !s.claimApps(machine) {
 		t.Error("the machine is still holding a claim, so it keeps the old policy for an hour")
+	}
+	// And its ticket survives: an agent can be holding an approval on this very
+	// app while the switch is flipped, and the retry has to reach the broker.
+	gw.mu.Lock()
+	routes := len(gw.routes)
+	gw.mu.Unlock()
+	if routes != 1 {
+		t.Error("changing a permission dropped the machine's ticket")
 	}
 }

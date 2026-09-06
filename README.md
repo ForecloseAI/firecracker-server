@@ -624,8 +624,10 @@ read to write must stop running unasked within the hour.
 
 A newly connected app reaches a machine at once rather than on that hour, from
 two places: answering a Connect card, and any Apps request whose connections
-differ from what the last push was resolved against. The first is the one that
-matters, because the flow this leads with never opens the Apps screen.
+differ from what the last push was resolved against. Only the second fires today
+— no client resolves a connect ask yet, which is the same gap that leaves an
+agent's Connect card unanswered. Both expire the claim without taking the
+machine's ticket, because an agent is usually mid-call on it at that moment.
 
 **What this does not do.** It is not an exfiltration control. A guest has
 unrestricted outbound internet by design (see the firewall notes above) and
