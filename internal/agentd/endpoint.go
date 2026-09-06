@@ -116,7 +116,7 @@ func (ep endpoint) forAgent(model string, own *agentapi.ModelConfig) endpoint {
 // of failing the loud way the startup line promises.
 func newClient(ep endpoint) anthropic.Client {
 	opts := []option.RequestOption{option.WithHTTPClient(modelHTTP()),
-		option.WithoutEnvironmentDefaults()}
+		option.WithoutEnvironmentDefaults(), option.WithRequestTimeout(modelTimeout)}
 	if ep.baseURL != "" {
 		opts = append(opts, option.WithBaseURL(ep.baseURL), option.WithAPIKey(ep.key))
 	}
@@ -132,6 +132,25 @@ func newClient(ep endpoint) anthropic.Client {
 	return anthropic.NewClient(opts...)
 }
 
+// modelTimeout is how long one model call may take, stated in two places
+// because each enforces a different half and neither covers the other.
+//
+// It is also what lets an agent think hard at all. The SDK refuses to send a
+// NON-STREAMING request it estimates could run past ten minutes, and it
+// estimates from max_tokens alone at a pessimistic 128k tokens per hour -- so
+// anything above 21,333 is refused outright, before any request is made, with
+// "streaming is required for operations that may take longer than 10 minutes".
+// The high thinking level puts max_tokens at 8192+16384 = 24,576 and trips it,
+// which is why that level had never once worked. Setting a request timeout
+// makes the SDK use it instead of estimating (see CalculateNonStreamingTimeout,
+// which returns early when one is set).
+//
+// Ten minutes is not a new bound, which is the point: a non-streaming response
+// yields no headers until the whole body is ready, so the header timeout below
+// already capped these calls at ten minutes. The SDK was refusing to send a
+// request the transport would have allowed.
+const modelTimeout = 10 * time.Minute
+
 // modelHTTP is the one HTTP client every agent's model calls share, so
 // connections are pooled across agents rather than opened afresh by each. It is
 // the SDK's own default rebuilt: a response-header timeout, so a broker that
@@ -143,7 +162,7 @@ var modelHTTP = sync.OnceValue(func() *http.Client {
 		return &http.Client{Transport: http.DefaultTransport}
 	}
 	t = t.Clone()
-	t.ResponseHeaderTimeout = 10 * time.Minute
+	t.ResponseHeaderTimeout = modelTimeout
 	return &http.Client{Transport: t}
 })
 
