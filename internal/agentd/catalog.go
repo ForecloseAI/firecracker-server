@@ -93,6 +93,12 @@ func parseProfile(text string) (Profile, error) {
 	for _, line := range strings.Split(front, "\n") {
 		applyField(&p, line)
 	}
+	// A profile that names no model runs on the default. Filled here rather than
+	// where the model is used, so no reader of a Profile ever has to know that an
+	// empty id means something: the catalog hands out a real one or nothing at all.
+	if p.Model == "" {
+		p.Model = agentapi.DefaultCustomModel
+	}
 	return p, nil
 }
 

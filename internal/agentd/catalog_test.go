@@ -66,12 +66,14 @@ func TestMissingCustomDirectoryKeepsBuiltins(t *testing.T) {
 	}
 }
 
-// The custom profile is the shell a person's own role goes into: every tool,
-// the browser, and a role prompt that only points at what they wrote.
-func TestTheCustomProfileIsAShellForThePersonsRole(t *testing.T) {
+// The custom profile is the shell a written role goes into: every tool, the
+// browser, and a role prompt that only points at what was written. It names no
+// model either, so the one nobody picked comes from the single constant rather
+// than a line of front matter beside it.
+func TestTheCustomProfileIsAShellForAWrittenRole(t *testing.T) {
 	c, _ := LoadCatalog("")
 	p, ok := c.Get(agentapi.CustomType)
-	if !ok || !p.Browser || len(p.Tools) != 0 || p.Model == "" {
+	if !ok || !p.Browser || len(p.Tools) != 0 || p.Model != agentapi.DefaultCustomModel {
 		t.Fatalf("custom profile: %+v, %v", p, ok)
 	}
 }

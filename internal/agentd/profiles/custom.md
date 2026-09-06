@@ -1,7 +1,6 @@
 ---
 key: custom
 title: Custom
-description: Built by you
-model: anthropic/claude-sonnet-5
+description: A role you write yourself - for a job no other type fits
 browser: true
 ---
