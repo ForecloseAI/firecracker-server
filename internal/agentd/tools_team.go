@@ -30,8 +30,12 @@ type (
 		TaskDir string `json:"task_dir" jsonschema:"description=Folder to work in - defaults to your current task folder"`
 	}
 	createAgentInput struct {
-		Type string `json:"type" jsonschema:"required,description=Profile key from list_agent_types"`
+		Type string `json:"type" jsonschema:"required,description=Profile key from list_agent_types - or custom to write the role yourself"`
 		Name string `json:"name" jsonschema:"required,description=A human first name for them such as Maya or Tom - never a job description"`
+		// omitempty, and it is load-bearing: the reflector marks every field
+		// without it required, and a model told it must send instructions will
+		// invent some for a coder -- which CreateWith now refuses outright.
+		Instructions string `json:"instructions,omitempty" jsonschema:"description=The lasting role for a custom agent - what the job is and how you want it done. Required for type custom and omitted for any other type"`
 	}
 	deleteAgentInput struct {
 		ID string `json:"id" jsonschema:"required,description=Id of the agent to remove"`
@@ -135,28 +139,20 @@ func delegateTool(d toolDeps) (anthropic.BetaTool, error) {
 }
 
 // listTypesTool shows what kinds of specialist can be created.
+//
+// The whole catalog, custom included. It used to hold the custom shell back,
+// because a role was something only the person wrote; the boss writes one now,
+// and a type it may create but cannot see is a type it will not use.
 func listTypesTool(d toolDeps) (anthropic.BetaTool, error) {
 	return toolrunner.NewBetaToolFromJSONSchema[noInput](
 		"list_agent_types", "List the kinds of specialist you can create.",
 		func(ctx context.Context, _ noInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
 			var lines []string
-			for _, p := range hireable(d.team.Catalog()) {
+			for _, p := range d.team.Catalog().List() {
 				lines = append(lines, p.Key+" - "+p.Description)
 			}
 			return toolText(strings.Join(lines, "\n")), nil
 		})
-}
-
-// hireable is the gallery an agent may hire from: every profile but the shell
-// a person's own role goes into, which has no role of its own to offer.
-func hireable(c *Catalog) []Profile {
-	var out []Profile
-	for _, p := range c.List() {
-		if p.Key != agentapi.CustomType {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // createAgentTool adds a specialist to the roster.
@@ -165,19 +161,25 @@ func createAgentTool(d toolDeps) (anthropic.BetaTool, error) {
 		"create_agent",
 		"Create a new specialist. It costs nothing until you give it work. "+
 			"Give them a human first name: the person sees this name at the top of a "+
-			"conversation and says it back, and \"whatsapp-researcher\" is not a name.",
+			"conversation and says it back, and \"whatsapp-researcher\" is not a name. "+
+			"When no type on the list fits the job, use type 'custom' and write the role "+
+			"yourself in instructions.",
 		func(ctx context.Context, in createAgentInput) (anthropic.BetaToolResultBlockParamContentUnion, error) {
 			return toolText(hire(d.team, in)), nil
 		})
 }
 
-// hire adds a specialist for an agent, or says why not. A custom agent is
-// refused: its role is something only the person writes.
+// hire adds a specialist for an agent, or says why not.
+//
+// One path for both kinds. A custom agent used to be refused here, on the
+// grounds that its role was the person's to write; the boss can write one now,
+// and the checks that decide whether a role is usable already live in
+// CreateWith, so this passes the request on rather than second-guessing it. An
+// empty role on a custom type comes back as validCustom's own refusal, which
+// says what was wrong with it.
 func hire(team *Supervisor, in createAgentInput) string {
-	if in.Type == agentapi.CustomType {
-		return "Custom agents are made by the person in the app. Pick a profile from list_agent_types."
-	}
-	rec, err := team.Create(in.Type, in.Name)
+	rec, err := team.CreateWith(agentapi.CreateAgentReq{
+		Type: in.Type, Name: in.Name, Instructions: in.Instructions})
 	if err != nil {
 		return err.Error()
 	}

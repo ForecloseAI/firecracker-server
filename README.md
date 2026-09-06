@@ -534,8 +534,9 @@ which is deliberately the same request the fleet makes.
 **Rotating the key** is a drop-in edit and a restart of `cracked-chat`, with no
 rootfs rebuild and no VM downtime — guests hold no credential and dial the broker
 per request. **Changing the upstream or the model ids is not a rotation**: the
-profiles and the summariser id are compiled into `agentd`, which ships inside the
-guest image, so that needs a rootfs rebuild and every VM recreated
+profiles, the default custom-agent model (`agentapi.DefaultCustomModel`) and the
+summariser id are compiled into `agentd`, which ships inside the guest image, so
+that needs a rootfs rebuild and every VM recreated
 (`DELETE /vms/<id>` without `?purge=true`, then `POST /vms` with the same id).
 Between restarting `cracked-chat` and recreating the machines, running guests are
 asking the new upstream for the old model ids, and their turns fail. Keep that

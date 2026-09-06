@@ -409,11 +409,11 @@ type Task struct {
 
 // Record is one agent's durable identity: who it is, not whether it is running.
 //
-// Instructions and Model are set only for a custom agent, one the person built
-// in the app rather than picked from the gallery. A Record used to hold the
-// person's key and so could never leave the guest; it holds no secret now, and
-// the host still sees a Status rather than this, because what an agent IS and
-// what it is DOING are different questions.
+// Instructions and Model are set only for a custom agent, one built here rather
+// than picked from the gallery. A Record used to hold the person's key and so
+// could never leave the guest; it holds no secret now, and the host still sees a
+// Status rather than this, because what an agent IS and what it is DOING are
+// different questions.
 type Record struct {
 	ID           string       `json:"id"`
 	Name         string       `json:"name"`
@@ -424,9 +424,21 @@ type Record struct {
 	Model        *ModelConfig `json:"model,omitempty"`
 }
 
-// CustomType is the profile key of an agent the person built themselves. Any
-// number of them may exist, which is the one way it differs from a gallery type.
+// CustomType is the profile key of an agent built here rather than picked from
+// the gallery -- by the person in the app, or by the boss when no gallery type
+// fits the job. Any number of them may exist, which is the one way it differs
+// from a gallery type.
 const CustomType = "custom"
+
+// DefaultCustomModel is what a custom agent runs on when nobody picks a model
+// for it. A gallery profile names its own and is unaffected; the custom shell
+// names none, because its model is not a property of a role -- it has no role --
+// but whatever the person or the boss did not choose.
+//
+// Change it here. There is deliberately nowhere else: this used to be a line of
+// front matter in custom.md, and a constant beside it would have been two
+// answers to one question.
+const DefaultCustomModel = "google/gemini-3.8-flash"
 
 // OpenRouterBase is where model calls go, and AppName is what OpenRouter files
 // them under in its X-Title header. Here rather than in either caller because

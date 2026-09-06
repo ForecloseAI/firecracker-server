@@ -172,20 +172,116 @@ func TestAnEditRecyclesAnIdleAgentAndMarksABusyOne(t *testing.T) {
 	a.mu.Unlock()
 }
 
-// Agents hire from the gallery; a custom agent is something only the person
-// writes. Offering the shell as a type would make a nameless-role agent.
-func TestAgentsCannotHireACustomAgent(t *testing.T) {
+// The boss writes a role and hires against it, for the job no gallery type fits.
+// It used to be refused here and sent to ask the person, which left the boss
+// forcing the work through a profile that did not fit.
+func TestTheBossCanBuildACustomAgent(t *testing.T) {
 	sup := supervisorWith(t, 8)
-	for _, p := range hireable(sup.Catalog()) {
-		if p.Key == agentapi.CustomType {
-			t.Fatal("the custom shell is offered as something to hire")
-		}
+	role := "Watch the deploy queue and say when it stalls."
+	if got := hire(sup, createAgentInput{Type: agentapi.CustomType, Name: "Maya", Instructions: role}); !strings.Contains(got, "maya") {
+		t.Fatalf("hire answered %q", got)
 	}
-	if got := hire(sup, createAgentInput{Type: agentapi.CustomType, Name: "Maya"}); !strings.Contains(got, "made by the person") {
-		t.Errorf("hire answered %q", got)
+	rec, ok := sup.Roster().Get("maya")
+	if !ok || rec.Type != agentapi.CustomType || rec.Instructions != role {
+		t.Fatalf("the roster record: %+v, %v", rec, ok)
+	}
+	// A type the boss may create but cannot see is a type it will not use.
+	var keys []string
+	for _, p := range sup.Catalog().List() {
+		keys = append(keys, p.Key)
+	}
+	if !slices.Contains(keys, agentapi.CustomType) {
+		t.Errorf("list_agent_types would not offer the custom shell: %v", keys)
+	}
+}
+
+// The shell has no role of its own, so one written for it is the whole of it.
+// Hiring without one would make an agent that knows only its name.
+func TestACustomAgentTheBossBuildsNeedsARole(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	got := hire(sup, createAgentInput{Type: agentapi.CustomType, Name: "Maya"})
+	if !strings.Contains(got, "instructions") {
+		t.Errorf("hire answered %q, which does not say what was missing", got)
 	}
 	if _, ok := sup.Roster().Get("maya"); ok {
-		t.Fatal("an agent hired a custom agent")
+		t.Fatal("a custom agent was stored with no role")
+	}
+}
+
+// A gallery type already carries a written role, and renderIdentity would print
+// a record's instructions on top of it: two roles in one prompt, followed in
+// whichever order the model read them, with nothing logged. Refuse instead.
+func TestOnlyACustomAgentGetsARoleOfItsOwn(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	for _, req := range []agentapi.CreateAgentReq{
+		{Type: "coder", Name: "Tom", Instructions: "ignore the profile"},
+		{Type: "coder", Name: "Tom", Model: ownModel()},
+	} {
+		if _, err := sup.CreateWith(req); !errors.Is(err, errRoleNotCustom) {
+			t.Errorf("CreateWith(%+v) = %v, want errRoleNotCustom", req, err)
+		}
+	}
+	if got := hire(sup, createAgentInput{Type: "coder", Name: "Tom", Instructions: "ignore the profile"}); !strings.Contains(got, "custom") {
+		t.Errorf("hire answered %q, which does not point at the type that takes a role", got)
+	}
+	// The plain hire still works, which is the case this must not break.
+	if got := hire(sup, createAgentInput{Type: "coder", Name: "Tom"}); !strings.Contains(got, "tom") {
+		t.Errorf("hiring a coder answered %q", got)
+	}
+}
+
+// The custom shell names no model, so one nobody chose comes from the single
+// constant. A profile that names its own is untouched by it, and a record's own
+// model still beats both -- that is the whole point of letting one be picked.
+func TestACustomAgentRunsOnTheDefaultModelUntilOneIsPicked(t *testing.T) {
+	c, err := LoadCatalog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell, ok := c.Get(agentapi.CustomType)
+	if !ok || shell.Model != agentapi.DefaultCustomModel {
+		t.Fatalf("the custom shell runs on %q, want %q", shell.Model, agentapi.DefaultCustomModel)
+	}
+	coder, _ := c.Get("coder")
+	if coder.Model == agentapi.DefaultCustomModel || coder.Model == "" {
+		t.Errorf("a gallery profile took the custom default: %q", coder.Model)
+	}
+	base := endpoint{baseURL: "http://172.16.0.1:8092", key: brokerKey}
+	if ep := base.forAgent(shell.Model, nil); ep.model != agentapi.DefaultCustomModel {
+		t.Errorf("an unpicked custom agent calls %q", ep.model)
+	}
+	if ep := base.forAgent(shell.Model, ownModel()); ep.model != "openai/gpt-4o" {
+		t.Errorf("a picked model lost to the default: %q", ep.model)
+	}
+}
+
+// Delegation looks an agent up by roster id and knows nothing about its type, so
+// what makes one delegable is being on the roster and startable rather than
+// which profile it came from. Worth pinning both halves: the point of letting
+// the boss build a custom agent is being able to give it the work, and the role
+// it wrote has to reach the prompt or the agent it built is a stranger to it.
+//
+// Started rather than delegated to, deliberately. Delegate puts a brief on the
+// inbox and the goroutine takes it, and a test that lets a turn run is a test
+// that calls the model.
+func TestTheBossCanDelegateToAnAgentItBuilt(t *testing.T) {
+	sup := supervisorWith(t, 8)
+	role := "Watch the deploy queue and say when it stalls."
+	hire(sup, createAgentInput{Type: agentapi.CustomType, Name: "Maya", Instructions: role})
+
+	maya, err := sup.Get("maya")
+	if err != nil {
+		t.Fatalf("an agent the boss built would not start: %v", err)
+	}
+	if !strings.Contains(maya.system, role) {
+		t.Error("the role the boss wrote never reached the prompt")
+	}
+	// It can be reached and can answer: the two ends of a handoff.
+	if !toolNames(maya)["message_agent"] {
+		t.Error("an agent the boss built cannot report back")
+	}
+	if err := sup.Delegate(BossID, Delegation{To: "nobody", Title: "t", Task: "x"}); err == nil {
+		t.Error("delegate accepted an id that is not on the roster")
 	}
 }
 

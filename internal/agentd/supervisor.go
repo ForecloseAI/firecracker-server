@@ -404,12 +404,16 @@ func (s *Supervisor) Create(typeKey, name string) (Record, error) {
 	return s.CreateWith(agentapi.CreateAgentReq{Type: typeKey, Name: name})
 }
 
-// CreateWith adds an agent from a full request: type and name, and for a
-// custom agent the role the person wrote and the model they chose. This is
-// the one place those are checked; the host relays a refusal as it is said.
+// CreateWith adds an agent from a full request: type and name, and for a custom
+// agent the role written for it and the model chosen for it. This is the one
+// place those are checked -- the host relays a refusal as it is said, and so
+// does the boss's create_agent tool.
 func (s *Supervisor) CreateWith(req agentapi.CreateAgentReq) (Record, error) {
 	if _, ok := s.catalog.Get(req.Type); !ok {
 		return Record{}, fmt.Errorf("no profile %q", req.Type)
+	}
+	if req.Type != agentapi.CustomType && (req.Instructions != "" || req.Model != nil) {
+		return Record{}, errRoleNotCustom
 	}
 	rec := Record{Name: req.Name, Type: req.Type, Instructions: req.Instructions, Model: req.Model}
 	if req.Type == agentapi.CustomType {
@@ -453,6 +457,17 @@ func (s *Supervisor) refresh(id string) {
 
 // errNotCustom is the refusal for editing what only a custom agent has.
 var errNotCustom = errors.New("only a custom agent's instructions or model can change")
+
+// errRoleNotCustom refuses to give a gallery type a role of its own.
+//
+// It matters now that the boss can pass one. A gallery profile already carries a
+// written and tested role prompt, and renderIdentity prints a record's
+// instructions on top of it -- so keeping both would put two roles in one prompt
+// and the agent would follow whichever it read last, with nothing logged. The
+// host never sends either field for a template (see finishActivate), so this
+// refuses only a mistake.
+var errRoleNotCustom = errors.New(
+	`only a custom agent has a role of its own; create it with type "custom" to write one`)
 
 // applyPatch lays a patch over a record. Anyone may be renamed; only a custom
 // agent's role and model may change, because the shipped profiles are the
