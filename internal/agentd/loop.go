@@ -537,6 +537,9 @@ func (a *Agent) params(msgs []anthropic.BetaMessageParam) anthropic.BetaToolRunn
 	}
 	p.ContextManagement = contextManagement()
 	p.Betas = betasFor(budget > 0)
+	if !anthropicModel(a.ep.model) {
+		p.Messages = withoutOpaqueThinking(p.Messages)
+	}
 	return anthropic.BetaToolRunnerParams{MaxIterations: maxIterations, BetaMessageNewParams: p}
 }
 
@@ -640,6 +643,46 @@ func (a *Agent) noteStop(runner *anthropic.BetaToolRunner, repaired bool) {
 	}
 }
 
+// anthropicModel says whether an id names Anthropic's own service. The gateway
+// prefixes every id by provider, so the prefix is the whole of the question.
+func anthropicModel(model string) bool {
+	return strings.HasPrefix(model, "anthropic/")
+}
+
+// withoutOpaqueThinking is the history with redacted_thinking blocks removed,
+// for a model that is not Anthropic's.
+//
+// Those blocks are encrypted reasoning nobody but their author can read, and
+// replaying them to a gateway costs a live failure. Sending Gemini an assistant
+// message that carries one, followed by a tool_result carrying an IMAGE, makes
+// the gateway drop the tool_result entirely on its way to Google -- which then
+// sees a conversation ending on a model turn and refuses the whole request with
+// "Requests ending with a model turn are not supported". Either ingredient alone
+// is fine, which is why this only ever showed up on a screenshot.
+//
+// Anthropic is excluded because it is the one service the blocks mean something
+// to: it requires them passed back, and the bug is not on its path.
+//
+// A fresh slice, not an edit in place: the caller's history is a shallow clone
+// of the agent's own, so rewriting Content would reach back into a conversation
+// this turn is still allowed to roll back.
+func withoutOpaqueThinking(msgs []anthropic.BetaMessageParam) []anthropic.BetaMessageParam {
+	out := slices.Clone(msgs)
+	for i, m := range out {
+		if m.Role != anthropic.BetaMessageParamRoleAssistant {
+			continue
+		}
+		kept := make([]anthropic.BetaContentBlockParamUnion, 0, len(m.Content))
+		for _, b := range m.Content {
+			if b.OfRedactedThinking == nil {
+				kept = append(kept, b)
+			}
+		}
+		out[i].Content = kept
+	}
+	return out
+}
+
 // drain pumps the runner one turn at a time, recording each message.
 //
 // Iterating with NextMessage rather than RunToCompletion is why the rollback
@@ -660,6 +703,12 @@ func (a *Agent) drain(ctx context.Context, runner *anthropic.BetaToolRunner, see
 			return nil
 		}
 		a.record(msg)
+		// The reply just appended may carry a redacted_thinking block, and the
+		// next NextMessage would send it straight back. Params is exported for
+		// exactly this -- the SDK's own comment says so.
+		if !anthropicModel(a.ep.model) {
+			runner.Params.Messages = withoutOpaqueThinking(runner.Params.Messages)
+		}
 	}
 }
 
