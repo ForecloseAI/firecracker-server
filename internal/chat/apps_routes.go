@@ -6,14 +6,15 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"cracked/internal/agentapi"
 	"cracked/internal/composio"
 )
 
-// listApps is the Apps screen: what this build offers, and which of them this
-// person has connected.
+// listApps is one page of the Apps screen: what this build offers, and which of
+// them this person has connected.
 //
 // Deliberately not guestOf. Rendering a list must not boot a five gigabyte
 // microVM -- that is the absurdity deleteAccount already calls out, and it is
@@ -22,14 +23,72 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request, user string) {
 	if s.composio == nil {
 		// No provider configured is an empty shelf, not a failure: the screen
 		// should render its empty state rather than an error nobody can act on.
-		writeJSON(w, http.StatusOK, []App{})
+		writeJSON(w, http.StatusOK, AppPage{Items: []App{}})
+		return
+	}
+	kits, offset, ok := s.appsQuery(w, r)
+	if !ok {
 		return
 	}
 	held, ok := s.heldApps(w, r, user)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, projectApps(s.catalog.toolkits(r.Context()), held))
+	page, next := pageOf(kits, offset, limitOf(r))
+	writeJSON(w, http.StatusOK, AppPage{Items: projectApps(page, held), NextCursor: next})
+}
+
+// appsQuery is the catalogue this request asked for and where its page starts,
+// or an answer already written.
+func (s *Server) appsQuery(w http.ResponseWriter,
+	r *http.Request) ([]composio.Toolkit, int, bool) {
+	q := r.URL.Query()
+	offset, ok := offsetOf(q.Get("cursor"))
+	if !ok {
+		fail(w, http.StatusBadRequest, "that is not a page of the app list")
+		return nil, 0, false
+	}
+	kits, err := s.catalog.toolkits(r.Context())
+	if err != nil {
+		// 502 and never an empty page. The client renders an empty list as "no
+		// apps are offered here", so a provider having a bad minute would tell
+		// somebody their apps had disappeared.
+		fail(w, http.StatusBadGateway, "could not read the list of apps")
+		return nil, 0, false
+	}
+	return matching(kits, q.Get("q"), q.Get("category")), offset, true
+}
+
+// limitOf is how many rows this request asked for, defaulted and clamped -- a
+// client asking for everything gets a page rather than the catalogue.
+func limitOf(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || n < 1 {
+		return appsPageDefault
+	}
+	return min(n, appsPageMax)
+}
+
+// offersApp reports whether this build can act on an app, or writes the refusal.
+//
+// A slug this build does not offer is refused here rather than passed through.
+// The provider carries over a thousand apps and would happily mint a link for
+// any of them, but only the ones whose OAuth it runs itself lead to a page a
+// person can finish -- and an arbitrary slug from a client is not a thing to
+// hand onward in any case.
+func (s *Server) offersApp(w http.ResponseWriter, r *http.Request, slug string) bool {
+	held, err := s.catalog.offers(r.Context(), slug)
+	if err != nil {
+		// Never the refusal below. Telling somebody we do not carry their app
+		// because the provider had a bad minute is a wrong answer, not a slow one.
+		fail(w, http.StatusBadGateway, "could not check which apps are available")
+		return false
+	}
+	if !held {
+		fail(w, http.StatusBadRequest, "that app is not one this version offers")
+		return false
+	}
+	return true
 }
 
 // heldApps is this person's connected accounts, or an answer already written --
@@ -38,12 +97,17 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request, user string) {
 //
 // 502 and never 401: the client signs the person out of the whole product on any
 // 401, and a provider having a bad minute is not a reason to end their session.
+//
+// It also tells noticeApps what it saw. Every caller wants that and none wants
+// to remember it, and a route that forgot would be a person connecting an app
+// and waiting an hour for their agents to know.
 func (s *Server) heldApps(w http.ResponseWriter, r *http.Request, user string) ([]composio.Connection, bool) {
 	held, err := s.composio.Connections(r.Context(), user)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "could not check your connected accounts")
 		return nil, false
 	}
+	s.noticeApps(user, held)
 	return held, true
 }
 
@@ -52,7 +116,7 @@ type Connection struct {
 	ID   string `json:"id"`
 	Slug string `json:"slug"`
 	// Name is derived from the slug rather than fetched. This list can hold apps
-	// the featured catalogue knows nothing about, so there is no copy to look up.
+	// the catalogue knows nothing about, so there is no copy to look up.
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	// Policy is what this person allows agents to do in this app without being
@@ -63,10 +127,15 @@ type Connection struct {
 
 // listAppConnections is every account this person has connected.
 //
-// Strictly more than the Apps screen shows: an agent can connect any app the
-// provider supports, not only the six offered here, so somebody may hold
-// accounts this build would never list. Those still have to be visible and
-// disconnectable.
+// Strictly more than the Apps screen shows: an agent connects any app the
+// provider supports, not only the ones whose OAuth it runs itself, so somebody
+// may hold accounts this build would never list. Those still have to be visible
+// and disconnectable.
+//
+// Whole rather than paged, deliberately. It is bounded by how many apps one
+// person connected rather than by what the provider offers, and it is the list
+// the client needs entire to render its connected and needs-attention sections
+// against a catalogue it only holds a page of.
 func (s *Server) listAppConnections(w http.ResponseWriter, r *http.Request, user string) {
 	if s.composio == nil {
 		writeJSON(w, http.StatusOK, []Connection{})
@@ -142,8 +211,7 @@ func (s *Server) setAppPolicy(w http.ResponseWriter, r *http.Request, user strin
 	// decode, so an app we do not offer answered 200 with an empty body and did
 	// nothing at all.
 	slug := r.PathValue("slug")
-	if !slices.Contains(featured, slug) {
-		fail(w, http.StatusBadRequest, "that app is not one this version can set permissions for")
+	if !s.offersApp(w, r, slug) {
 		return
 	}
 	var req policyReq
@@ -208,20 +276,15 @@ type ConnectLink struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// connectApp mints the page a person authorises one app on.
-//
-// A slug this build does not offer is refused here rather than passed through.
-// The provider supports over a thousand apps and would happily mint a link for
-// any of them, but this build has tested six -- and an arbitrary slug from a
-// client is not a thing to hand onward.
+// connectApp mints the page a person authorises one app on. offersApp says why
+// an unknown slug is refused here rather than handed to the provider.
 func (s *Server) connectApp(w http.ResponseWriter, r *http.Request, user string) {
 	if s.composio == nil {
 		fail(w, http.StatusBadGateway, "connecting apps is not available here")
 		return
 	}
 	slug := r.PathValue("slug")
-	if !slices.Contains(featured, slug) {
-		fail(w, http.StatusBadRequest, "that app is not one this version can connect")
+	if !s.offersApp(w, r, slug) {
 		return
 	}
 	link, err := s.composio.Link(r.Context(), user, slug, s.cfg.ComposioCallback)
@@ -260,6 +323,10 @@ func (s *Server) disconnectApp(w http.ResponseWriter, r *http.Request, user stri
 		fail(w, http.StatusBadGateway, "could not disconnect that account")
 		return
 	}
+	// noticeApps read the connections BEFORE this, so it saw the app still
+	// present. Without this the machine keeps that app's actions until its answer
+	// goes stale on its own -- resolved against a grant that no longer exists.
+	s.staleApps(machineFor(user))
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -170,13 +170,11 @@ func (c *Client) do(req *http.Request, out any) error {
 	if out == nil {
 		return nil // a 204 has no body to read, and decoding one is an EOF
 	}
-	// Bounded well ABOVE what any caller's own row guard allows, so that guard is
-	// the one that fires. At ~2.3 KB per unfiltered tool row, a 1 MiB ceiling died
-	// at roughly 450 rows -- under Capabilities' toolPage of 500, so the
-	// toolkit that outgrew the call would fail as "unexpected EOF" having decoded
-	// NOTHING, rather than as the named "this needs paging" error written for
-	// exactly that case. Silent, total, and never cached, so it re-fans-out on the
-	// short clock forever.
+	// Bounded well ABOVE the largest page any caller asks for. At ~2.3 KB per
+	// unfiltered tool row, a 1 MiB ceiling died at roughly 450 rows -- under
+	// Capabilities' toolLimit of 500, so a toolkit that filled a page would fail
+	// as "unexpected EOF" having decoded NOTHING. Silent, total, and never
+	// cached, so it re-fans-out on the short clock forever.
 	//
 	// Costs no memory to raise: this streams into structs that keep a handful of
 	// fields, so what is retained is tens of KB whatever the body is.
@@ -186,12 +184,10 @@ func (c *Client) do(req *http.Request, out any) error {
 // bodyCap bounds a response we will decode: a guard against a provider having a
 // very bad day, not a size any real answer approaches.
 //
-// The largest today is one toolkit's unfiltered tool list, and the NEAR MISS is
-// the whole reason this is not 1 MiB: outlook, the biggest of the six at 305
-// tools, reconstructs to roughly a megabyte -- close enough that it cannot be
-// said from here which side of that line it falls on, and it is the fastest
-// growing of the six. A ceiling a real answer can reach is one that will be
-// reached.
+// Two real answers come close enough that this is not 1 MiB. A full page of 500
+// unfiltered tool rows reconstructs to roughly a megabyte at ~2.3 KB each, and a
+// 1000-row page of the catalogue measured ~756 KB on 2026-09-05. A ceiling a
+// real answer can reach is one that will be reached.
 const bodyCap = 8 << 20
 
 // Connection is one app account a person has connected.
@@ -272,50 +268,151 @@ func (c *Client) Disconnect(ctx context.Context, id string) error {
 
 // Toolkit is one app as the provider's catalogue describes it.
 //
-// Fetched rather than written down here: a name, a logo and a blurb are copy
-// that goes stale, and the only thing this project should be choosing is WHICH
-// apps to offer.
+// Fetched rather than written down here. A name, a logo, a blurb and a category
+// are all copy that goes stale while nobody notices, so this project keeps none
+// of them -- and since Toolkits below asks the provider WHICH apps exist too,
+// there is now nothing about an app written down in this repository at all.
 type Toolkit struct {
 	Slug        string
 	Name        string
 	Logo        string
 	Description string
+	// Categories is the provider's own grouping, lowercase and free-form
+	// ("email", "team collaboration"). Carried so a directory can offer filters
+	// without a table of our own; roughly forty distinct names across the
+	// catalogue, so whoever renders them has to choose how many to show.
+	Categories []string
 }
 
-// toolkitResp is the shape of GET /toolkits/{slug}.
+// toolkitResp is one row of the catalogue, from GET /toolkits/{slug} and from a
+// page of GET /toolkits alike -- the two carry the same fields for these.
 type toolkitResp struct {
 	Slug string `json:"slug"`
 	Name string `json:"name"`
-	Meta struct {
+	// ManagedAuth is the provider saying it runs this app's OAuth application
+	// itself. See Toolkits for why that, and not auth_schemes, is the test.
+	ManagedAuth []string `json:"composio_managed_auth_schemes"`
+	Meta        struct {
 		Logo        string `json:"logo"`
 		Description string `json:"description"`
+		Categories  []struct {
+			Name string `json:"name"`
+		} `json:"categories"`
 	} `json:"meta"`
 }
 
+// toolkit is this row as the rest of the project sees an app.
+func (t toolkitResp) toolkit() Toolkit {
+	out := Toolkit{Slug: t.Slug, Name: t.Name,
+		Logo: t.Meta.Logo, Description: t.Meta.Description}
+	for _, c := range t.Meta.Categories {
+		out.Categories = append(out.Categories, c.Name)
+	}
+	return out
+}
+
 // Toolkit fetches one app's public metadata.
+//
+// Kept beside Toolkits rather than replaced by it: this answers for a slug the
+// catalogue does not hold, which an app connected by an agent may well be.
 func (c *Client) Toolkit(ctx context.Context, slug string) (Toolkit, error) {
 	var out toolkitResp
 	if err := c.send(ctx, http.MethodGet, "/toolkits/"+url.PathEscape(slug), nil, &out); err != nil {
 		return Toolkit{}, err
 	}
-	return Toolkit{Slug: out.Slug, Name: out.Name,
-		Logo: out.Meta.Logo, Description: out.Meta.Description}, nil
+	return out.toolkit(), nil
+}
+
+// toolkitsResp is one page of GET /toolkits.
+type toolkitsResp struct {
+	Items      []toolkitResp `json:"items"`
+	NextCursor string        `json:"next_cursor"`
+}
+
+// toolkitLimit is how many apps are asked for at once. Measured 2026-09-05: the
+// whole catalogue is 1505 rows and a 1000-row page is ~756 KB, well inside
+// bodyCap -- so this is two requests rather than sixteen.
+const toolkitLimit = 1000
+
+// toolkitPages bounds the walk, for the reason connectionPages does: a cursor
+// that never empties is a provider bug, and looping on it forever behind
+// somebody opening a screen would be worse than stopping short.
+const toolkitPages = 8
+
+// Toolkits is every app this project can offer somebody: the ones whose OAuth
+// the provider runs itself.
+//
+// THE FILTER IS APPLIED PER ROW, and that is not laziness about a query string.
+// Verified against the live API on 2026-09-05: auth_scheme, managed_by and
+// is_local are all accepted and then IGNORED -- each answers with the full 1505
+// -- while category does filter, so the mechanism works and those names simply
+// are not it. A caller trusting a dropped filter would offer a person 1383 apps
+// whose sign-in page they cannot complete. Same trap as Capabilities below, and
+// the same answer: read each row's own fields.
+//
+// composio_managed_auth_schemes is the test rather than auth_schemes because it
+// is what createAuthConfig needs. That call sends a bare toolkit, which means
+// provider-managed auth; the 82 apps offering OAUTH2 without a managed scheme
+// need an OAuth application registered in our name, which this project has not
+// got. Measured the same day: the field holds only OAUTH2 (121 apps) or OAUTH1
+// (1), so "managed" and "OAuth" are the same set today -- and non-empty is the
+// honest spelling of the rule, since it is the provider's own list of what it
+// will run for us rather than a scheme name we matched.
+func (c *Client) Toolkits(ctx context.Context) ([]Toolkit, error) {
+	var out []Toolkit
+	cursor := ""
+	for range toolkitPages {
+		page, err := c.toolkitPage(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			if len(it.ManagedAuth) > 0 {
+				out = append(out, it.toolkit())
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return out, nil
+}
+
+// toolkitPage fetches one page of the provider's catalogue. The order is the
+// provider's own, by popularity, which is why nothing here re-sorts it.
+func (c *Client) toolkitPage(ctx context.Context, cursor string) (toolkitsResp, error) {
+	q := url.Values{"limit": {strconv.Itoa(toolkitLimit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	var page toolkitsResp
+	err := c.send(ctx, http.MethodGet, "/toolkits?"+q.Encode(), nil, &page)
+	return page, err
 }
 
 // readOnlyTag is the provider's annotation for a tool that only reads.
 //
 // Measured against the live catalogue on 2026-09-02: 910 of 910 tools across the
-// featured six carry an effect hint, none carries readOnlyHint alongside
-// destructiveHint or createHint, and it classifies correctly every slug whose
+// six apps offered then carried an effect hint, none carried readOnlyHint
+// alongside destructiveHint or createHint, and it classifies correctly every slug whose
 // NAME lies -- GMAIL_SEND_DRAFT is destructive, GOOGLECALENDAR_CALENDAR_LIST_INSERT
 // creates, MICROSOFT_TEAMS_CREATE_OR_GET_ONLINE_MEETING creates. Which is why
 // nothing downstream parses a tool name.
 const readOnlyTag = "readOnlyHint"
 
-// toolPage is asked for in one page. Outlook is the largest of the featured six
-// at 305 tools, so this is well over the biggest real answer -- deliberately,
-// because Capabilities refuses a full page rather than paging.
-const toolPage = 500
+// toolLimit is how many of one app's actions are asked for at once.
+//
+// It used to be a ceiling rather than a page size: the call asked for 500 and
+// REFUSED an answer that filled it, on the reasoning that the largest app then
+// offered had 305. That was true of six apps and false of the catalogue --
+// GitHub has 871 -- so a refusal that was meant never to fire would have fired
+// on the second most popular app there is, and an incomplete map is never
+// cached, so it would have re-fanned-out every five minutes forever.
+const toolLimit = 500
+
+// toolPages bounds the walk, as toolkitPages does. Well over GitHub's two.
+const toolPages = 8
 
 // toolsResp is one page of GET /tools. Tags are what every row is classified
 // from, and the only other field kept -- which is what makes an unfiltered page
@@ -325,6 +422,7 @@ type toolsResp struct {
 		Slug string   `json:"slug"`
 		Tags []string `json:"tags"`
 	} `json:"items"`
+	NextCursor string `json:"next_cursor"`
 }
 
 // The capabilities an action can belong to, most consequential first. These are
@@ -347,21 +445,33 @@ const (
 // than one per tag. The predecessor that did filter had to re-check every row it
 // got back for exactly this reason.
 func (c *Client) Capabilities(ctx context.Context, slug string) (map[string]string, error) {
-	var out toolsResp
-	q := "/tools?" + url.Values{
-		"toolkit_slug": {slug}, "limit": {strconv.Itoa(toolPage)},
-	}.Encode()
-	if err := c.send(ctx, http.MethodGet, q, nil, &out); err != nil {
-		return nil, err
-	}
-	if len(out.Items) >= toolPage {
-		return nil, fmt.Errorf("composio: %s has %d or more tools; this needs paging", slug, toolPage)
-	}
-	held := make(map[string]string, len(out.Items))
-	for _, it := range out.Items {
-		held[it.Slug] = capabilityOf(it.Tags)
+	held := map[string]string{}
+	cursor := ""
+	for range toolPages {
+		page, err := c.toolsPage(ctx, slug, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			held[it.Slug] = capabilityOf(it.Tags)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
 	return held, nil
+}
+
+// toolsPage fetches one page of an app's actions.
+func (c *Client) toolsPage(ctx context.Context, slug, cursor string) (toolsResp, error) {
+	q := url.Values{"toolkit_slug": {slug}, "limit": {strconv.Itoa(toolLimit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	var page toolsResp
+	err := c.send(ctx, http.MethodGet, "/tools?"+q.Encode(), nil, &page)
+	return page, err
 }
 
 // capabilityOf is what one action does, most consequential hint winning.

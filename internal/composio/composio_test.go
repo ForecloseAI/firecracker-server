@@ -7,6 +7,8 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -196,7 +198,8 @@ func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Write([]byte(`{"slug":"gmail","name":"Gmail","meta":{
-			"logo":"https://logos.composio.dev/api/gmail","description":"Google's email service"}}`))
+			"logo":"https://logos.composio.dev/api/gmail","description":"Google's email service",
+			"categories":[{"id":"email","name":"email"}]}}`))
 	}))
 	defer srv.Close()
 
@@ -208,10 +211,97 @@ func TestToolkitReadsTheProvidersOwnCopy(t *testing.T) {
 		t.Errorf("asked for %q", gotPath)
 	}
 	want := Toolkit{Slug: "gmail", Name: "Gmail",
-		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service"}
-	if got != want {
+		Logo: "https://logos.composio.dev/api/gmail", Description: "Google's email service",
+		Categories: []string{"email"}}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v", got)
 	}
+}
+
+// THE test for the catalogue filter. The provider ignores every plausible
+// server-side auth filter rather than rejecting it -- auth_scheme, managed_by
+// and is_local all answer with all 1505 toolkits -- so the row's own
+// composio_managed_auth_schemes is the only thing that can refuse an app whose
+// sign-in page nobody could complete.
+//
+// The stub answers with both rows whatever it is asked, deliberately: a stub
+// that honoured a query parameter would refuse the second row a layer deeper
+// than the check under test, and this would pass with that check deleted.
+func TestToolkitsKeepsOnlyWhatTheProviderManages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[
+			{"slug":"gmail","name":"Gmail","auth_schemes":["OAUTH2"],
+			 "composio_managed_auth_schemes":["OAUTH2"],
+			 "meta":{"logo":"l/gmail","description":"d","categories":[{"name":"email"}]}},
+			{"slug":"shopify","name":"Shopify","auth_schemes":["OAUTH2"],
+			 "composio_managed_auth_schemes":[],
+			 "meta":{"logo":"l/shopify","description":"d","categories":[{"name":"crm"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Toolkits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Toolkit{{Slug: "gmail", Name: "Gmail", Logo: "l/gmail",
+		Description: "d", Categories: []string{"email"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// The catalogue is more than one page, so a walk that stopped at the first would
+// silently offer a person the popular half and refuse the rest.
+func TestToolkitsFollowsTheCursor(t *testing.T) {
+	var cursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cursors = append(cursors, r.URL.Query().Get("cursor"))
+		if r.URL.Query().Get("cursor") == "" {
+			w.Write([]byte(`{"items":[{"slug":"gmail","composio_managed_auth_schemes":["OAUTH2"]}],
+				"next_cursor":"p2"}`))
+			return
+		}
+		w.Write([]byte(`{"items":[{"slug":"notion","composio_managed_auth_schemes":["OAUTH2"]}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := New("k", srv.URL).Toolkits(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slugs := slugsOf(got); !slices.Equal(slugs, []string{"gmail", "notion"}) {
+		t.Errorf("walked to %q", slugs)
+	}
+	if !slices.Equal(cursors, []string{"", "p2"}) {
+		t.Errorf("asked with cursors %q", cursors)
+	}
+}
+
+// A cursor that never empties is a provider bug, and looping on it forever in
+// front of somebody opening a screen would be worse than stopping short.
+func TestToolkitsStopsOnACursorThatNeverEmpties(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"items":[{"slug":"gmail","composio_managed_auth_schemes":["OAUTH2"]}],
+			"next_cursor":"more"}`))
+	}))
+	defer srv.Close()
+	if _, err := New("k", srv.URL).Toolkits(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != toolkitPages {
+		t.Errorf("made %d calls, want the bound of %d", calls, toolkitPages)
+	}
+}
+
+// slugsOf names a catalogue, so a failure reads as apps rather than structs.
+func slugsOf(kits []Toolkit) []string {
+	out := make([]string, 0, len(kits))
+	for _, kit := range kits {
+		out = append(out, kit.Slug)
+	}
+	return out
 }
 
 // THE test for this pair. toolkit_slug is SINGULAR here, and the plural form is
@@ -380,35 +470,67 @@ func TestCapabilitiesAsksForEveryToolAndClassifiesTheRows(t *testing.T) {
 	}
 }
 
-// A full page is refused rather than kept: the tools it did not return would be
-// absent from the map, and absent resolves to asking about everything.
-func TestAFullPageOfCapabilitiesIsRefused(t *testing.T) {
+// An app bigger than one page is walked rather than refused. GitHub has 871
+// actions against a 500-row page, so this is the second most popular app there
+// is -- and what a refusal costs is not an error anybody sees but a map missing
+// those rows, which resolves to asking about every one of them.
+func TestCapabilitiesWalksAnAppBiggerThanOnePage(t *testing.T) {
+	var cursors []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"items":[` + strings.Repeat(
-			`{"slug":"X","tags":["readOnlyHint"]},`, toolPage-1) +
-			`{"slug":"X","tags":["readOnlyHint"]}]}`))
+		cursors = append(cursors, r.URL.Query().Get("cursor"))
+		if r.URL.Query().Get("cursor") == "" {
+			w.Write([]byte(`{"items":[{"slug":"GITHUB_LIST_REPOS","tags":["readOnlyHint"]}],
+				"next_cursor":"c2"}`))
+			return
+		}
+		w.Write([]byte(`{"items":[{"slug":"GITHUB_DELETE_REPO","tags":["destructiveHint"]}]}`))
 	}))
 	defer srv.Close()
-	if got, err := New("k", srv.URL).Capabilities(context.Background(), "outlook"); err == nil {
-		t.Fatalf("kept %d off a full page", len(got))
+
+	got, err := New("k", srv.URL).Capabilities(context.Background(), "github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"GITHUB_LIST_REPOS": CapRead, "GITHUB_DELETE_REPO": CapDelete}
+	if !maps.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if !slices.Equal(cursors, []string{"", "c2"}) {
+		t.Errorf("asked with cursors %q", cursors)
 	}
 }
 
-// THE test for the decode ceiling, and the reason the guard above is not enough
-// on its own: its rows are 36 bytes, where a real unfiltered one carries a
-// description and an input schema and runs past two kilobytes.
+// A cursor that never empties stops at the bound rather than looping forever
+// behind somebody opening a screen.
+func TestCapabilitiesStopsOnACursorThatNeverEmpties(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"items":[{"slug":"X","tags":["readOnlyHint"]}],"next_cursor":"more"}`))
+	}))
+	defer srv.Close()
+	if _, err := New("k", srv.URL).Capabilities(context.Background(), "github"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != toolPages {
+		t.Errorf("made %d calls, want the bound of %d", calls, toolPages)
+	}
+}
+
+// THE test for the decode ceiling. A real unfiltered row carries a description
+// and an input schema and runs past two kilobytes, so a full page is about
+// 1.1 MiB of body.
 //
-// A page just under the row guard is therefore about 1.1 MiB of body. Decoded
-// under a 1 MiB ceiling that is not a short read but a total one -- io.LimitReader
-// hands the decoder an early EOF, Decode returns "unexpected EOF" and NOTHING is
-// kept, so the toolkit that outgrew the call reports an outage rather than the
-// named paging error written for it. Never cached, so it re-fans-out forever.
+// Decoded under a 1 MiB ceiling that is not a short read but a total one --
+// io.LimitReader hands the decoder an early EOF, Decode returns "unexpected EOF"
+// and NOTHING is kept, so an app that fills a page reports an outage. Never
+// cached, so it re-fans-out forever.
 func TestARealSizedPageIsDecodedRatherThanTruncated(t *testing.T) {
 	row := `{"slug":"OUTLOOK_%d","tags":["readOnlyHint"],"description":"` +
 		strings.Repeat("x", 2<<10) + `"},`
 	var body strings.Builder
 	body.WriteString(`{"items":[`)
-	for i := range toolPage - 2 {
+	for i := range toolLimit - 2 {
 		body.WriteString(fmt.Sprintf(row, i))
 	}
 	body.WriteString(`{"slug":"OUTLOOK_LAST","tags":["destructiveHint"]}]}`)
@@ -424,8 +546,8 @@ func TestARealSizedPageIsDecodedRatherThanTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a page under the row guard did not decode: %v", err)
 	}
-	if len(got) != toolPage-1 {
-		t.Errorf("kept %d of %d rows", len(got), toolPage-1)
+	if len(got) != toolLimit-1 {
+		t.Errorf("kept %d of %d rows", len(got), toolLimit-1)
 	}
 	if got["OUTLOOK_LAST"] != CapDelete {
 		t.Errorf("the last row of a big page was lost or misread: %q", got["OUTLOOK_LAST"])

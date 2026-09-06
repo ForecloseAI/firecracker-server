@@ -41,40 +41,66 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, user st
 	if !ok {
 		return
 	}
-	s.deliver(w, cl, r.PathValue("id"), r.PathValue("messageId"), req)
+	s.deliver(w, cl, user, r.PathValue("id"), r.PathValue("messageId"), req)
 }
 
 // deliver finds the ask, authors the body, and sends it.
 func (s *Server) deliver(w http.ResponseWriter, cl *agent.Client,
-	agentID, messageID string, req approvalReq) {
+	user, agentID, messageID string, req approvalReq) {
 	ask, ok := findAsk(cl, agentID, messageID)
 	if !ok {
 		fail(w, http.StatusNotFound, "no such ask")
 		return
 	}
-	body, ok := decisionBody(askUIOf(ask), req)
+	ui := askUIOf(ask)
+	body, ok := decisionBody(ui, req)
 	if !ok {
 		fail(w, http.StatusBadRequest, "that answer does not fit this ask")
 		return
 	}
-	forwardDecision(w, cl, ask.ApprovalID, body)
+	if forwardDecision(w, cl, ask.ApprovalID, body) {
+		s.noticeConnect(user, ui, req)
+	}
 }
 
-// forwardDecision sends the authored body and maps the guest's answer.
-func forwardDecision(w http.ResponseWriter, cl *agent.Client, apid string, body map[string]any) {
+// noticeConnect drops this machine's apps claim when somebody says they have
+// finished connecting an app.
+//
+// THE trigger that matters. A push is what carries an app's actions to a
+// machine, and it is due again only when what it holds goes stale -- up to an
+// hour. The flow this product leads with does not touch the Apps screen at all:
+// an agent raises a Connect card, the person signs in, the agent retries. So
+// without this an agent that just walked somebody through connecting Notion
+// would then ask about every Notion read for the rest of the hour.
+//
+// The connection may not be ACTIVE at the moment they tap, which costs a wasted
+// push and nothing else -- the next request re-pushes and sees it by then.
+func (s *Server) noticeConnect(user string, ui *AskUI, req approvalReq) {
+	if ui == nil || ui.Kind != askConnect || req.Verdict != verdictApproved {
+		return
+	}
+	// staleApps, never forgetApps: this runs while the agent is still holding the
+	// call it raised the card for, and taking its ticket away would 404 the retry.
+	s.staleApps(machineFor(user))
+}
+
+// forwardDecision sends the authored body and maps the guest's answer, saying
+// whether the agent actually received it.
+func forwardDecision(w http.ResponseWriter, cl *agent.Client, apid string, body map[string]any) bool {
 	err := cl.Resolve(apid, body)
 	if err == nil {
 		w.WriteHeader(http.StatusNoContent)
-		return
+		return true
 	}
 	// The guest 404s an interaction that is already settled -- answered on
 	// another device, timed out, or revoked by an interrupt. That is a stale
 	// card, not a wrong route, so the client is told 409 and can re-fetch.
 	if isNotFound(err) {
 		fail(w, http.StatusConflict, "already resolved")
-		return
+		return false
 	}
 	fail(w, http.StatusBadGateway, err.Error())
+	return false
 }
 
 // findAsk locates the ask a message id names, in that agent's own log.

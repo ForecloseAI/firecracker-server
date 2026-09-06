@@ -11,15 +11,17 @@ import (
 // appsBodyCap bounds the push.
 //
 // It used to carry two short strings and was capped at 8 KiB. It now also
-// carries the resolved answer, measured at ~50 KB for the featured six on
-// 2026-09-02 -- so the old cap refused every push, and because handlePutApps
-// answers 400 before WriteApps, it took the SESSION down with it rather than
-// just the set. Deterministic, self-repeating on the retry cooldown, and it
-// presents as "connected apps unavailable" with nothing naming the cause.
+// carries the resolved answer, measured at ~50 KB for six apps on 2026-09-02 --
+// so the old cap refused every push, and because handlePutApps answers 400
+// before WriteApps, it took the SESSION down with it rather than just the set.
+// Deterministic, self-repeating on the retry cooldown, and it presents as
+// "connected apps unavailable" with nothing naming the cause.
 //
-// Sized for a list that grows on the PROVIDER's schedule, not ours: that is the
-// point of fetching it rather than compiling it in, and it is why the headroom
-// is generous rather than snug.
+// The host budgets what it sends against this (appsActionBytes in
+// internal/chat), so what arrives is bounded by the apps one person connected
+// rather than by anything the provider ships. The two numbers have to be
+// changed together, and this one costs a rootfs rebuild while that one does not
+// -- which is why the headroom here is generous rather than snug.
 const appsBodyCap = 256 << 10
 
 // handleGetApps reports the app-integration session this machine holds.
