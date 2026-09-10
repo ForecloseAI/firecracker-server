@@ -2,38 +2,36 @@ package chat
 
 import (
 	"context"
-	"log"
+	"encoding/base64"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"cracked/internal/composio"
 )
 
-// featured is the apps this build offers, in the order they are shown.
+// appsCatalogTTL is how long the provider's catalogue is kept.
 //
-// The ONLY thing about an app written down here. Names, logos and blurbs come
-// from the provider, because that is copy which goes stale while nobody notices
-// -- what this project should be choosing is which apps to offer, not how to
-// describe them.
-var featured = []string{
-	"gmail", "googlecalendar", "slack", "outlook", "microsoft_teams", "asana",
-}
-
-// appsCatalogTTL is how long the featured apps' copy is kept.
+// Fifteen days, and the length is the point: this is the provider's whole list
+// of apps, identical for every person on the fleet, and it moves when somebody
+// rebrands or a new integration ships. The cost of it being a fortnight stale is
+// an app that appears late; the cost of a short clock is two round trips in
+// front of a screen for an answer that did not change.
 //
-// Long, because it is the same for every person on the fleet and changes about
-// as often as a company rebrands. The cost of it being stale is a slightly old
-// blurb; the cost of not caching is six round trips on every Apps screen.
-const appsCatalogTTL = time.Hour
+// Worth being plain about what it buys, because it is less than it looks: the
+// cache is process memory with nothing behind it, and cracked-chat restarts on
+// every deploy, so in practice this is TWO REQUESTS PER PROCESS and the deadline
+// only matters to a host left running for a fortnight.
+const appsCatalogTTL = 15 * 24 * time.Hour
 
-// appCatalog keeps the featured apps' copy so the screen does not re-fetch it
-// per person. One entry with one deadline, refreshed on read when stale --
-// the idiom Caps uses in vncgw.go, with no background goroutine.
+// appCatalog keeps the provider's catalogue so the screen does not re-fetch it
+// per person. One entry with one deadline, refreshed on read when stale -- the
+// idiom Caps uses in vncgw.go, with no background goroutine.
 type appCatalog struct {
 	// fetch is a field so a test can answer without a provider.
-	fetch func(context.Context, string) (composio.Toolkit, error)
+	fetch func(context.Context) ([]composio.Toolkit, error)
 
 	mu      sync.Mutex
 	held    []composio.Toolkit
@@ -42,23 +40,38 @@ type appCatalog struct {
 
 // newAppCatalog prepares the cache. It fetches nothing until asked.
 func newAppCatalog(c *composio.Client) *appCatalog {
-	return &appCatalog{fetch: c.Toolkit}
+	return &appCatalog{fetch: c.Toolkits}
 }
 
-// toolkits returns the featured apps, refreshing the copy when it has gone
-// stale. It never fails: an app whose metadata could not be read still appears,
-// named after its own slug, because a person who cannot see Slack cannot connect
-// it either. Only a complete fetch is cached, so a bad minute is not kept for an
-// hour.
-func (a *appCatalog) toolkits(ctx context.Context) []composio.Toolkit {
+// toolkits returns every app this build can connect, refreshing the copy when it
+// has gone stale.
+//
+// It CAN fail now, where the six-slug version could not: that one fetched each
+// app on its own and named a missing one after its slug, so a bad minute cost a
+// blurb. One list call has no such half state, and a caller that turned the
+// failure into an empty catalogue would tell somebody their apps had vanished.
+func (a *appCatalog) toolkits(ctx context.Context) ([]composio.Toolkit, error) {
 	if held := a.fresh(); held != nil {
-		return held
+		return held, nil
 	}
-	got, whole := a.fetchAll(ctx)
-	if whole {
-		a.keep(got)
+	got, err := a.fetch(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return got
+	a.keep(got)
+	return got, nil
+}
+
+// offers reports whether the catalogue holds this app, or why it could not say.
+// The two answers are kept apart so a provider outage is not reported to
+// somebody as an app we do not carry.
+func (a *appCatalog) offers(ctx context.Context, slug string) (bool, error) {
+	held, err := a.toolkits(ctx)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(held,
+		func(kit composio.Toolkit) bool { return kit.Slug == slug }), nil
 }
 
 // fresh returns the cached copy while it is still good.
@@ -71,56 +84,88 @@ func (a *appCatalog) fresh() []composio.Toolkit {
 	return nil
 }
 
-// keep stores a complete copy and starts its clock.
+// keep stores the catalogue and starts its clock.
 func (a *appCatalog) keep(held []composio.Toolkit) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.held, a.expires = held, time.Now().Add(appsCatalogTTL)
 }
 
-// fetchAll reads every featured app, naming one that could not be read after its
-// own slug so it still appears on the list.
-func (a *appCatalog) fetchAll(ctx context.Context) ([]composio.Toolkit, bool) {
-	return fanOut(ctx, a.fetch, func(slug string) composio.Toolkit {
-		return composio.Toolkit{Slug: slug, Name: labelFor(slug)}
-	})
-}
+// Page sizes for the directory. A client asking for everything gets a page.
+const (
+	appsPageDefault = 50
+	appsPageMax     = 200
+)
 
-// fanOut reads every featured app at once, reporting whether all of them
-// answered. Parallel because this sits in front of a person opening a screen and
-// six round trips in series is a second they watch.
+// matching narrows the catalogue to what the directory asked for.
 //
-// miss says what an app that did not answer contributes -- a placeholder the
-// screen can still draw, or nothing at all. That is the ONLY thing the two
-// callers disagree about, so it is an argument here rather than the reason for a
-// second copy of the interesting part: index-addressed writes that need no lock,
-// missed set before the Wait, and a loop variable captured per iteration.
-func fanOut[E any](ctx context.Context, fetch func(context.Context, string) (E, error),
-	miss func(string) E) ([]E, bool) {
-	out := make([]E, len(featured))
-	var missed atomic.Bool
-	var wg sync.WaitGroup
-	for i, slug := range featured {
-		wg.Go(func() {
-			got, err := fetch(ctx, slug)
-			if err != nil {
-				// Named, with its reason. The callers only say how MANY apps are
-				// missing, which cannot tell a provider outage from one toolkit
-				// that outgrew a decode limit -- and the second is the one that
-				// never heals on its own.
-				log.Printf("chat: %s did not answer: %v", slug, err)
-				missed.Store(true)
-				got = miss(slug)
-			}
-			out[i] = got
-		})
+// Searched HERE rather than in the client, and that is the other half of paging
+// this route rather than scope beside it: a client holding one page of fifty
+// would otherwise filter only what it happened to have loaded, and an app at
+// rank ninety would be unfindable by typing its name. Costs no provider call --
+// this is the cached slice.
+func matching(kits []composio.Toolkit, query, category string) []composio.Toolkit {
+	query = strings.ToLower(strings.TrimSpace(query))
+	out := make([]composio.Toolkit, 0, len(kits))
+	for _, kit := range kits {
+		if category != "" && !slices.Contains(kit.Categories, category) {
+			continue
+		}
+		if query != "" && !strings.Contains(searchable(kit), query) {
+			continue
+		}
+		out = append(out, kit)
 	}
-	wg.Wait()
-	return out, !missed.Load()
+	return out
 }
 
-// labelFor is the best name a slug alone can give, for an app whose metadata
-// could not be read: "microsoft_teams" becomes "Microsoft Teams".
+// searchable is everything about an app a person might type. The slug is in it
+// because that is what an agent's connect card names, and somebody reading one
+// will type what they saw.
+func searchable(kit composio.Toolkit) string {
+	return strings.ToLower(strings.Join(
+		append([]string{kit.Slug, kit.Name, kit.Description}, kit.Categories...), " "))
+}
+
+// pageOf cuts one page out of the catalogue and says where the next begins.
+//
+// The cursor is an offset, and that is sound here in a way it would not be over
+// a live query: this is one cached snapshot with a fifteen-day deadline, so a
+// page boundary cannot slide under somebody mid-scroll.
+func pageOf(kits []composio.Toolkit, offset, limit int) ([]composio.Toolkit, string) {
+	if offset >= len(kits) {
+		return nil, ""
+	}
+	end := min(offset+limit, len(kits))
+	if end == len(kits) {
+		return kits[offset:end], ""
+	}
+	return kits[offset:end], cursorOf(end)
+}
+
+// cursorOf hides an offset behind a string, so a client passes back what it was
+// given rather than doing arithmetic this route would then have to keep true.
+func cursorOf(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+// offsetOf reads a cursor, refusing one this route did not write. A cursor that
+// cannot be read is a 400 rather than a silent restart from the top, which would
+// scroll somebody back to the beginning with no error to explain it.
+func offsetOf(cursor string) (int, bool) {
+	if cursor == "" {
+		return 0, true
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, false
+	}
+	offset, err := strconv.Atoi(string(raw))
+	return offset, err == nil && offset >= 0
+}
+
+// labelFor is the best name a slug alone can give, for an app the catalogue does
+// not describe: "microsoft_teams" becomes "Microsoft Teams".
 func labelFor(slug string) string {
 	words := strings.Split(slug, "_")
 	for i, w := range words {
@@ -137,6 +182,10 @@ type App struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	LogoURL     string `json:"logoUrl"`
+	// Categories is the provider's own grouping, so the directory's filters need
+	// no table of our own. Free-form and lowercase, and there are around forty of
+	// them, so a screen showing all as chips would show a wall of them.
+	Categories []string `json:"categories,omitempty"`
 	// Initial and Hue are the avatar recipe the roster already uses. They are
 	// sent alongside the logo, not instead of it, so an app whose logo does not
 	// load degrades into a mark the client can draw rather than a grey box --
@@ -155,15 +204,27 @@ type App struct {
 	Status string `json:"status,omitempty"`
 }
 
+// AppPage is one page of the directory. An object rather than a bare list
+// because the catalogue grows on the PROVIDER's release schedule, and a route
+// whose answer does that is one that has to be changed under pressure later.
+type AppPage struct {
+	Items []App `json:"items"`
+	// NextCursor is absent on the last page, which is how a client knows to stop
+	// rather than by comparing a count it would have to be told separately.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
 // projectApps turns the catalogue and one person's connections into the rows the
-// screen renders. Pure, and the order is the catalogue's.
+// screen renders. Pure, and the order is the catalogue's -- which is the
+// provider's own, by popularity.
 func projectApps(toolkits []composio.Toolkit, held []composio.Connection) []App {
 	out := make([]App, 0, len(toolkits))
 	for _, kit := range toolkits {
 		conn := connectionFor(held, kit.Slug)
 		out = append(out, App{
 			Slug: kit.Slug, Name: kit.Name, Description: kit.Description,
-			LogoURL: kit.Logo, Initial: initialOf(kit.Name), Hue: hueOf(kit.Slug),
+			LogoURL: kit.Logo, Categories: kit.Categories,
+			Initial: initialOf(kit.Name), Hue: hueOf(kit.Slug),
 			Connected:    conn.Status == composio.StatusActive,
 			ConnectionID: conn.ID, Status: conn.Status,
 		})

@@ -458,15 +458,46 @@ up anyway.
 
 ## Connected apps
 
-An agent can work with the person's own Gmail, Slack, Calendar or Asana through
-an integration provider, rather than by driving a signed-in page in Chrome. It
-searches for a tool, and if the app is not connected yet it hands the person a
-**Connect** card, waits, and then retries the call it was already making — so the
-original request finishes without anyone repeating it.
+An agent can work with the person's own email, chat, calendar or task tracker
+through an integration provider, rather than by driving a signed-in page in
+Chrome. It searches for a tool, and if the app is not connected yet it hands the
+person a **Connect** card, waits, and then retries the call it was already making
+— so the original request finishes without anyone repeating it.
 
 Off unless `COMPOSIO_API_KEY` is set on `cracked-chat`. With no key, no session is
 minted, no guest-facing port opens, and an agent's tool surface is exactly what it
 was before.
+
+### Which apps are offered
+
+Every app whose OAuth the provider runs itself — 122 of its 1505 on 2026-09-05.
+**Nothing about an app is written down here**: not the names, not the logos, not
+the blurbs, and since `composio.Toolkits` asks which apps exist, not the list
+either. A new integration appears without a deploy.
+
+That list is `composio_managed_auth_schemes` being non-empty on the provider's
+own catalogue row, and it is the right test rather than the convenient one:
+creating an auth config sends a bare toolkit, which means provider-managed auth,
+so the 82 apps offering OAuth *without* a managed scheme would need an OAuth
+application registered in our name and their Connect button could not be
+finished. **The filter is applied per row.** `auth_scheme`, `managed_by` and
+`is_local` are all accepted by that API and then ignored — each answers with all
+1505 — so a caller trusting a query parameter would offer somebody fourteen
+hundred apps they cannot sign in to.
+
+`GET /v1/apps` is paged, and searches and filters by category on the way, since a
+client holding one page could otherwise only search what it had loaded:
+
+```
+GET /v1/apps?limit=50&cursor=<opaque>&q=<text>&category=<name>
+  → {"items": [...], "nextCursor": "..."}   no cursor on the last page
+```
+
+Cached for **fifteen days**, which is less than it sounds: the cache is process
+memory, and `cracked-chat` restarts on every deploy, so in practice it is two
+requests per process. `GET /v1/apps/connections` stays whole — it is bounded by
+what one person connected, and it is the list a client needs entire to render its
+connected apps against a catalogue it holds a page of.
 
 ### Why there is a broker
 
@@ -568,8 +599,8 @@ read-only.** Everything else raises a card and blocks until somebody answers:
 unknown, newly shipped, renamed, and every action whose name says one thing and
 does another. A refusal aborts the whole batch, reads included.
 
-We keep no list of our own. Measured 2026-09-02: 910 of 910 tools across the
-featured six carry an effect hint and 398 are `readOnlyHint`, and it is right
+We keep no list of our own. Measured 2026-09-02 across the six apps offered then:
+910 of 910 tools carry an effect hint and 398 are `readOnlyHint`, and it is right
 about the names that lie — `GMAIL_SEND_DRAFT` is destructive,
 `GOOGLECALENDAR_CALENDAR_LIST_INSERT` creates despite the `LIST`,
 `SLACK_FIND_CHANNELS` genuinely reads. Fetched on the host, cached an hour, and
@@ -578,6 +609,25 @@ without rebuilding a rootfs. Absent from it means ask, so an empty set asks abou
 everything: noisy, never permissive. One entry is ours —
 `GMAIL_CREATE_PROMPT_POST` is tagged read-only and posts text to a third party,
 and MCP's own rule is that annotations are untrusted hints.
+
+**Resolved for the apps a person connected, not for the ones on offer.** The
+catalogue is a hundred and twenty-two; asking about all of them would be a
+hundred and twenty-two requests for an answer no machine could hold — the guest
+refuses a body over 256 KiB and answers 400 *before* writing the file, so an
+oversized push takes that machine's whole app session down rather than just
+losing the set. The host budgets what it sends and drops whole apps if it must,
+because absent means ask.
+
+Cached per app on an hour, deliberately not on the catalogue's fortnight: this is
+what a write gate is resolved against, so a tool the provider re-annotates from
+read to write must stop running unasked within the hour.
+
+A newly connected app reaches a machine at once rather than on that hour, from
+two places: answering a Connect card, and any Apps request whose connections
+differ from what the last push was resolved against. Only the second fires today
+— no client resolves a connect ask yet, which is the same gap that leaves an
+agent's Connect card unanswered. Both expire the claim without taking the
+machine's ticket, because an agent is usually mid-call on it at that moment.
 
 **What this does not do.** It is not an exfiltration control. A guest has
 unrestricted outbound internet by design (see the firewall notes above) and

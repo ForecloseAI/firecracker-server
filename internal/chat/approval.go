@@ -41,40 +41,72 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, user st
 	if !ok {
 		return
 	}
-	s.deliver(w, cl, r.PathValue("id"), r.PathValue("messageId"), req)
+	s.deliver(w, cl, user, r.PathValue("id"), r.PathValue("messageId"), req)
 }
 
 // deliver finds the ask, authors the body, and sends it.
 func (s *Server) deliver(w http.ResponseWriter, cl *agent.Client,
-	agentID, messageID string, req approvalReq) {
+	user, agentID, messageID string, req approvalReq) {
 	ask, ok := findAsk(cl, agentID, messageID)
 	if !ok {
 		fail(w, http.StatusNotFound, "no such ask")
 		return
 	}
-	body, ok := decisionBody(askUIOf(ask), req)
+	ui := askUIOf(ask)
+	body, ok := decisionBody(ui, req)
 	if !ok {
 		fail(w, http.StatusBadRequest, "that answer does not fit this ask")
 		return
 	}
-	forwardDecision(w, cl, ask.ApprovalID, body)
+	if forwardDecision(w, cl, ask.ApprovalID, body) {
+		s.noticeConnect(user, ui, req)
+	}
 }
 
-// forwardDecision sends the authored body and maps the guest's answer.
-func forwardDecision(w http.ResponseWriter, cl *agent.Client, apid string, body map[string]any) {
+// noticeConnect expires this machine's apps claim when somebody answers a
+// Connect card to say they have finished connecting an app.
+//
+// A push is what carries an app's actions to a machine, and it is due again only
+// when what it holds goes stale -- up to an hour. The flow this is for does not
+// touch the Apps screen at all: an agent raises a Connect card, the person signs
+// in, the agent retries. Without it an agent that just walked somebody through
+// connecting Notion would ask about every Notion read for the rest of the hour.
+//
+// It also covers a race the other trigger cannot: noticeApps compares ACTIVE
+// slugs, so a connection still INITIATED when the screen reads it looks like no
+// change at all. This expires unconditionally.
+//
+// NOT REACHED TODAY, and worth saying rather than implying otherwise: no client
+// resolves a connect ask. The mobile app's Connect card calls the connect flow
+// and drops the result, and the host's AskUI carries no app for it to render
+// from in the first place. This is the host half, correct and waiting; the
+// client half is the same gap that leaves the agent's ask_human blocked.
+func (s *Server) noticeConnect(user string, ui *AskUI, req approvalReq) {
+	if ui == nil || ui.Kind != askConnect || req.Verdict != verdictApproved {
+		return
+	}
+	// staleApps, never forgetApps: this runs while the agent is still holding the
+	// call it raised the card for, and taking its ticket away would 404 the retry.
+	s.staleApps(machineFor(user))
+}
+
+// forwardDecision sends the authored body and maps the guest's answer, saying
+// whether the agent actually received it.
+func forwardDecision(w http.ResponseWriter, cl *agent.Client, apid string, body map[string]any) bool {
 	err := cl.Resolve(apid, body)
 	if err == nil {
 		w.WriteHeader(http.StatusNoContent)
-		return
+		return true
 	}
 	// The guest 404s an interaction that is already settled -- answered on
 	// another device, timed out, or revoked by an interrupt. That is a stale
 	// card, not a wrong route, so the client is told 409 and can re-fetch.
 	if isNotFound(err) {
 		fail(w, http.StatusConflict, "already resolved")
-		return
+		return false
 	}
 	fail(w, http.StatusBadGateway, err.Error())
+	return false
 }
 
 // findAsk locates the ask a message id names, in that agent's own log.

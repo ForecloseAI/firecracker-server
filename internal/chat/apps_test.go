@@ -199,13 +199,18 @@ func TestTheActionsAreResolvedBeforeTheTicketExists(t *testing.T) {
 		gw.mu.Unlock()
 		return map[string]string{app + "_GET": composio.CapRead}, nil
 	})
+	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"id":"ca_1","status":"ACTIVE","toolkit":{"slug":"gmail"}}]}`))
+	}))
+	t.Cleanup(prov.Close)
 	s := &Server{gw: gw, kinds: kinds, appsClaims: map[string]appsClaim{},
+		composio: composio.New("k", prov.URL),
 		apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 
 	guestPort, _ := strconv.Atoi(port)
 	cl := agent.New(host, guestPort)
-	if _, err := s.pushApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: host}, cl); err != nil {
+	if _, _, err := s.pushApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: host}, cl); err != nil {
 		t.Fatalf("push failed: %v", err)
 	}
 	if ticketsWhenFetched != 0 {
@@ -228,13 +233,13 @@ func TestAMachineIsPushedAgainOnceItsSetGoesStale(t *testing.T) {
 
 	// A set that is still good keeps the machine out: re-pushing rotates its
 	// ticket, so doing it per request would 404 anything in flight for nothing.
-	s.doneApps("m1", time.Now().Add(appCapsTTL))
+	s.doneApps("m1", time.Now().Add(appCapsTTL), []string{"gmail"})
 	if s.claimApps("m1") {
 		t.Error("a machine holding a fresh set was pushed again anyway")
 	}
 
 	// Once the set it was handed is stale, it is due another push.
-	s.doneApps("m1", time.Now().Add(-time.Second))
+	s.doneApps("m1", time.Now().Add(-time.Second), []string{"gmail"})
 	if !s.claimApps("m1") {
 		t.Error("a machine holding a stale set was never pushed again, so a tool " +
 			"the provider stopped calling read-only stays read-only there until restart")
@@ -262,7 +267,7 @@ func TestAnInFlightPushStillBlocksTheNextCaller(t *testing.T) {
 }
 
 // pushingServer is a host wired to a stub guest, ready to run a real push.
-func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
+func pushingServer(t *testing.T, held string) (*Server, *agent.Client, *[]byte) {
 	t.Helper()
 	var body []byte
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -274,9 +279,16 @@ func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A provider too, because a push now asks which apps this person connected
+	// before it can resolve anything about them.
+	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(held))
+	}))
+	t.Cleanup(prov.Close)
 	kinds, _ := stubCaps(func(string) (map[string]string, error) { return nil, nil })
 	s := &Server{gw: NewAppsGateway("the-project-key", "0.0.0.0:8092"),
-		kinds: kinds, appsClaims: map[string]appsClaim{}, apps: &heldAppsStore{held: agentapi.Apps{
+		kinds: kinds, appsClaims: map[string]appsClaim{}, composio: composio.New("k", prov.URL),
+		apps: &heldAppsStore{held: agentapi.Apps{
 			SessionURL: "https://backend.composio.dev/mcp/sess_1", SessionID: "sess_1"}}}
 	guestPort, _ := strconv.Atoi(port)
 	return s, agent.New(host, guestPort), &body
@@ -292,7 +304,7 @@ func pushingServer(t *testing.T) (*Server, *agent.Client, *[]byte) {
 // unit test that only ever calls claimApps and doneApps by hand: this drives the
 // real mintApps and reads back what it recorded.
 func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) {
-	s, cl, _ := pushingServer(t)
+	s, cl, _ := pushingServer(t, `{"items":[]}`)
 	mustClaim(t, s)
 	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"}, cl)
 
@@ -311,7 +323,7 @@ func TestASuccessfulPushIsDueAgainOnItsSetsClockNotTheMintTimeout(t *testing.T) 
 // The failure path still wins over the deadline: a push that did not land leaves
 // a cooldown, never a claim dated an hour out that nothing ever retries.
 func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
-	s, _, _ := pushingServer(t)
+	s, _, _ := pushingServer(t, `{"items":[]}`)
 	// No guest to answer, so SetApps fails after the ticket is minted.
 	mustClaim(t, s)
 	s.mintApps(context.Background(), testUserID, vmView{ID: "m1", GuestIP: "127.0.0.1"},
@@ -326,5 +338,139 @@ func TestAFailedPushDoesNotRecordASetDeadline(t *testing.T) {
 	}
 	if s.claimApps("m1") {
 		t.Error("a failure was retried immediately rather than on the cooldown")
+	}
+}
+
+// THE test for a newly connected app reaching a machine.
+//
+// A push is what carries an app's actions, and it is due again only when what it
+// holds goes stale -- up to an hour. So without noticing, somebody who connects
+// Notion has an agent asking about every Notion read until then, and every read
+// is one they would never have been asked about.
+func TestAChangedSetOfConnectedAppsIsPushedAgain(t *testing.T) {
+	machine := machineFor(testUserID)
+	held := []composio.Connection{{ID: "ca_1", Toolkit: "gmail", Status: composio.StatusActive}}
+
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	mustClaimMachine(t, s, machine)
+	s.doneApps(machine, time.Now().Add(appCapsTTL), []string{"gmail"})
+
+	// The same apps is not a reason to re-push: that rotates the machine's ticket
+	// and 404s anything in flight, for an answer that did not change.
+	s.noticeApps(testUserID, held)
+	if s.claimApps(machine) {
+		t.Fatal("an unchanged set of apps was pushed again anyway")
+	}
+
+	s.doneApps(machine, time.Now().Add(appCapsTTL), []string{"gmail"})
+	s.noticeApps(testUserID, append(held,
+		composio.Connection{ID: "ca_2", Toolkit: "notion", Status: composio.StatusActive}))
+	if !s.claimApps(machine) {
+		t.Error("a newly connected app did not bring the machine due, so its reads " +
+			"ask for the rest of the hour")
+	}
+}
+
+// A half-finished connection is not a connection. Counting INITIATED would make
+// the moment it becomes ACTIVE -- the moment somebody actually finished signing
+// in -- look like no change at all, which is the one moment this must notice.
+func TestOnlyAWorkingConnectionCounts(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	mustClaimMachine(t, s, machine)
+	s.doneApps(machine, time.Now().Add(appCapsTTL), []string{})
+
+	s.noticeApps(testUserID, []composio.Connection{
+		{ID: "ca_1", Toolkit: "notion", Status: "INITIATED"}})
+	if s.claimApps(machine) {
+		t.Fatal("an abandoned attempt counted as a connected app")
+	}
+
+	s.doneApps(machine, time.Now().Add(appCapsTTL), []string{})
+	s.noticeApps(testUserID, []composio.Connection{
+		{ID: "ca_1", Toolkit: "notion", Status: composio.StatusActive}})
+	if !s.claimApps(machine) {
+		t.Error("finishing a sign-in did not bring the machine due")
+	}
+}
+
+// A claim taken but not yet reported on has no set to compare against, and
+// dropping it would start a second push while the first was still crossing the
+// internet -- the window pushApps already calls out.
+func TestAnInFlightPushIsNotDroppedByANoticedChange(t *testing.T) {
+	machine := machineFor(testUserID)
+	s := &Server{appsClaims: map[string]appsClaim{}}
+	mustClaimMachine(t, s, machine)
+	s.noticeApps(testUserID, []composio.Connection{
+		{ID: "ca_1", Toolkit: "notion", Status: composio.StatusActive}})
+	if s.claimApps(machine) {
+		t.Error("a push still in flight was released by a change it may itself be pushing")
+	}
+}
+
+// THE reason this is staleApps and not forgetApps.
+//
+// Both triggers fire while an agent is holding the call it raised the card for.
+// Dropping the machine's ticket would 404 the retry at the broker and put the
+// guest into its own cooldown -- a failure at exactly the moment this exists to
+// produce a success -- and the machine would still be due a push either way, so
+// nothing is bought by taking the route with it.
+func TestNoticingAConnectDoesNotTakeTheMachinesTicketAway(t *testing.T) {
+	machine := machineFor(testUserID)
+	gw := NewAppsGateway("the-project-key", "0.0.0.0:8092")
+	if _, err := gw.Register(machine, "172.16.0.2", "172.16.0.1",
+		"https://backend.composio.dev/mcp/sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{gw: gw, appsClaims: map[string]appsClaim{}}
+	mustClaimMachine(t, s, machine)
+	s.doneApps(machine, time.Now().Add(appCapsTTL), []string{})
+
+	s.noticeConnect(testUserID, &AskUI{Kind: askConnect}, approvalReq{Verdict: verdictApproved})
+	gw.mu.Lock()
+	routes := len(gw.routes)
+	gw.mu.Unlock()
+	if routes != 1 {
+		t.Error("the machine's ticket was dropped, so the retry the person just " +
+			"unblocked 404s at the broker")
+	}
+	if !s.claimApps(machine) {
+		t.Error("the machine was not brought due")
+	}
+}
+
+// The Apps screen is not the flow that matters. An agent raises a Connect card,
+// the person signs in and says so, and the agent retries -- nobody opens a
+// screen, so nothing else would notice.
+func TestSayingAConnectIsDoneBringsTheMachineDue(t *testing.T) {
+	machine := machineFor(testUserID)
+	for name, c := range map[string]struct {
+		ui  *AskUI
+		req approvalReq
+		due bool
+	}{
+		"a connect card they finished": {&AskUI{Kind: askConnect},
+			approvalReq{Verdict: verdictApproved}, true},
+		"a connect card they dismissed": {&AskUI{Kind: askConnect},
+			approvalReq{Verdict: verdictDenied}, false},
+		"an ordinary approval": {&AskUI{Kind: askApproval},
+			approvalReq{Verdict: verdictApproved}, false},
+		"an ask with no ui at all": {nil, approvalReq{Verdict: verdictApproved}, false},
+	} {
+		s := &Server{appsClaims: map[string]appsClaim{}}
+		mustClaimMachine(t, s, machine)
+		s.doneApps(machine, time.Now().Add(appCapsTTL), []string{})
+		s.noticeConnect(testUserID, c.ui, c.req)
+		if got := s.claimApps(machine); got != c.due {
+			t.Errorf("%s: due=%v, want %v", name, got, c.due)
+		}
+	}
+}
+
+// mustClaimMachine takes the claim on a named machine.
+func mustClaimMachine(t *testing.T, s *Server, machine string) {
+	t.Helper()
+	if !s.claimApps(machine) {
+		t.Fatal("the first caller did not get the claim")
 	}
 }

@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"cracked/internal/agent"
 	"cracked/internal/agentapi"
+	"cracked/internal/composio"
 	"cracked/internal/hostnet"
 )
 
@@ -48,50 +51,83 @@ func (s *Server) ensureApps(ctx context.Context, user string, view vmView, cl *a
 func (s *Server) mintApps(ctx context.Context, user string, view vmView, cl *agent.Client) {
 	ctx, cancel := context.WithTimeout(ctx, appsMintTimeout)
 	defer cancel()
-	until, err := s.pushApps(ctx, user, view, cl)
+	until, slugs, err := s.pushApps(ctx, user, view, cl)
 	if err != nil {
 		log.Printf("chat: connected apps unavailable for %s: %v", view.ID, err)
 		s.failApps(view.ID)
 		return
 	}
-	s.doneApps(view.ID, until)
+	s.doneApps(view.ID, until, slugs)
 }
 
 // pushApps hands this person's machine a ticket to their session, reporting how
-// long the answer it pushed is good for.
-func (s *Server) pushApps(ctx context.Context, user string, view vmView, cl *agent.Client) (time.Time, error) {
-	held, err := s.sessionFor(ctx, user)
+// long the answer it pushed is good for and which apps it was resolved against.
+func (s *Server) pushApps(ctx context.Context, user string, view vmView,
+	cl *agent.Client) (time.Time, []string, error) {
+	row, err := s.sessionFor(ctx, user)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
-	if err := validateComposioSessionURL(held.SessionURL); err != nil {
-		return time.Time{}, err
+	if err := validateComposioSessionURL(row.SessionURL); err != nil {
+		return time.Time{}, nil, err
 	}
-	// Resolved BEFORE the ticket exists, though nothing here needs it yet.
-	//
-	// On a cold cache this is a round trip to the provider, and everything
-	// between Register and SetApps widens a window that already had teeth: this
-	// runs detached, so a machine erased and recreated mid-push leaves the old
-	// goroutine holding a ticket forgetApps has already dropped. It then pushes
-	// that dead ticket over the replacement's good one -- and the replacement's
-	// claim is latched pushed, so nothing tries again and the machine has no
-	// connected apps until the host restarts. Ordering does not close that
-	// window, which is the claim's to close; it declines to widen it by a
-	// provider round trip.
-	actions, until := s.kinds.resolved(ctx, held.Policy)
-	// The guest is handed a ticket to the broker, never the session itself. The
-	// provider's endpoint needs the PROJECT api key, which is authority over
-	// every user's connected accounts, so it stays on this side of the tap.
+	conns, err := s.composio.Connections(ctx, user)
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	slugs := activeSlugs(conns)
+	// Resolved BEFORE the ticket exists. See handOver for the window that keeps
+	// every provider round trip on this side of Register.
+	actions, until := s.kinds.resolved(ctx, slugs, row.Policy)
+	if err := s.handOver(view, cl, row, actions); err != nil {
+		return time.Time{}, nil, err
+	}
+	return until, slugs, nil
+}
+
+// handOver gives the machine a ticket to the broker and the answer to obey.
+//
+// The guest is handed a ticket, never the session itself: the provider's
+// endpoint needs the PROJECT api key, which is authority over every user's
+// connected accounts, so it stays on this side of the tap.
+//
+// Everything between Register and SetApps widens a window that already had
+// teeth. This runs detached, so a machine erased and recreated mid-push leaves
+// the old goroutine holding a ticket forgetApps has already dropped; it then
+// pushes that dead ticket over the replacement's good one, and the
+// replacement's claim is latched pushed, so nothing tries again and the machine
+// has no connected apps until the host restarts. Ordering does not close that
+// window -- that is the claim's to close -- but nothing slow belongs in here.
+func (s *Server) handOver(view vmView, cl *agent.Client,
+	held agentapi.Apps, actions map[string]string) error {
 	hostIP, _, _ := hostnet.SlotAddrs(view.Slot)
 	guestURL, err := s.gw.Register(view.ID, view.GuestIP, hostIP, held.SessionURL)
 	if err != nil {
-		return time.Time{}, err
+		return err
 	}
-	if err := cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
-		Actions: actions}); err != nil {
-		return time.Time{}, err
+	return cl.SetApps(agentapi.Apps{SessionURL: guestURL, SessionID: held.SessionID,
+		Actions: actions})
+}
+
+// activeSlugs is the distinct apps a person has a WORKING account with, sorted
+// so two readings of an unchanged set compare equal. Lowercased because
+// connectionFor already treats the provider's spelling as case-insensitive.
+//
+// ACTIVE only, and that carries two jobs. Resolving an app whose grant has
+// lapsed would spend a provider call on actions that cannot run; and because
+// this same set is what noticeApps compares, counting a half-finished
+// connection would make INITIATED-becomes-ACTIVE look like no change at all --
+// so the moment somebody finishes signing in would be the one moment nothing
+// noticed.
+func activeSlugs(held []composio.Connection) []string {
+	out := make([]string, 0, len(held))
+	for _, conn := range held {
+		if conn.Status == composio.StatusActive {
+			out = append(out, strings.ToLower(conn.Toolkit))
+		}
 	}
-	return until, nil
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // validateComposioSessionURL is the boundary between caller-writable storage
@@ -133,6 +169,16 @@ func (s *Server) sessionFor(ctx context.Context, user string) (agentapi.Apps, er
 // appsClaim is what this process has done about one machine's session.
 type appsClaim struct {
 	pushed bool
+	// slugs is the connected apps the pushed answer was resolved against,
+	// sorted. A set that differs from what this person holds now is a push
+	// already out of date, which is how a newly connected app reaches a machine
+	// in a screen refresh rather than in an hour.
+	//
+	// Nil while a push is IN FLIGHT, which is what settled() reads: a claim is
+	// taken before the work, so between claimApps and doneApps there is nothing
+	// to compare against, and expiring it there would start a second push while
+	// the first was still crossing the internet.
+	slugs []string
 	// expires is when a pushed claim stops counting, which is the deadline of
 	// the answer that push handed over.
 	//
@@ -144,6 +190,14 @@ type appsClaim struct {
 	expires time.Time
 	failed  time.Time
 }
+
+// settled reports whether this claim holds an answer that actually landed.
+//
+// pushed alone is not that question: claimApps takes the claim BEFORE the work
+// with pushed already true, so the two states are told apart by whether there
+// are slugs beside it. One spelling, because three call sites asking it
+// differently is how one of them ends up expiring a push still in flight.
+func (c appsClaim) settled() bool { return c.pushed && c.slugs != nil }
 
 // appsClaimCap bounds the table, for the reason appsRouteCap does: a service
 // running for weeks must not keep an entry per machine it has ever served.
@@ -178,13 +232,14 @@ func (s *Server) claimApps(machine string) bool {
 	return true
 }
 
-// doneApps records a push that landed, due again when its set goes stale.
+// doneApps records a push that landed, due again when its set goes stale or when
+// the apps it was resolved against change.
 //
 // The re-push goes through pushApps like the first one, which mints a fresh
 // ticket and drops the old. That rotation is why this is not on a timer: it
 // happens on the next request to reach the machine, so a machine nobody is using
 // is not re-ticketed on a schedule for a set nobody is reading.
-func (s *Server) doneApps(machine string, until time.Time) {
+func (s *Server) doneApps(machine string, until time.Time, slugs []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Usually an overwrite of this machine's own in-flight claim, but not always:
@@ -192,7 +247,52 @@ func (s *Server) doneApps(machine string, until time.Time) {
 	// the internet, and re-adding it unchecked is how the table creeps past its
 	// cap one long push at a time.
 	evictTo(s.appsClaims, appsClaimCap)
-	s.appsClaims[machine] = appsClaim{pushed: true, expires: until}
+	s.appsClaims[machine] = appsClaim{pushed: true, expires: until, slugs: slugs}
+}
+
+// noticeApps drops a machine's claim when this person's connected apps are no
+// longer the set its last push was resolved against.
+//
+// Cheap enough to sit on a list route: the caller already has these connections
+// in hand, so this costs a comparison rather than a request. It is one of two
+// triggers -- see noticeConnect in approval.go, because the flow that matters
+// most does not involve the Apps screen at all.
+func (s *Server) noticeApps(user string, held []composio.Connection) {
+	now := activeSlugs(held)
+	machine := machineFor(user)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if claim := s.appsClaims[machine]; claim.settled() && !slices.Equal(claim.slugs, now) {
+		s.staleLocked(machine, claim)
+	}
+}
+
+// staleApps marks a machine's answer out of date WITHOUT taking its ticket away.
+//
+// The route is the whole difference from forgetApps, and it decides whether this
+// helps or hurts: both callers fire while an agent is mid-call. Somebody
+// answering a Connect card is answering an agent that is about to retry the very
+// call it was blocked on, and dropping the ticket first makes that retry 404 at
+// the broker and the guest sit out its own cooldown -- a failure at exactly the
+// moment this exists to produce a success.
+//
+// Zeroing the deadline is enough. claimApps treats a pushed claim past its
+// expiry as available, and the re-push registers a fresh ticket over the old one
+// anyway. forgetApps stays for the machine-lifetime cases -- created and erased
+// -- where there is no live ticket worth keeping.
+func (s *Server) staleApps(machine string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if claim := s.appsClaims[machine]; claim.settled() {
+		s.staleLocked(machine, claim)
+	}
+}
+
+// staleLocked expires one claim. The caller holds s.mu, which is what lets
+// noticeApps decide and act without dropping the lock in between.
+func (s *Server) staleLocked(machine string, claim appsClaim) {
+	claim.expires = time.Time{}
+	s.appsClaims[machine] = claim
 }
 
 // evictTo keeps one of this package's bounded tables under its cap. The caller
@@ -223,9 +323,13 @@ func (s *Server) failApps(machine string) {
 	}
 }
 
-// forgetApps drops that record, so the next request pushes again. Called when a
-// machine is created or erased, both of which leave it holding nothing -- and so
-// it clears the cooldown as well, which is the difference from failApps.
+// forgetApps drops that record, so the next request pushes again. Called ONLY
+// when a machine is created or erased, both of which leave it holding nothing --
+// and so it clears the cooldown as well, which is the difference from failApps.
+//
+// Anything that merely changes the ANSWER a live machine holds wants staleApps
+// instead: this takes the ticket with it, and a machine that still exists may be
+// mid-call on it.
 func (s *Server) forgetApps(machine string) {
 	s.mu.Lock()
 	delete(s.appsClaims, machine)

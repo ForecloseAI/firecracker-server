@@ -24,7 +24,7 @@ type Server struct {
 	// off without a flag.
 	composio *composio.Client
 	apps     AppsStore
-	// catalog is the featured apps' copy, shared by every person on the fleet.
+	// catalog is the provider's list of apps, shared by every person on the fleet.
 	catalog *appCatalog
 	// kinds is what kind of thing each connected-app action is, shared the same
 	// way. It is what a person's policy is resolved against. Not `caps`, which
